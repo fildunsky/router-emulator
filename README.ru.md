@@ -1,4 +1,4 @@
-# Router Emulator (MediaTek MT7981B / Filogic 820, MT7986 / Filogic 830, MT7987)
+# Router Emulator (MediaTek MT7981B / Filogic 820, MT7986 / Filogic 830, MT7987 / Filogic 850)
 
 [English](README.md) · **Русский** · Сборка: [Linux](README.build.linux.ru.md) · [Windows](README.build.windows.ru.md)
 
@@ -23,7 +23,7 @@ BootROM (эмулирован) → BL2 (preloader MediaTek, калибровка
 `mt7986-router` (ключ пресета `soc=mt7986`): те же периферийные блоки,
 четыре ядра, BL2 для MT7986 со своей калибровкой DRAM и определением её
 размера, см. [MT7986](#mt7986-filogic-830); платы на MT7987A/B — на
-`mt7987-router` (`soc=mt7987`, см. [MT7987](#mt7987)).
+`mt7987-router` (`soc=mt7987`, см. [MT7987](#mt7987-filogic-850)).
 
 ## Быстрый старт
 
@@ -50,7 +50,7 @@ Windows: скачайте zip из релиза (или соберите сам�
 
 | Параметр | Значения | Смысл |
 |---|---|---|
-| `gmac0` | `mt7531` · `rtl8221b` · `yt8821` · `gpy211` · `none` | что подключено к GMAC0 (mac@0, SGMII0) |
+| `gmac0` | `mt7531` · `an8855` · `rtl8221b` · `yt8821` · `gpy211` · `none` | что подключено к GMAC0 (mac@0, SGMII0); `an8855` — коммутатор Airoha AN8855 на MDIO 1 (CPU-порт 5, например Routerich BE7200) |
 | `ports` | например `wan:lan1:lan2:lan3:lan4` | id netdev портов 0..4 MT7531 и порта 5 при `port5=` (`-` — не используется) |
 | `port5`, `port5-phy-addr`, `port5-reset-gpio` | `rtl8221b` · `yt8821` · `gpy211` · `none`; адрес MDIO (5); GPIO | 2.5G PHY на порту 5 MT7531 (SGMII), например Netcore N60 Pro; его netdev — шестой элемент `ports` |
 | `gmac0-port`, `gmac1-port` | id netdev | порт PHY, подключённого прямо к GMAC |
@@ -58,7 +58,7 @@ Windows: скачайте zip из релиза (или соберите сам�
 | `gmac0-reset-gpio`, `gmac1-reset-gpio` | GPIO, `-1` (по умолчанию) | линия аппаратного сброса 2.5G PHY; по умолчанию не подключена (отсутствие линии безвредно, неверная могла бы держать PHY в сбросе) |
 | `gmac0-phy-addr`, `gmac1-phy-addr` | адрес MDIO | адрес этого PHY (по умолчанию 1 на gmac0, 6 на gmac1) |
 | `flash` | `nand` · `nor` · `emmc` | загрузочный флеш: SPI-NAND на SPI0 (по умолчанию), SPI-NOR на SPI2 (MT7986: SPI0) или eMMC (см. ниже) |
-| `nand` | `128` · `256` | SPI-NAND W25N01GV / W25N02KV |
+| `nand` | `128` · `256` · `512` | SPI-NAND W25N01GV / W25N02KV / W25N04KV |
 | `nand-spi` | `0` (по умолчанию) · `1` · `2` | контроллер SPI, на котором SPI-NAND (BPI-R4 Lite: 2) |
 | `switch-irq-gpio` | GPIO | EINT прерывания MT7531 (по умолчанию 38 / 66 / 41 для MT7981 / MT7986 / MT7987) |
 | `flash=emmc`, `emmc-boot` | МБ (4) | вместо этого eMMC на MSDC0: один образ (первый `*.img` в папке флеша или `-drive if=sd`) = boot0 + boot1 (по `emmc-boot` МБ) + пользовательская область, размер — степень двойки |
@@ -136,6 +136,9 @@ device tree OpenWrt (`--write --all`).
 | Bananapi BPi-R4 Lite (MT7987A) | 2.5G WAN внутренний PHY + 4×1G MT7531 (SFP не эмулируется); карта Wi-Fi 7 MT7992 на PCIe — для Wi-Fi поставьте `kmod-mt7996e kmod-mt7992-firmware` | DDR4 2 ГБ | 256 МБ на SPI2, FIP в UBI | 3.0 | OpenWrt |
 | GL.iNet GL-MT6000 (MT7986A) | 2.5G WAN RTL8221B + 2.5G LAN RTL8221B на порту 5 коммутатора + 4×1G MT7531 | DDR4 1 ГБ | **eMMC** | 3.0 | OpenWrt |
 | Huasifei WH3000 Pro eMMC | 2.5G LAN RTL8221B + 1G WAN на встроенном PHY, без коммутатора | DDR4 1 ГБ | **eMMC**, разметка производителя | 3.0 | OpenWrt (сборка для RAX3000M eMMC DDR4) |
+| Routerich AX3000 | 3×1G LAN + WAN MT7531 (WAN = порт 4) | DDR3 256 МБ | 128 МБ, без bdinfo | 2.0 | OpenWrt (ubootmod) |
+| Routerich AX3000 v1 | 1G WAN на встроенном PHY + 3×1G LAN MT7531 | DDR3 256 МБ | 128 МБ, без bdinfo | 2.0 | производителя (нужны свои дампы) |
+| Routerich BE7200 (MT7987A) | 2.5G WAN внутренний PHY + 3×1G LAN **Airoha AN8855**; Wi-Fi 7 MT7992 по PCIe | DDR4 1 ГБ | **512 МБ** (W25N04KV) | 3.0 | OpenWrt |
 
 У плат Netis нет раздела bdinfo (FIP с 0x380000, ubi с 0x580000; MAC — в
 Factory): в пресетах стоит `openwrt-no-bdinfo=1`. У плат на MT7986 та же
@@ -163,7 +166,7 @@ tools/prepare-nand.sh --soc mt7986 --no-bdinfo netcore_n60-pro 25.12.5 nand-n60-
 ./emulator.sh -P netcore-n60-pro
 ```
 
-## MT7987
+## MT7987 (Filogic 850)
 
 `mt7987-router`: UART по 0x11000000, SPI0..2 по 0x11007800 / 0x11008800 /
 0x11009800, TOP_MISC по 0x10021000, eFuse по 0x11d30000, frame engine
@@ -233,11 +236,11 @@ tools/prepare-nand.sh --emmc --emmc-layout wh3000-pro --uboot cmcc_rax3000m-emmc
 | TOPRGU | `mt7981_toprgu.c` | watchdog с реальным таймаутом, программный сброс (reboot), статус сброса сохраняется |
 | UART ×3 | 16550 из QEMU + регистры MTK | |
 | SPI (IPM) | `mt7981_spim.c` | FIFO + DMA, полудуплексный режим spi-mem (TF-A/U-Boot/Linux) |
-| SPI-NAND | `spinand.c` | W25N01GV (2048+64) / W25N02KV (2048+128), on-die ECC, ONFI parameter page, страница уникального ID; хранилище — папка с дампами разделов (см. ниже) или один raw-образ с OOB |
+| SPI-NAND | `spinand.c` | W25N01GV (2048+64) / W25N02KV (2048+128) / W25N04KV (512 МБ, 2048+128, две плоскости), on-die ECC, ONFI parameter page, страница уникального ID; хранилище — папка с дампами разделов (см. ниже) или один raw-образ с OOB |
 | eMMC | `mt7981_msdc.c` + eMMC из QEMU | контроллер MSDC: команды, авто CMD23/CMD12, PIO через FIFO (TF-A, U-Boot), DMA по дескрипторам GPD/BD (Linux); карта с boot0/boot1 и пользовательской областью; BootROM загружает образы `EMMC_BOOT` из boot0 |
 | SPI-NOR | `spinor.c` | 3-байтовая адресация (до 16 МБ), задаваемый JEDEC ID, чтение 1-1-1/1-1-2/1-1-4/1-2-2/1-4-4, запись страниц, стирание 4K/32K/64K/всего чипа, регистры статуса с QE; BootROM загружает с него образы `SF_BOOT`; хранилище — такая же папка |
 | Ethernet | `mt7981_eth.c` | frame engine: QDMA TX (Linux), PDMA RX, PDMA v2 (U-Boot); TSO и offload контрольных сумм; 2× LynxI SGMII PCS; любая комбинация коммутатора и PHY на двух GMAC |
-| Коммутатор | `mt7981_eth.c` | MT7531: страничный доступ по MDIO, косвенный доступ к PHY, special tag MTK (DSA), FDB с обучением, port matrix, IRQ линка → EINT 38 |
+| Коммутатор | `mt7981_eth.c` | MT7531: страничный доступ по MDIO, косвенный доступ к PHY, special tag MTK (DSA), FDB с обучением, port matrix, IRQ линка → EINT 38. Airoha AN8855: 32-битная шина регистров через страницу 4 MDIO, внутренние PHY на MDIO 1..5, регистры транслируются в модель MT7531 (CPU-порт 5) |
 | PHY | `mt7981_eth.c` | 5× GPHY MT7531; RTL8221B-VB-CG (C45, термодатчик); Motorcomm YT8821 (расширенные регистры, пространства UTP/SerDes, статус 2.5G); MaxLinear GPY211C (C45, версия прошивки, mailbox, термодатчик); встроенный GbE PHY MT7981 (с калибровкой); PHY на порту 5 MT7531; необязательные GPIO аппаратного сброса |
 | GPIO / EINT | `mt7981_pinctrl.c` | кнопки (reset/WPS, `reset-hold-ms` для нажатия на время), лог светодиодов, уровни выводов для других устройств |
 | Светодиоды | `mt7981_leds.c`, `ws2812b.c` | светодиоды передней панели из пресета: GPIO, регистры LED у PHY (RTL8221B, GPY211), WS2812B на SPI, каналы PWM; распознавание мигания; `led-state` |

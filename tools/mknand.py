@@ -102,10 +102,11 @@ def set_prefix(prefix):
 
 
 def set_flash_mb(mb):
-    """Switch geometry to a 128 MiB (1024 blocks) or 256 MiB (2048) flash."""
+    """Switch geometry to a 128 MiB (1024 blocks), 256 MiB (2048) or
+    512 MiB (4096) flash."""
     global BLOCKS, TOTAL, RAW_TOTAL, OOB, RAW_PAGE
     BLOCKS = mb * 1024 * 1024 // BLOCK
-    OOB = 128 if mb == 256 else 64          # W25N02KV: 128 byte OOB
+    OOB = 128 if mb >= 256 else 64          # W25N02KV / W25N04KV: 128 byte OOB
     RAW_PAGE = PAGE + OOB
     TOTAL = PAGE * PPB * BLOCKS
     RAW_TOTAL = RAW_PAGE * PPB * BLOCKS
@@ -424,8 +425,8 @@ def main():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--no-bdinfo", action="store_true",
                    help="layout without bdinfo: FIP at 0x380000, ubi at 0x580000")
-    p.add_argument("--flash-mb", type=int, choices=(128, 256), default=128,
-                   help="flash size in MB (256 for W25N02KV)")
+    p.add_argument("--flash-mb", type=int, choices=(128, 256, 512), default=128,
+                   help="flash size in MB (256 for W25N02KV, 512 for W25N04KV)")
     p.add_argument("--parts", help="own layout, e.g. BL2:0x100000,"
                    "backup:0x80000,Factory:0x400000,bdinfo:0x40000,"
                    "FIP:0x200000,ubi:- (applied after --flash-mb)")

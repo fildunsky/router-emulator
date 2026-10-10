@@ -1,0 +1,420 @@
+From 93dc6f80f821cebc1f0f68c5b028877d53d05c26 Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Sat, 10 Oct 2026 15:47:44 -0400
+Subject: [PATCH 24/24] hw/arm/mt7981: Airoha AN8855 switch, 512 MiB SPI-NAND
+ (Routerich BE7200)
+
+gmac0=an8855: the Airoha AN8855 5-port gigabit switch at MDIO address 1,
+as on the Routerich BE7200 (MT7987A).  Page 4 of its MDIO address is the
+32-bit register bus (PBUS: 0x11/0x12 write address, 0x13/0x14 write
+data, 0x15/0x16 read address, 0x17/0x18 read data); the other pages and
+addresses 1..5 reach the internal PHYs (ID c0ff:0410).  Its registers are
+translated into the MT7531 model the forwarding uses (CPU port 5 instead
+of 6, PCR / port matrix / PVC / PVID, VLAN table via VTCR/VAWD0/VARD0,
+address table commands, PMSR link status, CREV 0x8855, HWTRAP, soft
+reset), so the MTK special tag, VLANs and learning work as on the MT7531.
+OpenWrt's U-Boot ("Net: Airoha AN8855") and Linux (an8855 DSA driver,
+air_an8855 PHYs) bring the LAN ports up.
+
+nand=512: Winbond W25N04KV (ID ef aa 23), 4096 blocks, 2048 + 128 byte
+pages, two planes (the plane select bit of the column address is
+ignored).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015RfXBtBMqiJKuedv8fLHqT
+---
+ hw/arm/mt7981/mt7981_eth.c    | 193 +++++++++++++++++++++++++++++++++-
+ hw/arm/mt7981/mt7981_router.c |  52 +++++----
+ hw/arm/mt7981/spinand.c       |   3 +-
+ 3 files changed, 225 insertions(+), 23 deletions(-)
+
+diff --git a/hw/arm/mt7981/mt7981_eth.c b/hw/arm/mt7981/mt7981_eth.c
+index d5f1d86..80bccb5 100644
+--- a/hw/arm/mt7981/mt7981_eth.c
++++ b/hw/arm/mt7981/mt7981_eth.c
+@@ -95,6 +95,7 @@ enum {
+     PHY_YT8821,         /* Motorcomm YT8821 2.5G */
+     PHY_GPY211,         /* MaxLinear GPY211C 2.5G */
+     PHY_I2P5GE,         /* MT7987 internal 2.5G PHY */
++    PHY_AN8855,         /* Airoha AN8855 internal gigabit PHY */
+ };
+ 
+ /* eth model PHY type numbers (properties) -> PHY_* */
+@@ -179,7 +180,10 @@ struct MT7981EthState {
+     uint32_t dphy_type[2];
+     uint32_t dphy_addr[2];
+     uint32_t switch_addr;
+-    bool has_switch;            /* MT7531 on GMAC0 */
++    bool has_switch;            /* a switch on GMAC0 */
++    uint32_t switch_model;      /* 0 = MediaTek MT7531, 1 = Airoha AN8855 */
++    /* AN8855 32-bit register access through MDIO page 4 ("PBUS") */
++    uint32_t an_wr_addr, an_wr_hi, an_rd_addr, an_rd_val;
+     uint32_t pdma2_base;        /* PDMA with 32-byte descriptors */
+ 
+     /* PHY on MT7531 port 5 (PHY_NONE: not present), on the FE MDIO bus */
+@@ -243,6 +247,9 @@ static void phy_init(EthPhy *p, int type, bool link)
+     if (type == PHY_MT7531) {
+         p->c22[MII_PHYID1] = 0x03a2;
+         p->c22[MII_PHYID2] = 0x9441;
++    } else if (type == PHY_AN8855) {
++        p->c22[MII_PHYID1] = 0xc0ff;
++        p->c22[MII_PHYID2] = 0x0410;
+     } else if (type == PHY_MT7981) {
+         p->c22[MII_PHYID1] = 0x03a2;
+         p->c22[MII_PHYID2] = 0x9461;
+@@ -764,6 +771,181 @@ static void sw_mdio_write(MT7981EthState *s, int reg, uint16_t val)
+     }
+ }
+ 
++/* ------------------------------------------------------------------ */
++/* Airoha AN8855 switch                                               */
++
++/*
++ * The AN8855 is modelled on top of the MT7531 one: its port, VLAN and
++ * address table registers are translated into the MT7531 register file
++ * that the forwarding code reads.  Its CPU port is 5 (MT7531: 6); user
++ * ports 0..4 are the internal PHYs at MDIO addresses switch-addr + 0..4.
++ * Registers without a function here are plain storage at their own
++ * (0x10xxxxxx) addresses, so they cannot collide with the MT7531 ones.
++ */
++#define AN_CREV         0x10005000
++#define AN_RST_CTRL     0x100050c0
++#define AN_HWTRAP       0x1000009c
++#define AN_PKG_SEL      0x10000094
++#define AN_ATC          0x10200300
++#define AN_VTCR         0x10200600
++#define AN_VAWD0        0x10200604
++#define AN_VARD0        0x10200618
++#define AN_PORT(a)      (((a) - 0x10208000) / 0x200)
++#define AN_PMSR(p)      (0x10210010 + (p) * 0x200)
++
++/* AN8855 port number <-> port of the MT7531 model (CPU 5 <-> 6) */
++static int an_port(int p)
++{
++    return p == 5 ? SW_CPU_PORT : p;
++}
++
++static uint32_t an_mask_to_sw(uint32_t m)
++{
++    return (m & 0x1f) | ((m & BIT(5)) ? BIT(SW_CPU_PORT) : 0);
++}
++
++static void an_reset(MT7981EthState *s)
++{
++    g_hash_table_remove_all(s->sw);
++    memset(s->fdb, 0, sizeof(s->fdb));
++}
++
++static uint32_t an_reg_read(MT7981EthState *s, uint32_t a)
++{
++    a &= ~3u;
++    switch (a) {
++    case AN_CREV:
++        return 0x8855;
++    case AN_HWTRAP:             /* nonzero: the switch has initialised */
++        return ht_get(s->sw, a, 0x1);
++    case AN_PKG_SEL:            /* AN8855H */
++        return ht_get(s->sw, a, 0x2);
++    case AN_RST_CTRL:
++        return ht_get(s->sw, a, 0) & ~BIT(31);
++    case AN_ATC:                /* done; searches find nothing (HIT 0) */
++        return ht_get(s->sw, a, 0) & ~(BIT(31) | (0xf << 12));
++    case AN_VTCR:
++        return ht_get(s->sw, a, 0) & ~BIT(31);
++    }
++    if (a >= 0x10210000 && a < 0x10210000 + 6 * 0x200 &&
++        (a & 0x1ff) == 0x10) {
++        /* PMSR: link, full duplex, 1000M (user ports) / 2500M (CPU) */
++        int p = (a - 0x10210000) / 0x200;
++        bool lnk = p == 5 || (p < SW_NPHY && s->gphy[p].link);
++        return lnk ? (BIT(24) | BIT(25) | ((p == 5 ? 3u : 2u) << 28) |
++                      BIT(4) | BIT(5)) : 0;
++    }
++    return ht_get(s->sw, a, 0);
++}
++
++static void an_reg_write(MT7981EthState *s, uint32_t a, uint32_t v)
++{
++    a &= ~3u;
++    if (a == AN_RST_CTRL && (v & BIT(31))) {
++        an_reset(s);            /* switch soft reset, self clearing */
++        return;
++    }
++    ht_set(s->sw, a, v);
++    if (a >= 0x10208000 && a < 0x10208000 + 6 * 0x200) {
++        int p = an_port(AN_PORT(a));
++        uint32_t pcr = ht_get(s->sw, SW_PCR(p), 0x00ff0000);
++        switch (a & 0x1ff) {
++        case 0x04:              /* PCR: [1:0] port VLAN mode */
++            ht_set(s->sw, SW_PCR(p), (pcr & ~3u) | (v & 3));
++            break;
++        case 0x10:              /* PVC: [5] special tag */
++            ht_set(s->sw, SW_PVC(p), v);
++            break;
++        case 0x44:              /* PORTMATRIX */
++            ht_set(s->sw, SW_PCR(p), (pcr & ~0x00ff0000u) |
++                   an_mask_to_sw(v & 0x3f) << 16);
++            break;
++        case 0x48:              /* PVID */
++            ht_set(s->sw, SW_PPBV1(p), v & 0xfff);
++            break;
++        }
++        return;
++    }
++    switch (a) {
++    case AN_ATC:
++        if ((v & BIT(31)) && (v & 7) == 2) {    /* flush */
++            memset(s->fdb, 0, sizeof(s->fdb));
++        }
++        break;
++    case AN_VTCR:
++        if (v & BIT(31)) {
++            uint32_t vid = v & 0xfff, func = (v >> 12) & 0xf;
++            if (func == 1) {            /* write VAWD0 into the table */
++                uint32_t w = ht_get(s->sw, AN_VAWD0, 0), etag = 0;
++                for (int p = 0; p < 6; p++) {
++                    etag |= ((w >> (12 + 2 * p)) & 3) << (2 * an_port(p));
++                }
++                ht_set(s->sw, 0x100000 | vid,
++                       an_mask_to_sw(w >> 26) << 16 | (w & 1) |
++                       ((w & BIT(10)) ? VAWD1_VTAG_EN : 0));
++                ht_set(s->sw, 0x200000 | vid, etag);
++                ht_set(s->sw, 0x300000 | vid, w);   /* as written */
++            } else if (func == 0) {     /* read into VARD0 */
++                ht_set(s->sw, AN_VARD0, ht_get(s->sw, 0x300000 | vid, 0));
++            }
++        }
++        break;
++    }
++}
++
++/*
++ * MDIO on the AN8855 addresses: page 4 (register 0x1f) on switch-addr
++ * selects the 32-bit "PBUS" (0x10 mode, 0x11/0x12 write address,
++ * 0x13/0x14 write data, 0x15/0x16 read address, 0x17/0x18 read data);
++ * any other page there, and the other addresses, reach the PHYs.
++ */
++static bool an_mdio(MT7981EthState *s, int addr, int reg, bool wr,
++                    uint16_t *val)
++{
++    int i = (addr - (int)s->switch_addr) & 0x1f;
++    EthPhy *p;
++
++    if (s->switch_model != 1 || !s->has_switch || i >= SW_NPHY) {
++        return false;
++    }
++    p = &s->gphy[i];
++    if (i == 0 && p->page == 4 && reg != 0x1f) {
++        switch (reg) {
++        case 0x11: if (wr) s->an_wr_addr = (s->an_wr_addr & 0xffff) | *val << 16; break;
++        case 0x12: if (wr) s->an_wr_addr = (s->an_wr_addr & ~0xffffu) | *val; break;
++        case 0x13: if (wr) s->an_wr_hi = *val; break;
++        case 0x14:              /* low data half: the write happens */
++            if (wr) {
++                an_reg_write(s, s->an_wr_addr, s->an_wr_hi << 16 | *val);
++            }
++            break;
++        case 0x15:
++            if (wr) {
++                s->an_rd_addr = (s->an_rd_addr & 0xffff) | (uint32_t)*val << 16;
++            }
++            break;
++        case 0x16:              /* read address complete: read now */
++            if (wr) {
++                s->an_rd_addr = (s->an_rd_addr & ~0xffffu) | *val;
++                s->an_rd_val = an_reg_read(s, s->an_rd_addr);
++            }
++            break;
++        case 0x17: if (!wr) *val = s->an_rd_val >> 16; break;
++        case 0x18: if (!wr) *val = s->an_rd_val & 0xffff; break;
++        default:
++            if (!wr) *val = 0;
++            break;
++        }
++        return true;
++    }
++    if (wr) {
++        phy_c22_write(p, reg, *val);
++    } else {
++        *val = phy_c22_read(p, reg);
++    }
++    return true;
++}
++
+ /*
+  * MDIO command engine shared by the FE PHY_IAC register and the MT7531
+  * PHY_IAC register (same layout).  Returns the updated register value.
+@@ -875,7 +1057,9 @@ static uint32_t mdio_iac(MT7981EthState *s, uint32_t v, bool sw_internal)
+     EthPhy *p = mdio_find_phy(s, addr, sw_internal);
+     uint16_t ret = 0xffff;
+ 
+-    if (st == 1) {                          /* clause 22 */
++    if (st == 1 && !sw_internal && an_mdio(s, addr, reg, cmd == 1, &data)) {
++        ret = data;                         /* AN8855 */
++    } else if (st == 1) {                   /* clause 22 */
+         if (!sw_internal && s->has_switch && addr == s->switch_addr) {
+             if (cmd == 1) {
+                 sw_mdio_write(s, reg, data);
+@@ -1798,7 +1982,8 @@ static void eth_reset(DeviceState *dev)
+     memset(s->fdb, 0, sizeof(s->fdb));
+     s->sw_page = 0;
+     for (int i = 0; i < SW_NPHY; i++) {
+-        phy_init(&s->gphy[i], PHY_MT7531, port_link(s, i));
++        phy_init(&s->gphy[i], s->switch_model ? PHY_AN8855 : PHY_MT7531,
++                 port_link(s, i));
+     }
+     for (int g = 0; g < 2; g++) {
+         phy_init(&s->dphy[g], phy_type(s->dphy_type[g]), port_link(s, 5 + g));
+@@ -1881,6 +2066,8 @@ static const Property eth_props[] = {
+     DEFINE_PROP_UINT32("gmac0-phy-addr", MT7981EthState, dphy_addr[0], 1),
+     DEFINE_PROP_UINT32("gmac1-phy-addr", MT7981EthState, dphy_addr[1], 6),
+     DEFINE_PROP_UINT32("switch-addr", MT7981EthState, switch_addr, 31),
++    /* 0 = MediaTek MT7531, 1 = Airoha AN8855 (CPU port 5, PBUS access) */
++    DEFINE_PROP_UINT32("switch-model", MT7981EthState, switch_model, 0),
+     DEFINE_PROP_UINT32("pdma2-base", MT7981EthState, pdma2_base, 0x6000),
+     DEFINE_PROP_UINT32("port5-phy", MT7981EthState, p5phy_type, 0),
+     DEFINE_PROP_UINT32("port5-phy-addr", MT7981EthState, p5phy_addr, 5),
+diff --git a/hw/arm/mt7981/mt7981_router.c b/hw/arm/mt7981/mt7981_router.c
+index d8e7a80..5f5aefb 100644
+--- a/hw/arm/mt7981/mt7981_router.c
++++ b/hw/arm/mt7981/mt7981_router.c
+@@ -50,15 +50,21 @@
+ 
+ /* what is attached to a GMAC */
+ enum { GMAC_NONE, GMAC_RTL8221B, GMAC_GPHY, GMAC_MT7531, GMAC_YT8821,
+-       GMAC_GPY211, GMAC_I2P5GE };
++       GMAC_GPY211, GMAC_I2P5GE, GMAC_AN8855 };
+ 
+ static const char *const gmac_names[] = {
+     [GMAC_NONE] = "none", [GMAC_RTL8221B] = "rtl8221b",
+     [GMAC_GPHY] = "gphy", [GMAC_MT7531] = "mt7531",
+     [GMAC_YT8821] = "yt8821", [GMAC_GPY211] = "gpy211",
+-    [GMAC_I2P5GE] = "i2p5ge",
++    [GMAC_I2P5GE] = "i2p5ge", [GMAC_AN8855] = "an8855",
+ };
+ 
++/* a switch (MT7531 or Airoha AN8855) on GMAC0 */
++static bool gmac_switch(int gmac)
++{
++    return gmac == GMAC_MT7531 || gmac == GMAC_AN8855;
++}
++
+ /* the eth model's gmacN-phy value for a GMAC_* PHY, 0 = no PHY */
+ static uint32_t gmac_phy_type(int gmac)
+ {
+@@ -219,7 +225,7 @@ struct RouterState {
+     int32_t gmac_reset_gpio[2]; /* 2.5G PHY hardware reset, -1 = none */
+     int32_t gmac_phy_addr[2];   /* MDIO address of that PHY, -1 = default */
+     char *ports;                /* MT7531 port 0..4 netdev ids, ':' separated */
+-    uint32_t nand_mb;           /* 128 (W25N01GV) or 256 (W25N02KV) */
++    uint32_t nand_mb;           /* 128 (W25N01GV), 256 (W25N02KV), 512 (W25N04KV) */
+     uint32_t nand_spi;          /* SPI controller of the SPI-NAND (0) */
+     int32_t switch_irq_pin;     /* EINT of the MT7531 interrupt, -1 = SoC's */
+     bool flash_nor;             /* boot flash: SPI-NOR on SPI2 */
+@@ -726,8 +732,9 @@ static void create_eth(RouterState *b, DeviceState *pinctrl)
+     g_auto(GStrv) ports = g_strsplit(b->ports ? b->ports : "", ":", 0);
+     NetClientState *nc;
+ 
+-    if (b->gmac[1] == GMAC_MT7531) {
+-        error_report("gmac1=mt7531: the MT7531 switch can only be on gmac0");
++    if (gmac_switch(b->gmac[1])) {
++        error_report("gmac1=%s: a switch can only be on gmac0",
++                     gmac_names[b->gmac[1]]);
+         exit(1);
+     }
+     if (b->gmac[0] == GMAC_GPHY) {
+@@ -747,15 +754,20 @@ static void create_eth(RouterState *b, DeviceState *pinctrl)
+                      b->soc->name);
+         exit(1);
+     }
+-    qdev_prop_set_bit(dev, "switch", b->gmac[0] == GMAC_MT7531);
++    qdev_prop_set_bit(dev, "switch", gmac_switch(b->gmac[0]));
++    if (b->gmac[0] == GMAC_AN8855) {
++        /* Airoha AN8855: MDIO address 1, CPU port 5, PHYs at 1..5 */
++        qdev_prop_set_uint32(dev, "switch-model", 1);
++        qdev_prop_set_uint32(dev, "switch-addr", 1);
++    }
+     if (b->port5 != GMAC_NONE &&
+         (!gmac_ext_phy(b->port5) || b->gmac[0] != GMAC_MT7531)) {
+         error_report("port5 must be a 2.5G PHY (rtl8221b, yt8821, gpy211) "
+                      "on the MT7531 (gmac0=mt7531)");
+         exit(1);
+     }
+-    if (b->gmac[0] == GMAC_MT7531) {
+-        /* MT7531 user ports 0..4 (5), labelled like in the firmware's DT */
++    if (gmac_switch(b->gmac[0])) {
++        /* switch user ports 0..4 (5), labelled like in the firmware's DT */
+         for (int i = 0; i < 6 && ports[i]; i++) {
+             g_autofree char *prop = g_strdup_printf("netdev-p%d", i);
+             nc = find_netdev(*ports[i] && strcmp(ports[i], "-") ? ports[i]
+@@ -837,8 +849,8 @@ static void router_init(MachineState *machine)
+         error_report("RAM size must be 256M, 512M, 1G or 2G");
+         exit(1);
+     }
+-    if (b->nand_mb != 128 && b->nand_mb != 256) {
+-        error_report("nand must be 128 or 256 (MB)");
++    if (b->nand_mb != 128 && b->nand_mb != 256 && b->nand_mb != 512) {
++        error_report("nand must be 128, 256 or 512 (MB)");
+         exit(1);
+     }
+ 
+@@ -974,13 +986,15 @@ static void router_init(MachineState *machine)
+ 
+     dev = qdev_new(TYPE_MT7981_SPINAND);
+     qdev_prop_set_uint32(dev, "blocks", b->nand_mb * 8);
+-    if (b->nand_mb == 256) {
++    if (b->nand_mb >= 256) {
+         /*
+-         * W25N02KV: 2048 + 128 byte pages. The OOB size matters: the stock
+-         * BL2 reads it from the parameter page while U-Boot/Linux use their
+-         * ID table, and NMBM refuses to load when the two disagree.
++         * W25N02KV / W25N04KV: 2048 + 128 byte pages. The OOB size matters:
++         * the stock BL2 reads it from the parameter page while U-Boot/Linux
++         * use their ID table, and NMBM refuses to load when the two
++         * disagree.  The W25N04KV has two planes; the plane select bit of
++         * the column address is ignored, the row address selects the page.
+          */
+-        qdev_prop_set_uint8(dev, "id2", 0x22);
++        qdev_prop_set_uint8(dev, "id2", b->nand_mb == 512 ? 0x23 : 0x22);
+         qdev_prop_set_uint32(dev, "oob-size", 128);
+     }
+     if (b->nand_uid) {
+@@ -1453,8 +1467,8 @@ static void router_class_init(ObjectClass *oc, const void *data)
+     object_class_property_add_enum(oc, "gmac0", "Mt7981Gmac", &gmac_lookup,
+                                    router_get_gmac0, router_set_gmac0);
+     object_class_property_set_description(oc, "gmac0",
+-        "GMAC0 (mac@0, SGMII0): mt7531 (switch), rtl8221b, yt8821 or gpy211 "
+-        "(2.5G PHY), none");
++        "GMAC0 (mac@0, SGMII0): mt7531 or an8855 (Airoha AN8855, MDIO 1) "
++        "switch, rtl8221b, yt8821 or gpy211 (2.5G PHY), none");
+     object_class_property_add_enum(oc, "gmac1", "Mt7981Gmac", &gmac_lookup,
+                                    router_get_gmac1, router_set_gmac1);
+     object_class_property_set_description(oc, "gmac1",
+@@ -1506,8 +1520,8 @@ static void router_class_init(ObjectClass *oc, const void *data)
+     object_class_property_set_description(oc, "ports",
+         "netdev ids of MT7531 ports 0..4 and 5 (with port5=...), "
+         "':' separated, '-' = unused (e.g. wan:lan1:lan2:lan3:lan4)");
+-    ADD_U32("nand", nand_mb, "SPI-NAND size in MB: 128 (W25N01GV) or 256 "
+-            "(W25N02KV)");
++    ADD_U32("nand", nand_mb, "SPI-NAND size in MB: 128 (W25N01GV), 256 "
++            "(W25N02KV) or 512 (W25N04KV)");
+     object_class_property_add_str(oc, "poweroff", router_get_poweroff,
+                                   router_set_poweroff);
+     object_class_property_set_description(oc, "poweroff",
+diff --git a/hw/arm/mt7981/spinand.c b/hw/arm/mt7981/spinand.c
+index ae8117e..e66fc90 100644
+--- a/hw/arm/mt7981/spinand.c
++++ b/hw/arm/mt7981/spinand.c
+@@ -319,7 +319,8 @@ static void build_param_page(SpiNandState *s, uint8_t *buf)
+     memcpy(pp, "ONFI", 4);
+     stw_le_p(pp + 4, 0x0002);                   /* revision */
+     memcpy(pp + 32, "WINBOND     ", 12);
+-    memcpy(pp + 44, s->blocks > 1024 ? "W25N02KV            "
++    memcpy(pp + 44, s->blocks > 2048 ? "W25N04KV            " :
++                    s->blocks > 1024 ? "W25N02KV            "
+                                      : "W25N01GV            ", 20);
+     pp[64] = s->id[0];
+     stl_le_p(pp + 80, s->page_size);
+-- 
+2.47.3
+

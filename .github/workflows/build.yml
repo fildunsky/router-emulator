@@ -44,10 +44,11 @@ env:
   #                    U-Boot of another board), RTL8221B on GMAC0
   #   bananapi-bpi-r4-lite  MT7987, NAND on SPI2 with the FIP in UBI,
   #                    internal 2.5G PHY
+  #   routerich-be7200 MT7987, Airoha AN8855 switch, 512 MB NAND, own layout
   TEST_PRESETS: >-
     cudy-wr3000p-v1 cudy-wr3000h-v1 cudy-wr3000s-v1 cudy-tr3000-v1 netis-nx31
     xiaomi-redmi-ax6000 netcore-n60 netcore-n60-pro glinet-gl-mt6000
-    huasifei-wh3000-pro-emmc bananapi-bpi-r4-lite
+    huasifei-wh3000-pro-emmc bananapi-bpi-r4-lite routerich-be7200
 
 jobs:
   # release or not: VERSION without its tag on main, or the tag itself
@@ -227,6 +228,7 @@ jobs:
           - { preset: glinet-gl-mt6000, wan: 'eth1: Link is Up' }
           - { preset: huasifei-wh3000-pro-emmc, wan: 'eth1: Link is Up' }
           - { preset: bananapi-bpi-r4-lite, wan: 'wan: Link is Up' }
+          - { preset: routerich-be7200, wan: 'wan: Link is Up' }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -275,6 +277,7 @@ jobs:
           - { preset: glinet-gl-mt6000, wan: 'eth1: Link is Up' }
           - { preset: huasifei-wh3000-pro-emmc, wan: 'eth1: Link is Up' }
           - { preset: bananapi-bpi-r4-lite, wan: 'wan: Link is Up' }
+          - { preset: routerich-be7200, wan: 'wan: Link is Up' }
     steps:
       - uses: actions/checkout@v4
 

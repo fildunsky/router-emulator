@@ -2,7 +2,7 @@
 # Download official OpenWrt images for an MT7981 or MT7986 device and build a
 # NAND folder for the emulator.
 #
-#   tools/prepare-nand.sh [--stock DIR] [--flash-mb 128|256] PROFILE [VERSION] [OUTDIR]
+#   tools/prepare-nand.sh [--stock DIR] [--flash-mb 128|256|512] PROFILE [VERSION] [OUTDIR]
 #
 #     PROFILE  OpenWrt device profile, e.g. cudy_wr3000p-v1, netis_nx31
 #              (see the target's profiles.json).  The OpenWrt BL2 + U-Boot
@@ -20,7 +20,8 @@
 #     --stock DIR     keep the vendor bootloader: DIR holds dumps of the
 #                     vendor BL2 (*mtd0*.bin) and FIP (*FIP*.bin or *mtd4*.bin), and may
 #                     hold the OpenWrt *sysupgrade.bin to use
-#     --flash-mb N    flash size (default 128; 256 for W25N02KV boards)
+#     --flash-mb N    flash size (default 128; 256 for W25N02KV boards, 512
+#                     for W25N04KV)
 #     --no-bdinfo     layout without bdinfo (FIP 0x380000, ubi 0x580000;
 #                     MACs in Factory), e.g. netis boards
 #     --local DIR     use the images in DIR (own builds, same names as

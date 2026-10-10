@@ -1,5 +1,6 @@
-Router Emulator (MediaTek MT7981B / Filogic 820, MT7986 / Filogic 830, MT7987)
-==============================================================================
+Router Emulator (MediaTek MT7981B / Filogic 820, MT7986 / Filogic 830,
+MT7987 / Filogic 850)
+======================================================================
 
 Emulates a MediaTek MT7981B, MT7986 or MT7987 router board whose hardware
 is described by a board preset. The emulator runs the REAL boot chain,
@@ -29,16 +30,17 @@ Quick start
 Board presets
 -------------
 A preset (presets\*.ini) describes the hardware:
-  GMAC0       MT7531 switch (with the labels of its ports 0..4), a 2.5G
-              PHY (Realtek RTL8221B or Motorcomm YT8821) or nothing
+  GMAC0       MT7531 or Airoha AN8855 switch (with the labels of its
+              ports 0..4), a 2.5G PHY (Realtek RTL8221B or Motorcomm
+              YT8821) or nothing
   GMAC1       a 2.5G PHY (RTL8221B / YT8821), the MT7981 built-in 1G PHY
               or nothing
   RAM         type (DDR3 / DDR4) and size; the type must match the BL2 in
               the flash, otherwise DRAM initialisation fails as on a real
               board and the emulator stops with an error
-  Boot flash  SPI-NAND 128 MB (W25N01GV) or 256 MB (W25N02KV), or
-              SPI-NOR 16 MB (W25Q128JV / XM25QH128C / GD25Q128) or
-              SPI-NOR 64 MB (W25Q512JV)
+  Boot flash  SPI-NAND 128 MB (W25N01GV), 256 MB (W25N02KV) or
+              512 MB (W25N04KV), SPI-NOR 16 MB (W25Q128JV / XM25QH128C /
+              GD25Q128) or SPI-NOR 64 MB (W25Q512JV)
   USB         none, USB 2.0 or USB 3.0
   PCIe Wi-Fi  MT7987 boards: a card in the PCIe slot, MediaTek MT7992
               (Wi-Fi 7). The official OpenWrt image has no driver for it:
@@ -84,7 +86,7 @@ WBR3000UAX, TR3000, TR3000 256MB, M3000 v1/v2 (RTL8221B), M3000 v2
 (YT8821), WR3000 v1 (SPI-NOR); Netis NX30 V2, NX31, NX32U; Xiaomi Mi
 Router AX3000T, Redmi AX6000; Netcore N60, N60 Pro; GL.iNet GL-MT6000;
 Bananapi BPi-R4 Lite; Huasifei WH3000 Pro NAND, WH3000 Pro eMMC,
-WH3000R NAND.
+WH3000R NAND; Routerich AX3000, AX3000 v1 (own dumps), BE7200.
 
 Language
 --------

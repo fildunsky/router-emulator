@@ -245,6 +245,7 @@ namespace RouterEmulator
             int gy = 22;
             gmac0 = Combo(eth, "GMAC0 (mac@0):", ref gy,
                 new Choice("mt7531", L.T("ed.mt7531", "MT7531 switch (5 x 1G ports)")),
+                new Choice("an8855", L.T("ed.an8855", "Airoha AN8855 switch (5 x 1G ports)")),
                 new Choice("rtl8221b", L.T("ed.rtl8221b", "RTL8221B 2.5G PHY (Realtek)")),
                 new Choice("yt8821", L.T("ed.yt8821", "YT8821 2.5G PHY (Motorcomm)")),
                 new Choice("gpy211", L.T("ed.gpy211", "GPY211 2.5G PHY (MaxLinear)")),
@@ -297,6 +298,7 @@ namespace RouterEmulator
             nandSize = Combo(mem, L.T("ed.flash", "Boot flash:"), ref gy,
                 new Choice("nand:128", "SPI-NAND 128 " + mb + " (Winbond W25N01GV)"),
                 new Choice("nand:256", "SPI-NAND 256 " + mb + " (Winbond W25N02KV)"),
+                new Choice("nand:512", "SPI-NAND 512 " + mb + " (Winbond W25N04KV)"),
                 new Choice("nor:16:ef4018", "SPI-NOR 16 " + mb + " (Winbond W25Q128JV)"),
                 new Choice("nor:16:204018", "SPI-NOR 16 " + mb + " (XMC XM25QH128C)"),
                 new Choice("nor:16:c84018", "SPI-NOR 16 " + mb + " (GigaDevice GD25Q128)"),
@@ -586,10 +588,10 @@ namespace RouterEmulator
 
         void UpdateEnabled()
         {
-            bool sw = Val(gmac0) == "mt7531";
+            bool sw = IsSwitch(Val(gmac0));
             foreach (var c in swPort) c.Enabled = sw;
-            port5.Enabled = sw;
-            bool p5 = sw && Val(port5) != "none";
+            port5.Enabled = Val(gmac0) == "mt7531";     // a PHY on port 5: MT7531 only
+            bool p5 = Val(gmac0) == "mt7531" && Val(port5) != "none";
             port5Port.Enabled = port5Addr.Enabled = port5Rst.Enabled = p5;
             gmac0Port.Enabled = ExtPhy(Val(gmac0));
             gmac0Rst.Enabled = ExtPhy(Val(gmac0));
@@ -598,6 +600,11 @@ namespace RouterEmulator
             pcieWifi.Enabled = Val(soc) == "mt7987";      // only the MT7987 machine has the slot
             UpdateDesc();
         }
+
+        // a switch on GMAC0
+        static bool IsSwitch(string v) { return v == "mt7531" || v == "an8855"; }
+
+        static string SwitchName(string v) { return v == "an8855" ? "AN8855" : "MT7531"; }
 
         // a 2.5G PHY chip with its own reset line
         static bool ExtPhy(string v) { return v == "rtl8221b" || v == "yt8821" || v == "gpy211"; }
@@ -617,7 +624,7 @@ namespace RouterEmulator
             var parts = new List<string>();
             if (Val(soc) != "mt7981") parts.Add(Val(soc).ToUpperInvariant());
             int swn = 0; bool swWan = false;
-            if (Val(gmac0) == "mt7531") {
+            if (IsSwitch(Val(gmac0))) {
                 foreach (var c in swPort) {
                     string t = c.Text.Trim();
                     if (t == "" || t == "-") continue;
@@ -629,9 +636,10 @@ namespace RouterEmulator
             if (Val(gmac0) == "mt7531" && ExtPhy(Val(port5)))
                 parts.Add("2.5G " + port5Port.Text.Trim().ToUpperInvariant() + " " + PhyName(Val(port5)) + " on switch port 5");
             if (Val(gmac1) == "gphy") parts.Add("1G " + gmac1Port.Text.Trim().ToUpperInvariant() + " built-in PHY");
-            if (Val(gmac0) == "mt7531") {
-                if (swWan) parts.Add((swn + 1) + "x1G MT7531 (WAN = port " + WanPort() + ")");
-                else parts.Add(swn + "x1G LAN MT7531");
+            if (IsSwitch(Val(gmac0))) {
+                string sn = SwitchName(Val(gmac0));
+                if (swWan) parts.Add((swn + 1) + "x1G " + sn + " (WAN = port " + WanPort() + ")");
+                else parts.Add(swn + "x1G LAN " + sn);
             }
             // (English: the description is stored in the preset file)
             parts.Add(Val(ddr).ToUpperInvariant() + " " + (Val(ram) == "1024" ? "1 GB" : Val(ram) == "2048" ? "2 GB" : Val(ram) + " MB"));
@@ -671,10 +679,10 @@ namespace RouterEmulator
             p.Set("description", desc.Text.Trim());
             if (Val(soc) != "mt7981") p.Set("soc", Val(soc));
             p.Set("gmac0", Val(gmac0));
-            if (Val(gmac0) == "mt7531") {
+            if (IsSwitch(Val(gmac0))) {
                 var ports = new List<string>();
                 foreach (var c in swPort) ports.Add(c.Text.Trim().Length > 0 ? c.Text.Trim() : "-");
-                if (Val(port5) != "none") {
+                if (Val(gmac0) == "mt7531" && Val(port5) != "none") {
                     ports.Add(port5Port.Text.Trim().Length > 0 ? port5Port.Text.Trim() : "-");
                     p.Set("ports", string.Join(":", ports.ToArray()));
                     p.Set("port5", Val(port5));
@@ -733,7 +741,7 @@ namespace RouterEmulator
         {
             var seen = new List<string>();
             var names = new List<string>();
-            if (p.Get("gmac0") == "mt7531") names.AddRange(p.Get("ports").Split(':'));
+            if (IsSwitch(p.Get("gmac0"))) names.AddRange(p.Get("ports").Split(':'));
             if (ExtPhy(p.Get("gmac0"))) names.Add(p.Get("gmac0-port"));
             if (p.Get("gmac1") != "none") names.Add(p.Get("gmac1-port"));
             foreach (var n in names) {

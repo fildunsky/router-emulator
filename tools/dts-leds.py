@@ -404,6 +404,8 @@ def lamp_name(lamp):
         # power + status / fault: the board's status lamp
         return "Status" if "status" in fs else NAMES.get(fs[0], fs[0])
     f = fs[0]
+    # wlan + function-enumerator 24 / 50 / 60: the band (Routerich)
+    f = {"wlan-24": "wlan-2ghz", "wlan-50": "wlan-5ghz", "wlan-60": "wlan-6ghz"}.get(f, f)
     m = re.match(r'(.*?)-(\d+)$', f)
     if f not in NAMES and m and m.group(1) in NAMES:
         return NAMES[m.group(1)] + " " + m.group(2)

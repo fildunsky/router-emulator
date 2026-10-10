@@ -1,4 +1,4 @@
-# Router Emulator (MediaTek MT7981B / Filogic 820, MT7986 / Filogic 830, MT7987)
+# Router Emulator (MediaTek MT7981B / Filogic 820, MT7986 / Filogic 830, MT7987 / Filogic 850)
 
 **English** · [Русский](README.ru.md) · Build: [Linux](README.build.linux.md) · [Windows](README.build.windows.md)
 
@@ -21,7 +21,7 @@ MT7986A/B (Filogic 830) boards run on a second machine, `mt7986-router`
 (preset key `soc=mt7986`): the same peripherals, four cores, the MT7986
 BL2 with its own DRAM calibration and size detection, see
 [MT7986](#mt7986-filogic-830); MT7987A/B boards on `mt7987-router`
-(`soc=mt7987`, see [MT7987](#mt7987)).
+(`soc=mt7987`, see [MT7987](#mt7987-filogic-850)).
 
 ## Quick start
 
@@ -48,7 +48,7 @@ or use dumps of a real router.
 
 | Option | Values | Meaning |
 |---|---|---|
-| `gmac0` | `mt7531` · `rtl8221b` · `yt8821` · `gpy211` · `none` | what GMAC0 (mac@0, SGMII0) is wired to |
+| `gmac0` | `mt7531` · `an8855` · `rtl8221b` · `yt8821` · `gpy211` · `none` | what GMAC0 (mac@0, SGMII0) is wired to; `an8855` = Airoha AN8855 switch at MDIO 1 (CPU port 5, e.g. Routerich BE7200) |
 | `ports` | e.g. `wan:lan1:lan2:lan3:lan4` | netdev ids of MT7531 ports 0..4, and port 5 with `port5=` (`-` = unused) |
 | `port5`, `port5-phy-addr`, `port5-reset-gpio` | `rtl8221b` · `yt8821` · `gpy211` · `none`; MDIO address (5); GPIO | a 2.5G PHY on MT7531 port 5 (SGMII), e.g. Netcore N60 Pro; its netdev is the 6th entry of `ports` |
 | `gmac0-port`, `gmac1-port` | netdev id | port of a PHY attached directly to a GMAC |
@@ -56,7 +56,7 @@ or use dumps of a real router.
 | `gmac0-reset-gpio`, `gmac1-reset-gpio` | GPIO, `-1` (default) | hardware reset line of a 2.5G PHY; not wired by default (a missing line is harmless, a wrong one could hold the PHY in reset) |
 | `gmac0-phy-addr`, `gmac1-phy-addr` | MDIO address | address of that PHY (default 1 on gmac0, 6 on gmac1) |
 | `flash` | `nand` · `nor` · `emmc` | boot flash: SPI-NAND on SPI0 (default), SPI-NOR on SPI2 (MT7986: SPI0) or eMMC (see below) |
-| `nand` | `128` · `256` | W25N01GV / W25N02KV SPI-NAND |
+| `nand` | `128` · `256` · `512` | W25N01GV / W25N02KV / W25N04KV SPI-NAND |
 | `nand-spi` | `0` (default) · `1` · `2` | SPI controller of the SPI-NAND (BPI-R4 Lite: 2) |
 | `switch-irq-gpio` | GPIO | EINT of the MT7531 interrupt (default 38 / 66 / 41 for MT7981 / MT7986 / MT7987) |
 | `flash=emmc`, `emmc-boot` | MB (4) | eMMC on MSDC0 instead: one image (the first `*.img` of the flash folder, or `-drive if=sd`) = boot0 + boot1 (`emmc-boot` MB each) + user area, size a power of 2 |
@@ -132,6 +132,9 @@ routers use; saving from the editor drops `;` comments).
 | Bananapi BPi-R4 Lite (MT7987A) | 2.5G WAN internal PHY + 4×1G MT7531 (SFP cage not emulated); Wi-Fi 7 MT7992 card on PCIe — for Wi-Fi install `kmod-mt7996e kmod-mt7992-firmware` | DDR4 2 GB | 256 MB on SPI2, FIP in UBI | 3.0 | OpenWrt |
 | GL.iNet GL-MT6000 (MT7986A) | 2.5G WAN RTL8221B + 2.5G LAN RTL8221B on switch port 5 + 4×1G MT7531 | DDR4 1 GB | **eMMC** | 3.0 | OpenWrt |
 | Huasifei WH3000 Pro eMMC | 2.5G LAN RTL8221B + 1G WAN built-in PHY, no switch | DDR4 1 GB | **eMMC**, vendor layout | 3.0 | OpenWrt (RAX3000M eMMC DDR4 build) |
+| Routerich AX3000 | 3×1G LAN + WAN MT7531 (WAN = port 4) | DDR3 256 MB | 128 MB, no bdinfo | 2.0 | OpenWrt (ubootmod) |
+| Routerich AX3000 v1 | 1G WAN built-in PHY + 3×1G LAN MT7531 | DDR3 256 MB | 128 MB, no bdinfo | 2.0 | vendor (own dumps needed) |
+| Routerich BE7200 (MT7987A) | 2.5G WAN internal PHY + 3×1G LAN **Airoha AN8855**; Wi-Fi 7 MT7992 on PCIe | DDR4 1 GB | **512 MB** (W25N04KV) | 3.0 | OpenWrt |
 
 Netis boards have no bdinfo partition (FIP at 0x380000, ubi at 0x580000;
 MACs in Factory): presets set `openwrt-no-bdinfo=1`. The MT7986 boards use
@@ -159,7 +162,7 @@ tools/prepare-nand.sh --soc mt7986 --no-bdinfo netcore_n60-pro 25.12.5 nand-n60-
 ./emulator.sh -P netcore-n60-pro
 ```
 
-## MT7987
+## MT7987 (Filogic 850)
 
 `mt7987-router`: UARTs at 0x11000000, SPI0..2 at 0x11007800 /
 0x11008800 / 0x11009800, TOP_MISC at 0x10021000, eFuse at 0x11d30000,
@@ -230,11 +233,11 @@ All device models live in `hw/arm/mt7981/` of the QEMU tree
 | TOPRGU | `mt7981_toprgu.c` | watchdog with real timeout, SW reset (reboot), reset status kept across reset |
 | UART ×3 | QEMU 16550 + MTK extra registers | |
 | SPI (IPM) | `mt7981_spim.c` | FIFO + DMA, half-duplex spi-mem mode used by TF-A/U-Boot/Linux |
-| SPI-NAND | `spinand.c` | W25N01GV (2048+64) / W25N02KV (2048+128), on-die ECC, ONFI parameter page, unique ID page; backing store = folder of partition dumps (see below) or one raw image with OOB |
+| SPI-NAND | `spinand.c` | W25N01GV (2048+64) / W25N02KV (2048+128) / W25N04KV (512 MB, 2048+128, two planes), on-die ECC, ONFI parameter page, unique ID page; backing store = folder of partition dumps (see below) or one raw image with OOB |
 | eMMC | `mt7981_msdc.c` + QEMU eMMC | MSDC host: commands, auto CMD23/CMD12, PIO FIFO (TF-A, U-Boot), GPD/BD DMA (Linux); card with boot0/boot1 and user area; BootROM boots `EMMC_BOOT` images from boot0 |
 | SPI-NOR | `spinor.c` | 3-byte addressing (up to 16 MB), selectable JEDEC ID, reads 1-1-1/1-1-2/1-1-4/1-2-2/1-4-4, page program, 4K/32K/64K/chip erase, status registers with QE; BootROM boots `SF_BOOT` images from it; same folder backing store |
 | Ethernet | `mt7981_eth.c` | frame engine: QDMA TX (Linux), PDMA RX, PDMA v2 (U-Boot); TSO + checksum offload; LynxI SGMII PCS ×2; any combination of switch / PHYs on the two GMACs |
-| Switch | `mt7981_eth.c` | MT7531: paged MDIO access, internal PHY indirect access, MTK special tag (DSA), learning FDB, port matrix, link IRQ → EINT 38 |
+| Switch | `mt7981_eth.c` | MT7531: paged MDIO access, internal PHY indirect access, MTK special tag (DSA), learning FDB, port matrix, link IRQ → EINT 38. Airoha AN8855: 32-bit register bus over MDIO page 4, internal PHYs at MDIO 1..5, its registers translated into the MT7531 model (CPU port 5) |
 | PHYs | `mt7981_eth.c` | MT7531 GPHY ×5; RTL8221B-VB-CG (C45, temperature sensor); Motorcomm YT8821 (extended registers, UTP/SerDes spaces, 2.5G status); MaxLinear GPY211C (C45, firmware version, mailbox, temperature sensor); MT7981 built-in GbE PHY (calibration handshake); a PHY on MT7531 port 5; optional hardware reset GPIOs |
 | GPIO / EINT | `mt7981_pinctrl.c` | buttons (reset/WPS, `reset-hold-ms` for timed presses), LED log, pad levels to board devices |
 | LEDs | `mt7981_leds.c`, `ws2812b.c` | front panel LEDs from the preset: GPIO, PHY LED registers (RTL8221B, GPY211), WS2812B on SPI, PWM channels; blinking detection; `led-state` |
