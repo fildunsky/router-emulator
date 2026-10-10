@@ -50,7 +50,10 @@ namespace RouterEmulator
         // QEMU machine: mt7981-router or mt7986-router
         public string Soc
         {
-            get { string s = Get("soc", "mt7981"); return s == "mt7986" || s == "mt7987" ? s : "mt7981"; }
+            get {
+                string s = Get("soc", "mt7981");
+                return s == "mt7986" || s == "mt7987" || s == "mt7988" ? s : "mt7981";
+            }
         }
         public string Machine { get { return Soc + "-router"; } }
 
@@ -246,6 +249,7 @@ namespace RouterEmulator
             gmac0 = Combo(eth, "GMAC0 (mac@0):", ref gy,
                 new Choice("mt7531", L.T("ed.mt7531", "MT7531 switch (5 x 1G ports)")),
                 new Choice("an8855", L.T("ed.an8855", "Airoha AN8855 switch (5 x 1G ports)")),
+                new Choice("mt7988-switch", L.T("ed.mt7988sw", "MT7988 built-in switch (4 x 1G ports)")),
                 new Choice("rtl8221b", L.T("ed.rtl8221b", "RTL8221B 2.5G PHY (Realtek)")),
                 new Choice("yt8821", L.T("ed.yt8821", "YT8821 2.5G PHY (Motorcomm)")),
                 new Choice("gpy211", L.T("ed.gpy211", "GPY211 2.5G PHY (MaxLinear)")),
@@ -274,7 +278,7 @@ namespace RouterEmulator
                 new Choice("rtl8221b", L.T("ed.rtl8221b", "RTL8221B 2.5G PHY (Realtek)")),
                 new Choice("yt8821", L.T("ed.yt8821", "YT8821 2.5G PHY (Motorcomm)")),
                 new Choice("gpy211", L.T("ed.gpy211", "GPY211 2.5G PHY (MaxLinear)")),
-                new Choice("i2p5ge", L.T("ed.i2p5ge", "MT7987 internal 2.5G PHY")),
+                new Choice("i2p5ge", L.T("ed.i2p5ge", "MT7987 / MT7988 internal 2.5G PHY")),
                 new Choice("gphy", L.T("ed.gphy", "MT7981 built-in 1G PHY")),
                 new Choice("none", L.T("ed.not_connected", "Not connected")));
             gmac1Port = PortCombo(eth, L.F("ed.phy_port", "{0} PHY port:", "GMAC1"), ref gy, out gmac1Rst);
@@ -286,7 +290,8 @@ namespace RouterEmulator
             soc = Combo(mem, L.T("ed.soc", "SoC:"), ref gy,
                 new Choice("mt7981", "MediaTek MT7981B (Filogic 820)"),
                 new Choice("mt7986", "MediaTek MT7986A/B (Filogic 830)"),
-                new Choice("mt7987", "MediaTek MT7987A/B"));
+                new Choice("mt7987", "MediaTek MT7987A/B (Filogic 850)"),
+                new Choice("mt7988", "MediaTek MT7988A/D (Filogic 880/860)"));
             ddr = Combo(mem, L.T("ed.ram_type", "RAM type:"), ref gy,
                 new Choice("ddr4", "DDR4"), new Choice("ddr3", "DDR3"));
             string mb = L.T("ed.mb", "MB"), gb = L.T("ed.gb", "GB");
@@ -597,14 +602,20 @@ namespace RouterEmulator
             gmac0Rst.Enabled = ExtPhy(Val(gmac0));
             gmac1Port.Enabled = Val(gmac1) != "none";
             gmac1Rst.Enabled = ExtPhy(Val(gmac1));
-            pcieWifi.Enabled = Val(soc) == "mt7987";      // only the MT7987 machine has the slot
+            pcieWifi.Enabled = HasPcie(Val(soc));         // MT7987 / MT7988 machines have the slot
             UpdateDesc();
         }
 
         // a switch on GMAC0
-        static bool IsSwitch(string v) { return v == "mt7531" || v == "an8855"; }
+        static bool IsSwitch(string v) { return v == "mt7531" || v == "an8855" || v == "mt7988-switch"; }
 
-        static string SwitchName(string v) { return v == "an8855" ? "AN8855" : "MT7531"; }
+        static string SwitchName(string v)
+        {
+            return v == "an8855" ? "AN8855" : v == "mt7988-switch" ? "built-in switch" : "MT7531";
+        }
+
+        // SoCs with a PCIe slot / the internal 2.5G PHY
+        static bool HasPcie(string soc) { return soc == "mt7987" || soc == "mt7988"; }
 
         // a 2.5G PHY chip with its own reset line
         static bool ExtPhy(string v) { return v == "rtl8221b" || v == "yt8821" || v == "gpy211"; }
@@ -646,7 +657,7 @@ namespace RouterEmulator
             var fl = Val(nandSize).Split(':');
             parts.Add(fl[0] == "emmc" ? "eMMC" : (fl[0] == "nor" ? "SPI-NOR " : "NAND ") + fl[1] + " MB");
             parts.Add(Val(usbPort) == "none" ? "no USB" : "USB " + Val(usbPort) + ".0");
-            if (Val(soc) == "mt7987" && Val(pcieWifi) == "mt7992") parts.Add("Wi-Fi 7 MT7992 on PCIe");
+            if (HasPcie(Val(soc)) && Val(pcieWifi) == "mt7992") parts.Add("Wi-Fi 7 MT7992 on PCIe");
             return string.Join(", ", parts.ToArray());
         }
 
@@ -714,7 +725,7 @@ namespace RouterEmulator
             p.Set("ddr", Val(ddr));
             p.Set("ram", Val(ram));
             p.Set("usb-port", Val(usbPort));
-            if (Val(soc) == "mt7987" && Val(pcieWifi) != "none") p.Set("pcie-wifi", Val(pcieWifi));
+            if (HasPcie(Val(soc)) && Val(pcieWifi) != "none") p.Set("pcie-wifi", Val(pcieWifi));
             p.Set("reset-gpio", resetGpio.Value.ToString());
             p.Set("wps-gpio", wpsGpio.Value.ToString());
             if (resetHigh.Checked) p.Set("reset-active-high", "on");
@@ -759,8 +770,10 @@ namespace RouterEmulator
             string err = CheckPorts(p);
             if (err == null && p.Soc != "mt7981" && p.Get("gmac1") == "gphy")
                 err = L.T("ed.no_gphy", "Only the MT7981 has a built-in 1G PHY: choose another GMAC1 PHY.");
-            if (err == null && p.Soc != "mt7987" && (p.Get("gmac0") == "i2p5ge" || p.Get("gmac1") == "i2p5ge"))
-                err = L.T("ed.no_i2p5ge", "Only the MT7987 has an internal 2.5G PHY.");
+            if (err == null && !HasPcie(p.Soc) && (p.Get("gmac0") == "i2p5ge" || p.Get("gmac1") == "i2p5ge"))
+                err = L.T("ed.no_i2p5ge", "Only the MT7987 and MT7988 have an internal 2.5G PHY.");
+            if (err == null && p.Soc != "mt7988" && p.Get("gmac0") == "mt7988-switch")
+                err = L.T("ed.no_mt7988sw", "Only the MT7988 has the built-in switch.");
             if (err == null && (!ValidUid(efuseUid.Text.Trim()) || !ValidUid(nandUid.Text.Trim())))
                 err = L.T("ed.bad_uid", "A UID must be 32 hex digits (or empty).");
             if (err == null && !Preset.ValidIp(p.LanIp))

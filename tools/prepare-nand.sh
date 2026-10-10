@@ -38,6 +38,8 @@
 #                     ubi are filled, other partitions stay erased
 #     --ubi-fip       layout of "spim-nand-ubi" BL2s (e.g. bananapi_bpi-r4-lite):
 #                     BL2 at 0, UBI from 0x200000 with the FIP as volume "fip"
+#     --ubi-factory N Factory as UBI volume "factory" of N bytes (e.g. Asus
+#                     ZenWiFi BT8: the MACs and Wi-Fi EEPROM are read from it)
 #     --emmc          eMMC board (machine option flash=emmc, e.g.
 #                     glinet_gl-mt6000): OUTDIR (default emmc-NAME) gets
 #                     one image SOC.emmc.img built by tools/mkemmc.py from
@@ -81,6 +83,7 @@ while [ $# -gt 0 ]; do
     --emmc-layout) ELAYOUT=$2; shift 2 ;;
     --uboot) UBOOT=$2; shift 2 ;;
     --ubi-fip) LAYOUT="--parts BL2:0x200000,ubi:-"; UBIFIP=--fip-in-ubi; shift ;;
+    --ubi-factory) UBIFAC="--factory-volume $2"; shift 2 ;;
     --parts) LAYOUT="--parts $2"; shift 2 ;;
     -h|--help) sed -n '2,56p' "$0"; exit 0 ;;
     *) break ;;
@@ -207,14 +210,21 @@ else
     }
 fi
 if [ -n "$EMMC" ]; then
-    BL2=$(pick "$PRE" "" "$UBOOT"); FIP=$(pick "$FIPS" "" "$UBOOT")
-    # squashfs-factory.bin (kernel + rootfs in one), else the sysupgrade tar
-    FW=$(pick "squashfs-factory.bin" optional); SYS=
-    [ -n "$FW" ] || SYS=$(pick "squashfs-sysupgrade.bin")
-    [ -n "$BL2" ] && [ -n "$FIP" ] && [ -n "$FW$SYS" ] || exit 1
-    echo "$P: $(basename "$BL2"), $(basename "$FIP"), $(basename "$FW$SYS")"
+    # boards with several boot media name the eMMC images emmc-*
+    BL2=$(pick "emmc-preloader.bin $PRE" "" "$UBOOT")
+    FIP=$(pick "emmc-bl31-uboot.fip $FIPS" "" "$UBOOT")
+    # squashfs-factory.bin (kernel + rootfs in one), else the sysupgrade
+    # tar, else the sysupgrade FIT (.itb, e.g. BPi-R4: "production")
+    FW=$(pick "squashfs-factory.bin" optional); SYS=; FIT=; REC=
+    [ -n "$FW" ] || SYS=$(pick "squashfs-sysupgrade.bin" optional)
+    if [ -z "$FW$SYS" ]; then
+        FIT=$(pick "$FITS"); REC=$(pick "$RECS" optional)
+    fi
+    [ -n "$BL2" ] && [ -n "$FIP" ] && [ -n "$FW$SYS$FIT" ] || exit 1
+    echo "$P: $(basename "$BL2"), $(basename "$FIP"), $(basename "$FW$SYS$FIT")"
     python3 tools/mkemmc.py -o "$OUT/$SOC.emmc.img" --layout "$ELAYOUT" \
         --bl2 "$BL2" --fip "$FIP" ${FW:+--firmware "$FW"} ${SYS:+--sysupgrade "$SYS"} \
+        ${FIT:+--fit "$FIT"} ${REC:+--recovery "$REC"} \
         ${UBOOT:+--boot-env} ${FAC:+--factory "$FAC"} --wifi-chip "${SOC#mt}"
     exit 0
 fi
@@ -222,5 +232,5 @@ BL2=$(pick "$PRE"); FIP=$(pick "$FIPS"); FIT=$(pick "$FITS"); REC=$(pick "$RECS"
 [ -n "$BL2" ] && [ -n "$FIP" ] && [ -n "$FIT" ] || exit 1
 echo "$P: $(basename "$BL2"), $(basename "$FIP"), $(basename "$FIT")${REC:+, $(basename "$REC")}"
 "${MK[@]}" --flash-mb "$MB" $LAYOUT create -o "$OUT/" --bl2 "$BL2" --fip "$FIP" $UBIFIP \
-    --fit "$FIT" ${REC:+--recovery "$REC"} \
+    $UBIFAC --fit "$FIT" ${REC:+--recovery "$REC"} \
     ${FAC:+--factory "$FAC"} ${BDI:+--bdinfo "$BDI"} "${EEP[@]}" 2>&1 | grep -v '^ubinize'

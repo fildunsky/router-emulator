@@ -15,6 +15,12 @@ User area layouts (GPT; partitions are found by name), --layout:
     0x0680000  fip             4 MB  (BL31 + U-Boot)
     0x1000000  kernel         32 MB  \\ OpenWrt squashfs-factory.bin =
     0x3000000  rootfs        512 MB  / kernel padded to 32 MB + rootfs
+  bpi-r4 (Bananapi BPi-R4, OpenWrt's emmc-gpt.bin; --fit, --recovery)
+    0x0400000  ubootenv      512 KB
+    0x0480000  factory         2 MB
+    0x0680000  fip             4 MB
+    0x0c00000  recovery       32 MB  initramfs-recovery.itb
+    0x4000000  production    448 MB  squashfs-sysupgrade.itb (FIT)
   wh3000-pro (Huasifei WH3000 Pro eMMC, vendor layout; rootfs is 2 GB on
               the real 8 GB chip, 512 MB here)
     0x0400000  u-boot-env    512 KB
@@ -56,6 +62,13 @@ LAYOUTS = {  # name, offset, size
         ("fip", 0x0680000, 0x400000),
         ("kernel", 0x1000000, 32 * MB),
         ("rootfs", 0x3000000, 512 * MB),
+    ],
+    "bpi-r4": [     # Bananapi BPi-R4 (emmc-gpt.bin): FIT in "production"
+        ("ubootenv", 0x0400000, 0x80000),
+        ("factory", 0x0480000, 0x200000),
+        ("fip", 0x0680000, 0x400000),
+        ("recovery", 0x0c00000, 32 * MB),
+        ("production", 0x4000000, 448 * MB),
     ],
     "wh3000-pro": [
         ("u-boot-env", 0x0400000, 0x80000),
@@ -138,6 +151,9 @@ def main():
                    "(kernel padded to 32 MB + rootfs)")
     p.add_argument("--sysupgrade", help="OpenWrt squashfs-sysupgrade.bin "
                    "(tar): kernel into \"kernel\", root into \"rootfs\"")
+    p.add_argument("--fit", help="OpenWrt squashfs-sysupgrade.itb (FIT) -> "
+                   "\"production\" (bpi-r4 layout)")
+    p.add_argument("--recovery", help="initramfs-recovery.itb -> \"recovery\"")
     p.add_argument("--boot-env", action="store_true",
                    help="OpenWrt U-Boot environment that boots the FIT "
                         "in the \"kernel\" partition")
@@ -196,6 +212,15 @@ def main():
             for name, data in (("kernel", kernel), ("rootfs", root)):
                 if len(data) > psize[name]:
                     sys.exit(f"sysupgrade {name} larger than the partition")
+                put(f, part[name], data)
+        for name, img in (("production", a.fit), ("recovery", a.recovery)):
+            if img:
+                if name not in part:
+                    sys.exit(f"--{'fit' if name == 'production' else name}: "
+                             f"the {a.layout} layout has no \"{name}\"")
+                data = open(img, "rb").read()
+                if len(data) > psize[name]:
+                    sys.exit(f"{img} larger than the {name} partition")
                 put(f, part[name], data)
         if a.boot_env:
             put(f, part["u-boot-env"], uboot_env(BOOT_ENV, 1))

@@ -1,10 +1,10 @@
 Router Emulator (MediaTek MT7981B / Filogic 820, MT7986 / Filogic 830,
-MT7987 / Filogic 850)
+MT7987 / Filogic 850, MT7988 / Filogic 860 / 880)
 ======================================================================
 
-Emulates a MediaTek MT7981B, MT7986 or MT7987 router board whose hardware
-is described by a board preset. The emulator runs the REAL boot chain,
-unmodified: BootROM -> BL2 (DDR training) -> BL31 -> U-Boot -> OpenWrt
+Emulates a MediaTek MT7981B, MT7986, MT7987 or MT7988 router board whose
+hardware is described by a board preset. The emulator runs the REAL boot
+chain, unmodified: BootROM -> BL2 (DDR training) -> BL31 -> U-Boot -> OpenWrt
 from the emulated flash.
 
 Quick start
@@ -30,9 +30,9 @@ Quick start
 Board presets
 -------------
 A preset (presets\*.ini) describes the hardware:
-  GMAC0       MT7531 or Airoha AN8855 switch (with the labels of its
-              ports 0..4), a 2.5G PHY (Realtek RTL8221B or Motorcomm
-              YT8821) or nothing
+  GMAC0       MT7531, Airoha AN8855 or the MT7988's built-in switch (with
+              the labels of its ports 0..4), a 2.5G PHY (Realtek RTL8221B
+              or Motorcomm YT8821) or nothing
   GMAC1       a 2.5G PHY (RTL8221B / YT8821), the MT7981 built-in 1G PHY
               or nothing
   RAM         type (DDR3 / DDR4) and size; the type must match the BL2 in
@@ -86,7 +86,9 @@ WBR3000UAX, TR3000, TR3000 256MB, M3000 v1/v2 (RTL8221B), M3000 v2
 (YT8821), WR3000 v1 (SPI-NOR); Netis NX30 V2, NX31, NX32U; Xiaomi Mi
 Router AX3000T, Redmi AX6000; Netcore N60, N60 Pro; GL.iNet GL-MT6000;
 Bananapi BPi-R4 Lite; Huasifei WH3000 Pro NAND, WH3000 Pro eMMC,
-WH3000R NAND; Routerich AX3000, AX3000 v1 (own dumps), BE7200.
+WH3000R NAND; Routerich AX3000, AX3000 v1 (own dumps), BE7200;
+Asus ZenWiFi BT8, TP-Link TL-7DR7230 v1 (OpenWrt snapshot, no LuCI) and
+Bananapi BPi-R4 (MT7988: Filogic 860 / 880).
 
 Language
 --------

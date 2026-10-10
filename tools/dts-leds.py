@@ -14,6 +14,7 @@ target/linux/mediatek/image/filogic.mk (default OpenWrt tree: src/openwrt).
 A preset LED line:  ledN=<name>: <colour> <source> [+ <colour> <source>...]
   sources  gpio:N[:low]     SoC GPIO (":low" = GPIO_ACTIVE_LOW)
            phy:ADDR:N       LED pin N of the Ethernet PHY at MDIO address ADDR
+           swphy:PORT:N     LED pin N of the switch's PHY of port PORT
            ws2812:BUS:N     LED N of a WS2812B chain on SPI bus BUS (colour "rgb")
            pwm:N            PWM channel N (pwm-leds)
 Several colours of one lamp (a bi-colour status LED) are joined with "+":
@@ -283,6 +284,7 @@ def walk(n):
 
 class Led:
     def __init__(self, node, function, color, source):
+        self.port = None
         self.node = node
         self.function = function
         self.color = color
@@ -356,14 +358,41 @@ def find_leds(dts):
             elif n.name == "leds" and n.parent is not None and n.parent.cells("reg") \
                     and "ethernet-phy" in (n.parent.str("compatible") or "ethernet-phy") \
                     and is_under(n.parent, ("mdio", "mdio_bus", "mdio-bus")):
-                addr = num(n.parent.cells("reg")[0])
+                phy = n.parent
+                addr = num(phy.cells("reg")[0])
+                # a PHY of the switch (MT7988 built-in): by its port
+                sw = in_switch(phy)
+                port = port_label(tops, phy)
                 for c in n.live_children():
                     r = c.cells("reg")
                     if r is None or not enabled(c):
                         continue
-                    leds.append(Led(c, function_of(c), color_of(c),
-                                    "phy:%d:%d" % (addr, num(r[0]))))
+                    led = Led(c, function_of(c), color_of(c),
+                              "%s:%d:%d" % ("swphy" if sw else "phy", addr,
+                                            num(r[0])))
+                    led.port = port
+                    leds.append(led)
     return leds, skipped
+
+
+def in_switch(n):
+    p = n.parent
+    while p is not None:
+        if "switch" in (p.str("compatible") or "") or \
+                p.name.split("@")[0] == "switch" or "switch" in p.labels:
+            return True
+        p = p.parent
+    return False
+
+
+def port_label(tops, phy):
+    """label of the port whose phy-handle points to this PHY"""
+    for top in tops:
+        for n in walk(top):
+            h = n.cells("phy-handle") or n.cells("phy")
+            if h and h[0].lstrip("&") in phy.labels and n.str("label"):
+                return n.str("label")
+    return None
 
 
 def group(leds, dts):
@@ -399,6 +428,10 @@ def group(leds, dts):
 
 
 def lamp_name(lamp):
+    port = getattr(lamp[0], "port", None)
+    if port and len(lamp) == 1:
+        return port.upper() if port == "wan" else \
+            re.sub(r"^lan(\d+)$", r"LAN \1", port)
     fs = [l.function for l in lamp]
     if len(set(fs)) > 1:
         # power + status / fault: the board's status lamp
@@ -446,16 +479,23 @@ def device_dts(owrt, profile):
 
 def load_dts(owrt, name):
     linux = os.path.join(ROOT, "src", "linux")
+    # boards whose DTS is in the kernel (DEVICE_DTS_DIR := $(DTS_DIR), e.g.
+    # the BPi-R4): the kernel's mediatek DTS with OpenWrt's patches applied
+    # (work/kdts, made by tools/kernel-dts.sh), else the plain kernel tree
+    kdts = [os.path.join(ROOT, "work/kdts/arch/arm64/boot/dts/mediatek"),
+            os.path.join(linux, "arch/arm64/boot/dts/mediatek")]
     incdirs = [os.path.join(owrt, "target/linux/mediatek/dts"),
-               os.path.join(linux, "include"),
-               os.path.join(linux, "arch/arm64/boot/dts/mediatek")]
+               os.path.join(linux, "include")] + kdts
+    for d in [incdirs[0]] + kdts:
+        if os.path.isfile(os.path.join(d, name + ".dts")):
+            break
     dts = Dts(incdirs, {})
     # the SoC .dtsi (in the kernel tree, patched by OpenWrt) may be missing:
     # the binding constants the board files use come from these headers
     for h in ("dt-bindings/gpio/gpio.h", "dt-bindings/leds/common.h",
               "dt-bindings/input/input.h"):
         dts.read_macros(os.path.join(linux, "include", h))
-    dts.load(os.path.join(owrt, "target/linux/mediatek/dts", name + ".dts"))
+    dts.load(os.path.join(d, name + ".dts"))
     return dts
 
 

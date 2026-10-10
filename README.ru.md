@@ -1,4 +1,4 @@
-# Router Emulator (MediaTek MT7981B / Filogic 820, MT7986 / Filogic 830, MT7987 / Filogic 850)
+# Router Emulator (MediaTek MT7981B / Filogic 820, MT7986 / Filogic 830, MT7987 / Filogic 850, MT7988 / Filogic 860 / 880)
 
 [English](README.md) · **Русский** · Сборка: [Linux](README.build.linux.ru.md) · [Windows](README.build.windows.ru.md)
 
@@ -23,7 +23,9 @@ BootROM (эмулирован) → BL2 (preloader MediaTek, калибровка
 `mt7986-router` (ключ пресета `soc=mt7986`): те же периферийные блоки,
 четыре ядра, BL2 для MT7986 со своей калибровкой DRAM и определением её
 размера, см. [MT7986](#mt7986-filogic-830); платы на MT7987A/B — на
-`mt7987-router` (`soc=mt7987`, см. [MT7987](#mt7987-filogic-850)).
+`mt7987-router` (`soc=mt7987`, см. [MT7987](#mt7987-filogic-850)); платы на
+MT7988A/D (Filogic 880 / 860) — на `mt7988-router` (`soc=mt7988`, см.
+[MT7988](#mt7988-filogic-880--860)).
 
 ## Быстрый старт
 
@@ -50,11 +52,11 @@ Windows: скачайте zip из релиза (или соберите сам�
 
 | Параметр | Значения | Смысл |
 |---|---|---|
-| `gmac0` | `mt7531` · `an8855` · `rtl8221b` · `yt8821` · `gpy211` · `none` | что подключено к GMAC0 (mac@0, SGMII0); `an8855` — коммутатор Airoha AN8855 на MDIO 1 (CPU-порт 5, например Routerich BE7200) |
+| `gmac0` | `mt7531` · `an8855` · `mt7988-switch` · `rtl8221b` · `yt8821` · `gpy211` · `none` | что подключено к GMAC0 (mac@0, SGMII0); `an8855` — коммутатор Airoha AN8855 на MDIO 1 (CPU-порт 5, например Routerich BE7200); `mt7988-switch` — встроенный 4-портовый коммутатор MT7988 |
 | `ports` | например `wan:lan1:lan2:lan3:lan4` | id netdev портов 0..4 MT7531 и порта 5 при `port5=` (`-` — не используется) |
 | `port5`, `port5-phy-addr`, `port5-reset-gpio` | `rtl8221b` · `yt8821` · `gpy211` · `none`; адрес MDIO (5); GPIO | 2.5G PHY на порту 5 MT7531 (SGMII), например Netcore N60 Pro; его netdev — шестой элемент `ports` |
 | `gmac0-port`, `gmac1-port` | id netdev | порт PHY, подключённого прямо к GMAC |
-| `gmac1` | `rtl8221b` · `yt8821` · `gpy211` · `gphy` · `i2p5ge` · `none` | GMAC1 (mac@1); `gphy` — встроенный 1G PHY MT7981; `i2p5ge` — внутренний 2.5G PHY MT7987; `gpy211` — MaxLinear GPY211C |
+| `gmac1` | `rtl8221b` · `yt8821` · `gpy211` · `gphy` · `i2p5ge` · `none` | GMAC1 (mac@1); `gphy` — встроенный 1G PHY MT7981; `i2p5ge` — внутренний 2.5G PHY MT7987 / MT7988; `gpy211` — MaxLinear GPY211C |
 | `gmac0-reset-gpio`, `gmac1-reset-gpio` | GPIO, `-1` (по умолчанию) | линия аппаратного сброса 2.5G PHY; по умолчанию не подключена (отсутствие линии безвредно, неверная могла бы держать PHY в сбросе) |
 | `gmac0-phy-addr`, `gmac1-phy-addr` | адрес MDIO | адрес этого PHY (по умолчанию 1 на gmac0, 6 на gmac1) |
 | `flash` | `nand` · `nor` · `emmc` | загрузочный флеш: SPI-NAND на SPI0 (по умолчанию), SPI-NOR на SPI2 (MT7986: SPI0) или eMMC (см. ниже) |
@@ -66,7 +68,7 @@ Windows: скачайте zip из релиза (или соберите сам�
 | `ddr` | `ddr3` · `ddr4` | тип распаянной памяти: BL2, собранный для другого типа, останавливает машину, как не проходит инициализация DRAM на настоящей плате |
 | `usb-port` | `none` · `2` · `3` | разъём USB (USB 3.0: устройства подключаются на SuperSpeed) |
 | `usb-host` | `VID:PID[;VID:PID…]` | проброс USB-устройств этого ПК в роутер (корневые порты USB 2.0 №2, 3, …, в том числе на платах без разъёма), например Wi-Fi-донгла, LTE-модема, USB-Ethernet; см. «USB Wi-Fi-донгл» |
-| `pcie-wifi` | `none` · `mt7992` | только MT7987: карта в слоте PCIe. `mt7992` — MediaTek MT7992, Wi-Fi 7 (2,4 + 5 ГГц); OpenWrt работает с ней через `kmod-mt7996e` и прошивки `kmod-mt7992-firmware`, которых нет в официальных образах MT7987 |
+| `pcie-wifi` | `none` · `mt7992` | MT7987 / MT7988: карта в слоте PCIe. `mt7992` — MediaTek MT7992, Wi-Fi 7 (2,4 + 5 ГГц); OpenWrt работает с ней через `kmod-mt7996e` и прошивки `kmod-mt7992-firmware`, которых нет в официальных образах MT7987 |
 | `reset-gpio`, `wps-gpio` | GPIO | кнопки (QOM `/machine/pinctrl` `reset-button`, `wps-button`) |
 | `reset-active-high`, `wps-active-high` | `on` | кнопка читается как 1 при нажатии (по умолчанию active low) |
 | `reset-hold` | мс | включение с зажатым reset (TFTP recovery в U-Boot) |
@@ -81,7 +83,9 @@ Windows: скачайте zip из релиза (или соберите сам�
 одна лампа двух цветов, у каждого цвета свой GPIO (`:low` = GPIO_ACTIVE_LOW).
 Источники: `gpio:N[:low]` (GPIO SoC), `phy:ADDR:N` (вывод LED N у Ethernet
 PHY с адресом MDIO ADDR, как его запрограммировали регистры LED: RTL8221B,
-GPY211; например, лампа WAN у WR3000P в актуальном OpenWrt), `ws2812:BUS:N`
+GPY211; например, лампа WAN у WR3000P в актуальном OpenWrt), `swphy:PORT:N`
+(вывод LED N у PHY порта PORT встроенного коммутатора MT7988, например лампы
+портов BPi-R4), `ws2812:BUS:N`
 (цепочка RGB WS2812B на шине SPI BUS, цвет `rgb`: Redmi AX6000) и `pwm:N`
 (канал PWM, pwm-leds: BPi-R4 Lite). QEMU опрашивает их каждые 50 мс;
 `qom-get /machine led-state` выдаёт по каждой лампе (`;`) и цвету (`,`)
@@ -139,6 +143,9 @@ device tree OpenWrt (`--write --all`).
 | Routerich AX3000 | 3×1G LAN + WAN MT7531 (WAN = порт 4) | DDR3 256 МБ | 128 МБ, без bdinfo | 2.0 | OpenWrt (ubootmod) |
 | Routerich AX3000 v1 | 1G WAN на встроенном PHY + 3×1G LAN MT7531 | DDR3 256 МБ | 128 МБ, без bdinfo | 2.0 | производителя (нужны свои дампы) |
 | Routerich BE7200 (MT7987A) | 2.5G WAN внутренний PHY + 3×1G LAN **Airoha AN8855**; Wi-Fi 7 MT7992 по PCIe | DDR4 1 ГБ | **512 МБ** (W25N04KV) | 3.0 | OpenWrt |
+| Asus ZenWiFi BT8 (MT7988D, Filogic 860) | 2.5G WAN внутренний PHY + 2×1G LAN встроенный коммутатор (lan3 на GMAC2 и Wi-Fi MT7996 не эмулируются) | DDR4 1 ГБ | 128 МБ, FIP и Factory в UBI | 3.0 | OpenWrt (ubootmod) |
+| TP-Link TL-7DR7230 v1 (MT7988D, Filogic 860) | 2.5G WAN внутренний PHY + 4×1G LAN встроенный коммутатор | DDR4 1 ГБ | 128 МБ, разметка TP-Link | – | OpenWrt **snapshot** (без LuCI) |
+| Bananapi BPi-R4 (MT7988A, Filogic 880) | WAN + 3×1G LAN встроенный коммутатор (SFP+ не эмулируются) | DDR4 2 ГБ (на плате 4 ГБ) | **eMMC** (разметка `bpi-r4`) | 3.0 | OpenWrt |
 
 У плат Netis нет раздела bdinfo (FIP с 0x380000, ubi с 0x580000; MAC — в
 Factory): в пресетах стоит `openwrt-no-bdinfo=1`. У плат на MT7986 та же
@@ -221,6 +228,38 @@ tools/prepare-nand.sh --emmc --emmc-layout wh3000-pro --uboot cmcc_rax3000m-emmc
 ./emulator.sh -P huasifei-wh3000-pro-emmc
 ```
 
+## MT7988 (Filogic 880 / 860)
+
+`mt7988-router`: MT7988A (Filogic 880, 4 ядра) и MT7988D (Filogic 860:
+тот же кристалл, DT платы выключает cpu@3). Четыре ядра Cortex-A73 (TF-A
+для MT7988 содержит код только для Cortex-A73; `cortex-a73` в QEMU — модель
+A72 с ID A73), MCUCFG на 0x100e0000, UART на 0x11000000, SPI0..2 на
+0x11007000 / 8000 / 9000, eFuse на 0x11f50000, NETSYS v3 (PDMA на 0x6800),
+внутренний 2.5G PHY (`gmac1=i2p5ge`, MDIO 15, прошивка MT7988),
+**встроенный коммутатор** (`gmac0=mt7988-switch`: 4 порта, их GbE PHY с
+калибровкой из eFuse и регистрами LED), xHCI ssusb1 (USB 3.0), MSDC
+(eMMC), PCIe (`pcie-wifi=`), два контроллера LVTS и регистр boot strap, по
+которому U-Boot выбирает `/chosen/rootdisk-<носитель>`. Официальный BL2 (и
+комбинированные DDR3/DDR4) калибрует DRAM на той же модели контроллера.
+
+Не эмулируются: GMAC2 / порты 10G USXGMII (SFP+, lan3 у BT8), контроллер
+SNFI NAND (BL2 `snand`: BPi-R4 здесь грузится с eMMC), PMIC RT5190A
+(cpufreq остаётся на частоте загрузки), карты Wi-Fi MT7996.
+
+```bash
+tools/prepare-nand.sh --soc mt7988 --ubi-fip --ubi-factory 0x200000 asus_zenwifi-bt8 25.12.5
+./emulator.sh -P asus-zenwifi-bt8
+tools/prepare-nand.sh --soc mt7988 --emmc --emmc-layout bpi-r4 bananapi_bpi-r4 25.12.5
+./emulator.sh -P bananapi-bpi-r4
+```
+
+Asus ZenWiFi BT8 хранит MAC-адреса и EEPROM Wi-Fi в UBI-томе `factory`
+(`--ubi-factory РАЗМЕР`, ключ пресета `openwrt-ubi-factory=`). Образ eMMC
+BPi-R4 повторяет `emmc-gpt.bin` из OpenWrt (ubootenv, factory, fip,
+recovery, production; FIT sysupgrade пишется в `production`). TP-Link
+TL-7DR7230 v1 есть только в снапшоте OpenWrt: в пресете
+`openwrt-version=snapshot` (в снапшот-образах нет LuCI, SSH работает).
+
 ## Что эмулируется
 
 Все модели устройств — в `hw/arm/mt7981/` дерева QEMU
@@ -228,7 +267,7 @@ tools/prepare-nand.sh --emmc --emmc-layout wh3000-pro --uboot cmcc_rax3000m-emmc
 
 | Блок | Модель | Примечания |
 |---|---|---|
-| CPU, GIC | 2× (MT7986: 4×) Cortex-A53 (EL3/EL2), GICv3, таймер 13 МГц | остальные ядра запускает BL31 через SPMC в TOPMISC; PSCI — от BL31 |
+| CPU, GIC | 2× (MT7986, MT7987: 4×) Cortex-A53, MT7988: 4× Cortex-A73 (`cortex-a73` в QEMU: модель A72 с ID A73 и CPUACTLR_EL1) (EL3/EL2), GICv3, таймер 13 МГц | остальные ядра запускает BL31 через SPMC в TOPMISC; PSCI — от BL31 |
 | BootROM | высокоуровневая эмуляция (`mt7981_router.c`) | разбирает заголовок `SPINAND!` и GFH `FILE_INFO`, грузит BL2 в L2 SRAM, переходит на EL3 |
 | Контроллер DRAM | `mt7981_sysctl.c` + сгенерированная таблица статусов | broadcast, ответы RTSWCMD/MRW, jitter meter, lead/lag DQS gating, «глаз» приёма RX: бинарная калибровка DRAM от MediaTek находит настоящие окна, лог BL2 чистый (DDR3 и DDR4); биты DDR3EN/DDR4EN регистра `DDRCOMMON0` сверяются с `ddr=` |
 | Клоки, питание, прочее | `mt7981_sysctl.c` | разреженный регистровый файл + особые случаи (частотомер, включение CPU, TRNG v2, калибровочные данные eFuse, IPPC, термодатчик ≈45 °C, ID EIP-97, биты сброса WED) |
@@ -240,13 +279,13 @@ tools/prepare-nand.sh --emmc --emmc-layout wh3000-pro --uboot cmcc_rax3000m-emmc
 | eMMC | `mt7981_msdc.c` + eMMC из QEMU | контроллер MSDC: команды, авто CMD23/CMD12, PIO через FIFO (TF-A, U-Boot), DMA по дескрипторам GPD/BD (Linux); карта с boot0/boot1 и пользовательской областью; BootROM загружает образы `EMMC_BOOT` из boot0 |
 | SPI-NOR | `spinor.c` | 3-байтовая адресация (до 16 МБ), задаваемый JEDEC ID, чтение 1-1-1/1-1-2/1-1-4/1-2-2/1-4-4, запись страниц, стирание 4K/32K/64K/всего чипа, регистры статуса с QE; BootROM загружает с него образы `SF_BOOT`; хранилище — такая же папка |
 | Ethernet | `mt7981_eth.c` | frame engine: QDMA TX (Linux), PDMA RX, PDMA v2 (U-Boot); TSO и offload контрольных сумм; 2× LynxI SGMII PCS; любая комбинация коммутатора и PHY на двух GMAC |
-| Коммутатор | `mt7981_eth.c` | MT7531: страничный доступ по MDIO, косвенный доступ к PHY, special tag MTK (DSA), FDB с обучением, port matrix, IRQ линка → EINT 38. Airoha AN8855: 32-битная шина регистров через страницу 4 MDIO, внутренние PHY на MDIO 1..5, регистры транслируются в модель MT7531 (CPU-порт 5) |
+| Коммутатор | `mt7981_eth.c` | MT7531: страничный доступ по MDIO, косвенный доступ к PHY, special tag MTK (DSA), FDB с обучением, port matrix, IRQ линка → EINT 38. Airoha AN8855: 32-битная шина регистров через страницу 4 MDIO, внутренние PHY на MDIO 1..5, регистры транслируются в модель MT7531 (CPU-порт 5). Встроенный коммутатор MT7988: модель MT7531 по MMIO 0x15020000, GbE PHY SoC (ID MT7988, калибровка из eFuse) |
 | PHY | `mt7981_eth.c` | 5× GPHY MT7531; RTL8221B-VB-CG (C45, термодатчик); Motorcomm YT8821 (расширенные регистры, пространства UTP/SerDes, статус 2.5G); MaxLinear GPY211C (C45, версия прошивки, mailbox, термодатчик); встроенный GbE PHY MT7981 (с калибровкой); PHY на порту 5 MT7531; необязательные GPIO аппаратного сброса |
 | GPIO / EINT | `mt7981_pinctrl.c` | кнопки (reset/WPS, `reset-hold-ms` для нажатия на время), лог светодиодов, уровни выводов для других устройств |
-| Светодиоды | `mt7981_leds.c`, `ws2812b.c` | светодиоды передней панели из пресета: GPIO, регистры LED у PHY (RTL8221B, GPY211), WS2812B на SPI, каналы PWM; распознавание мигания; `led-state` |
+| Светодиоды | `mt7981_leds.c`, `ws2812b.c` | светодиоды передней панели из пресета: GPIO, регистры LED у PHY (RTL8221B, GPY211, GbE / 2.5G PHY MediaTek, в том числе портов коммутатора), WS2812B на SPI, каналы PWM; распознавание мигания; `led-state` |
 | USB | xHCI из QEMU + IPPC MTK | разъём USB 2.0 / 3.0 |
 | Wi-Fi | `mt7981_wmac.c` | кольца WFDMA + эмуляция командного интерфейса прошивок WM/WA: прошивка грузится, оба диапазона поднимаются, hostapd работает, в эфире ничего нет (сканирование пустое) |
-| PCIe (MT7987) | `mt7987_pcie.c` | хост MediaTek Gen3: линк, TLP конфигурации через CFGNUM, INTx, приём MSI; корневой порт из QEMU |
+| PCIe (MT7987, MT7988) | `mt7987_pcie.c` | хост MediaTek Gen3: линк, TLP конфигурации через CFGNUM, INTx, приём MSI; корневой порт из QEMU |
 | Карта Wi-Fi 7 (MT7987) | `mt7992_wifi.c` | MT7992 для mt7996e: окна BAR0, кольца WFDMA, загрузка патча и прошивок, ответы на UNI-команды, события TX free; радио «молчит» |
 | Крипто (EIP-97) | только ID | драйвер safexcel видит «нет packet engine» и отключается; работает программная криптография |
 | WED | только биты сброса | с `wed_enable=1` mt7915e видит, что WO MCU нет, и работает без offload |
@@ -272,9 +311,10 @@ bdinfo, FIP, firmware). Если файлы меньше флеша (напри�
 стёртыми байтами (`0xff`) до размера флеша, чтобы то, что роутер туда
 запишет, сохранялось.
 
-- [`tools/prepare-nand.sh`](tools/prepare-nand.sh) `[--stock ПАПКА [--nor] | --local ПАПКА] [--flash-mb N] [--no-bdinfo] ПРОФИЛЬ [ВЕРСИЯ] [ПАПКА_NAND]` — собирает папку NAND для профиля устройства OpenWrt: скачивает официальные образы с U-Boot OpenWrt (`ПРОФИЛЬ-ubootmod-*` или `ПРОФИЛЬ-*`, с проверкой sha256), или берёт свои сборки (`--local`), или оставляет стоковые BL2/FIP (`--stock`) с OpenWrt `sysupgrade.bin` в стоковой разметке; `--no-bdinfo` — для плат без раздела bdinfo, `--nor` — для плат с SPI-NOR (стоковые BL2/FIP + OpenWrt `sysupgrade.bin` в разделе `firmware`), `--soc mt7986` — для плат на MT7986 (файлы разделов `mt7986.mtdN.*`, минимальный EEPROM Wi-Fi в пустом Factory), `--ubi-fip` — для BL2 «spim-nand-ubi» (BL2 с 0, UBI с 0x200000, FIP — том `fip`). Factory/bdinfo берутся из `factory/`.
+- [`tools/prepare-nand.sh`](tools/prepare-nand.sh) `[--stock ПАПКА [--nor] | --local ПАПКА] [--flash-mb N] [--no-bdinfo] ПРОФИЛЬ [ВЕРСИЯ] [ПАПКА_NAND]` — собирает папку NAND для профиля устройства OpenWrt: скачивает официальные образы с U-Boot OpenWrt (`ПРОФИЛЬ-ubootmod-*` или `ПРОФИЛЬ-*`, с проверкой sha256), или берёт свои сборки (`--local`), или оставляет стоковые BL2/FIP (`--stock`) с OpenWrt `sysupgrade.bin` в стоковой разметке; `--no-bdinfo` — для плат без раздела bdinfo, `--nor` — для плат с SPI-NOR (стоковые BL2/FIP + OpenWrt `sysupgrade.bin` в разделе `firmware`), `--soc mt7986` — для плат на MT7986 (файлы разделов `mt7986.mtdN.*`, минимальный EEPROM Wi-Fi в пустом Factory), `--ubi-fip` — для BL2 «spim-nand-ubi» (BL2 с 0, UBI с 0x200000, FIP — том `fip`), `--ubi-factory РАЗМЕР` (Factory как UBI-том `factory`, Asus BT8), `--emmc [--emmc-layout L]` (образ eMMC, см. [MT7988](#mt7988-filogic-880--860)). Factory/bdinfo берутся из `factory/`.
 - [`tools/mknand.py`](tools/mknand.py) — создание и правка образов: `create` (BL2, FIP, Factory, bdinfo, UBI из `.itb` или `sysupgrade.bin`), `write --part fip`, `read`, `split`, `join`, `--flash-mb 256`, `--no-bdinfo`, `nor` (папка SPI-NOR).
-- [`tools/mkemmc.py`](tools/mkemmc.py) — образ eMMC (`flash=emmc`): BL2 в boot0, GPT с разделами u-boot-env, factory, fip, kernel, rootfs (разметка GL-MT6000 или `--layout wh3000-pro`), OpenWrt `squashfs-factory.bin` в kernel + rootfs или `--sysupgrade` (tar sysupgrade), `--boot-env` (окружение U-Boot OpenWrt, загружающее раздел `kernel`).
+- [`tools/kernel-dts.sh`](tools/kernel-dts.sh) — DTS MediaTek из ядра с DTS-частями патчей OpenWrt (`work/kdts`) для плат, чей DTS лежит в дереве ядра (BPi-R4); оттуда их читает [`tools/dts-leds.py`](tools/dts-leds.py).
+- [`tools/mkemmc.py`](tools/mkemmc.py) — образ eMMC (`flash=emmc`): BL2 в boot0, GPT с разделами u-boot-env, factory, fip, kernel, rootfs (разметка GL-MT6000, `--layout wh3000-pro` или `--layout bpi-r4` с `--fit` / `--recovery` — FIT в production / recovery), OpenWrt `squashfs-factory.bin` в kernel + rootfs или `--sysupgrade` (tar sysupgrade), `--boot-env` (окружение U-Boot OpenWrt, загружающее раздел `kernel`).
 
 ## Запуск
 

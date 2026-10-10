@@ -119,6 +119,7 @@ for f in presets/*.ini; do
     [ -n "$(get openwrt-emmc-layout)" ] && set -- "$@" --emmc-layout "$(get openwrt-emmc-layout)"
     [ -n "$(get openwrt-uboot)" ] && set -- "$@" --uboot "$(get openwrt-uboot)"
     [ "$(get openwrt-ubi-fip)" = 1 ] && set -- "$@" --ubi-fip
+    [ -n "$(get openwrt-ubi-factory)" ] && set -- "$@" --ubi-factory "$(get openwrt-ubi-factory)"
     [ -n "$(get openwrt-parts)" ] && set -- "$@" --parts "$(get openwrt-parts)"
     [ "$(get openwrt-nor)" = 1 ] && set -- "$@" --nor --nor-mb "$(get nor)"
     # a board without images for this version must not break the package

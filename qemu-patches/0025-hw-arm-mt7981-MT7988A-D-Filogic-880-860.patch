@@ -1,0 +1,639 @@
+From 96a76691dd36897deb5a95c3391bccbe883a361c Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Sat, 10 Oct 2026 17:10:38 -0400
+Subject: [PATCH 25/25] hw/arm/mt7981: MT7988A/D (Filogic 880 / 860)
+
+mt7988-router: the MediaTek MT7988A (Filogic 880) and MT7988D (Filogic
+860, the same die with cpu@3 disabled by the board's DT).  The official
+OpenWrt chain runs unmodified: BL2 (DDR3/DDR4 calibration, also the
+"comb" BL2s), BL31, U-Boot and Linux.
+
+* target/arm: a cortex-a73 CPU model (the A72 model with the A73 MIDR and
+  CPUACTLR_EL1 at its A73 encoding): TF-A for the MT7988 has only
+  Cortex-A73 cpu_ops and errata code.
+* RouterSoC: cpu_type, MCUCFG base (0x100e0000: secondary core boot
+  addresses), xHCI base / IRQ (ssusb1 0x11200000, SPI 172); DRAM aliases
+  up to base + 8 GB (U-Boot's get_ram_size probes that far).
+* Built-in switch (gmac0=mt7988-switch): the MT7531 model's registers
+  memory mapped at 0x15020000 (IRQ SPI 209), internal PHYs 0..3 via its
+  PHY_IAC, modelled on the MT7981 SoC GbE PHY with the MT7988 ID
+  (03a2:9481); internal 2.5G PHY with the MT7988 ID (0033:9c11).
+* eFuse: GbE PHY calibration cells (0x940 + 0x14 * port), LVTS
+  calibration for both LVTS controllers; LVTS controller at +0x100.
+* Boot strap 0x1001f6f0 [11:10] (0 NOR, 1 SPI-NAND, 2 eMMC, 3 SNFI/SD):
+  U-Boot sets /chosen/rootdisk from it.
+* PWM channel blocks at 0x80 + 0x40 * n (like MT7981).
+* LEDs: MediaTek PHY LED registers (mtk-phy-lib: VEND2 0x24..0x27, for
+  the SoC GbE PHYs, MT7531 PHYs and the internal 2.5G PHYs; LED0 lights
+  on link after reset) and the source swphy:PORT:N (a switch PHY's LED).
+
+Checked: Asus ZenWiFi BT8 (MT7988D, SPI-NAND, FIP and Factory in UBI),
+TP-Link TL-7DR7230 v1 (MT7988D, OpenWrt snapshot), Bananapi BPi-R4
+(MT7988A, eMMC): LAN through the built-in switch, WAN on the 2.5G PHY,
+USB 3.0, LEDs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015RfXBtBMqiJKuedv8fLHqT
+---
+ hw/arm/mt7981/mt7981.h        |  3 +-
+ hw/arm/mt7981/mt7981_eth.c    | 86 +++++++++++++++++++++++++++++---
+ hw/arm/mt7981/mt7981_leds.c   | 17 ++++---
+ hw/arm/mt7981/mt7981_router.c | 93 ++++++++++++++++++++++++++++++++---
+ hw/arm/mt7981/mt7981_sysctl.c | 36 ++++++++++++--
+ target/arm/tcg/cpu64.c        | 22 +++++++++
+ 6 files changed, 229 insertions(+), 28 deletions(-)
+
+diff --git a/hw/arm/mt7981/mt7981.h b/hw/arm/mt7981/mt7981.h
+index 6b119e2..366f229 100644
+--- a/hw/arm/mt7981/mt7981.h
++++ b/hw/arm/mt7981/mt7981.h
+@@ -106,7 +106,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(MT7981WmacState, MT7981_WMAC)
+ 
+ /* LED panel (mt7981_leds.c): state of the LED sources */
+ int mt7981_pinctrl_out(DeviceState *dev, int pin, uint32_t *toggles);
+-int mt7981_eth_phy_led(DeviceState *dev, int addr, int idx, uint32_t *frames);
++int mt7981_eth_phy_led(DeviceState *dev, int addr, int idx, bool sw,
++                       uint32_t *frames);
+ uint32_t mt7981_sysctl_peek(DeviceState *dev, hwaddr a);
+ 
+ /* WS2812B RGB LED chain on a SPI bus (decodes the leds-ws2812b stream) */
+diff --git a/hw/arm/mt7981/mt7981_eth.c b/hw/arm/mt7981/mt7981_eth.c
+index 80bccb5..36e26f2 100644
+--- a/hw/arm/mt7981/mt7981_eth.c
++++ b/hw/arm/mt7981/mt7981_eth.c
+@@ -155,6 +155,7 @@ struct MT7981EthState {
+     SysBusDevice parent_obj;
+     MemoryRegion iomem, sram, container;
+     MemoryRegion sgmii_mr[2];
++    MemoryRegion swmmio;        /* MT7988 built-in switch registers */
+     qemu_irq irq[4];
+     qemu_irq sw_irq;
+ 
+@@ -181,7 +182,8 @@ struct MT7981EthState {
+     uint32_t dphy_addr[2];
+     uint32_t switch_addr;
+     bool has_switch;            /* a switch on GMAC0 */
+-    uint32_t switch_model;      /* 0 = MediaTek MT7531, 1 = Airoha AN8855 */
++    uint32_t switch_model;      /* 0 = MT7531, 1 = Airoha AN8855, 2 = MT7988 */
++    uint32_t i2p5ge_phyid2;     /* internal 2.5G PHY ID (MT7987 / MT7988) */
+     /* AN8855 32-bit register access through MDIO page 4 ("PBUS") */
+     uint32_t an_wr_addr, an_wr_hi, an_rd_addr, an_rd_val;
+     uint32_t pdma2_base;        /* PDMA with 32-byte descriptors */
+@@ -263,7 +265,7 @@ static void phy_init(EthPhy *p, int type, bool link)
+         ht_set(p->mmd, (7 << 16) | 0x20, 0x0080);  /* adv 2.5G */
+     } else if (type == PHY_I2P5GE) {
+         p->c22[MII_PHYID1] = 0x0033;
+-        p->c22[MII_PHYID2] = 0x9c91;
++        p->c22[MII_PHYID2] = 0x9c91;    /* MT7987; eth_reset: MT7988 */
+         ht_set(p->mmd, (7 << 16) | 0x00, 0x3000);   /* AN enabled */
+         ht_set(p->mmd, (7 << 16) | 0x20, 0x0080);   /* adv 2.5G */
+     } else if (type == PHY_GPY211) {
+@@ -989,7 +991,8 @@ static EthPhy *mdio_find_phy(MT7981EthState *s, int addr, bool sw_internal)
+  * registers program it: -1 = no such PHY (or LED), else bit 0 = lit,
+  * bit 1 = blinks with traffic.  *frames counts the frames of its port.
+  */
+-int mt7981_eth_phy_led(DeviceState *dev, int addr, int idx, uint32_t *frames)
++int mt7981_eth_phy_led(DeviceState *dev, int addr, int idx, bool sw,
++                       uint32_t *frames)
+ {
+     MT7981EthState *s = MT7981_ETH(dev);
+     EthPhy *p = NULL;
+@@ -997,13 +1000,22 @@ int mt7981_eth_phy_led(DeviceState *dev, int addr, int idx, uint32_t *frames)
+     uint32_t ctl, act;
+     bool on;
+ 
+-    for (int g = 0; g < 2; g++) {
++    /* sw: a PHY of the switch (MT7988 built-in, MT7531), by its port */
++    if (sw) {
++        if (!s->has_switch || addr < 0 || addr >= SW_NPHY || idx < 0 ||
++            idx > 3) {
++            return -1;
++        }
++        p = &s->gphy[addr];
++        port = addr;
++    }
++    for (int g = 0; g < 2 && !sw; g++) {
+         if (s->dphy_type[g] && addr == s->dphy_addr[g]) {
+             p = &s->dphy[g];
+             port = 5 + g;
+         }
+     }
+-    if (!p && s->p5phy_type && addr == s->p5phy_addr) {
++    if (!p && !sw && s->p5phy_type && addr == s->p5phy_addr) {
+         p = &s->p5phy;
+         port = 7;
+     }
+@@ -1041,6 +1053,28 @@ int mt7981_eth_phy_led(DeviceState *dev, int addr, int idx, uint32_t *frames)
+         ctl = ht_get(p->mmd, (30 << 16) | (1 + idx), 0);
+         on = p->link && (ctl & BIT(4 + 3));
+         return on | ((on && (ctl & (3 << 8))) ? 2 : 0);
++    case PHY_MT7981:
++    case PHY_MT7531:
++    case PHY_I2P5GE:
++        /*
++         * MediaTek PHYs (mtk-phy-lib): VEND2 0x24 + 2n LEDn_ON_CTRL,
++         * [6] force on, link speeds [0] 1000 [1] 100 [2] 10 [7] 2500
++         * ([15] enable is set at reset and left alone by Linux; LED0 lights
++         * on link until software sets it up); 0x25 + 2n LEDn_BLINK_CTRL:
++         * [9] force blink, other bits blink on traffic
++         */
++        if (idx > 1) {
++            return -1;
++        }
++        ctl = ht_get(p->mmd, (31 << 16) | (0x24 + 2 * idx),
++                     idx ? 0 : 0x8007);
++        act = ht_get(p->mmd, (31 << 16) | (0x25 + 2 * idx), 0);
++        on = (ctl & BIT(6)) ||
++             (p->link && (ctl & (BIT(0) | BIT(1) | BIT(2) | BIT(7))));
++        if (act & BIT(9)) {
++            return 1 | 2 | 4;       /* force blink: blinks without traffic */
++        }
++        return on | ((on && (act & ~BIT(9) & 0x3ff)) ? 2 : 0);
+     default:
+         /* no LED registers modelled: lit while the link is up */
+         return p->link | (p->link ? 2 : 0);
+@@ -1060,7 +1094,8 @@ static uint32_t mdio_iac(MT7981EthState *s, uint32_t v, bool sw_internal)
+     if (st == 1 && !sw_internal && an_mdio(s, addr, reg, cmd == 1, &data)) {
+         ret = data;                         /* AN8855 */
+     } else if (st == 1) {                   /* clause 22 */
+-        if (!sw_internal && s->has_switch && addr == s->switch_addr) {
++        if (!sw_internal && s->has_switch && s->switch_model != 2 &&
++            addr == s->switch_addr) {
+             if (cmd == 1) {
+                 sw_mdio_write(s, reg, data);
+             } else {
+@@ -1982,11 +2017,19 @@ static void eth_reset(DeviceState *dev)
+     memset(s->fdb, 0, sizeof(s->fdb));
+     s->sw_page = 0;
+     for (int i = 0; i < SW_NPHY; i++) {
+-        phy_init(&s->gphy[i], s->switch_model ? PHY_AN8855 : PHY_MT7531,
++        /* MT7988 built-in switch: the SoC GbE PHYs (like MT7981's) */
++        phy_init(&s->gphy[i], s->switch_model == 1 ? PHY_AN8855 :
++                              s->switch_model == 2 ? PHY_MT7981 : PHY_MT7531,
+                  port_link(s, i));
++        if (s->switch_model == 2) {
++            s->gphy[i].c22[MII_PHYID2] = 0x9481;
++        }
+     }
+     for (int g = 0; g < 2; g++) {
+         phy_init(&s->dphy[g], phy_type(s->dphy_type[g]), port_link(s, 5 + g));
++        if (s->dphy[g].type == PHY_I2P5GE && s->i2p5ge_phyid2) {
++            s->dphy[g].c22[MII_PHYID2] = s->i2p5ge_phyid2;
++        }
+     }
+     phy_init(&s->p5phy, phy_type(s->p5phy_type), port_link(s, 7));
+     phy_init(&s->intphy, PHY_MT7981, false);
+@@ -2017,6 +2060,25 @@ static void eth_realize(DeviceState *dev, Error **errp)
+     }
+ }
+ 
++/* MT7988: the built-in switch's registers are memory mapped */
++static uint64_t swmmio_read(void *opaque, hwaddr addr, unsigned size)
++{
++    return sw_reg_read(opaque, addr & ~3);
++}
++
++static void swmmio_write(void *opaque, hwaddr addr, uint64_t val,
++                         unsigned size)
++{
++    sw_reg_write(opaque, addr & ~3, val);
++}
++
++static const MemoryRegionOps swmmio_ops = {
++    .read = swmmio_read,
++    .write = swmmio_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 4, .max_access_size = 4 },
++};
++
+ static void eth_init(Object *obj)
+ {
+     MT7981EthState *s = MT7981_ETH(obj);
+@@ -2040,6 +2102,10 @@ static void eth_init(Object *obj)
+                               "mt7981-sgmii", 0x1000);
+         sysbus_init_mmio(sbd, &s->sgmii_mr[i]);
+     }
++    /* region 3: MT7988 built-in switch (mapped by the machine if present) */
++    memory_region_init_io(&s->swmmio, obj, &swmmio_ops, s, "mt7988-switch",
++                          0x8000);
++    sysbus_init_mmio(sbd, &s->swmmio);
+     for (int i = 0; i < 4; i++) {
+         sysbus_init_irq(sbd, &s->irq[i]);
+     }
+@@ -2066,8 +2132,12 @@ static const Property eth_props[] = {
+     DEFINE_PROP_UINT32("gmac0-phy-addr", MT7981EthState, dphy_addr[0], 1),
+     DEFINE_PROP_UINT32("gmac1-phy-addr", MT7981EthState, dphy_addr[1], 6),
+     DEFINE_PROP_UINT32("switch-addr", MT7981EthState, switch_addr, 31),
+-    /* 0 = MediaTek MT7531, 1 = Airoha AN8855 (CPU port 5, PBUS access) */
++    /*
++     * 0 = MediaTek MT7531, 1 = Airoha AN8855 (CPU port 5, PBUS access),
++     * 2 = MT7988 built-in switch (MMIO, region 3; no MDIO address)
++     */
+     DEFINE_PROP_UINT32("switch-model", MT7981EthState, switch_model, 0),
++    DEFINE_PROP_UINT32("i2p5ge-phyid2", MT7981EthState, i2p5ge_phyid2, 0),
+     DEFINE_PROP_UINT32("pdma2-base", MT7981EthState, pdma2_base, 0x6000),
+     DEFINE_PROP_UINT32("port5-phy", MT7981EthState, p5phy_type, 0),
+     DEFINE_PROP_UINT32("port5-phy-addr", MT7981EthState, p5phy_addr, 5),
+diff --git a/hw/arm/mt7981/mt7981_leds.c b/hw/arm/mt7981/mt7981_leds.c
+index 531f0d1..482c3b6 100644
+--- a/hw/arm/mt7981/mt7981_leds.c
++++ b/hw/arm/mt7981/mt7981_leds.c
+@@ -6,6 +6,7 @@
+  * sources  gpio:N[:low]   SoC GPIO, lit while driven high (low: low)
+  *          phy:ADDR:N     LED pin N of the Ethernet PHY at MDIO address
+  *                         ADDR, as its LED registers program it
++ *          swphy:PORT:N   LED pin N of the switch's PHY of port PORT
+  *          ws2812:BUS:N   LED N of a WS2812B chain on SPI bus BUS
+  *          pwm:N          PWM channel N (lit while enabled with a duty)
+  *
+@@ -32,7 +33,7 @@
+ #define TICK_MS     50
+ #define WINDOW      4           /* ticks: 200 ms decide "blinking" */
+ 
+-enum { SRC_GPIO, SRC_PHY, SRC_WS2812, SRC_PWM };
++enum { SRC_GPIO, SRC_PHY, SRC_SWPHY, SRC_WS2812, SRC_PWM };
+ 
+ typedef struct LedChan {
+     char *color;
+@@ -87,8 +88,8 @@ static bool parse_chan(LedChan *c, const char *text, int nspi, Error **errp)
+         c->src = SRC_GPIO;
+         c->a = atoi(f[1]);
+         c->low = nf == 3;
+-    } else if (!strcmp(f[0], "phy") && nf == 3) {
+-        c->src = SRC_PHY;
++    } else if ((!strcmp(f[0], "phy") || !strcmp(f[0], "swphy")) && nf == 3) {
++        c->src = strcmp(f[0], "phy") ? SRC_SWPHY : SRC_PHY;
+         c->a = atoi(f[1]);
+         c->b = atoi(f[2]);
+     } else if (!strcmp(f[0], "ws2812") && nf == 3) {
+@@ -109,7 +110,7 @@ static bool parse_chan(LedChan *c, const char *text, int nspi, Error **errp)
+     return true;
+ bad:
+     error_setg(errp, "\"%s\": expected <colour> gpio:N[:low] | phy:ADDR:N | "
+-               "ws2812:BUS:N | pwm:N", text);
++               "swphy:PORT:N | ws2812:BUS:N | pwm:N", text);
+     return false;
+ }
+ 
+@@ -168,13 +169,15 @@ static void sample(RouterLeds *r, LedChan *c)
+         }
+         break;
+     case SRC_PHY:
+-        v = r->hw.eth ? mt7981_eth_phy_led(r->hw.eth, c->a, c->b, &count) : -1;
++    case SRC_SWPHY:
++        v = r->hw.eth ? mt7981_eth_phy_led(r->hw.eth, c->a, c->b,
++                                           c->src == SRC_SWPHY, &count) : -1;
+         if (v < 0) {
+             pstrcpy(c->state, sizeof(c->state), "0");
+             break;
+         }
+-        /* traffic on a LED set to blink with it */
+-        if (window(r, c, count) && (v & 2)) {
++        /* traffic on a LED set to blink with it (bit 2: always blinks) */
++        if ((window(r, c, count) && (v & 2)) || (v & 4)) {
+             pstrcpy(c->state, sizeof(c->state), "b");
+         } else {
+             pstrcpy(c->state, sizeof(c->state), (v & 1) ? "1" : "0");
+diff --git a/hw/arm/mt7981/mt7981_router.c b/hw/arm/mt7981/mt7981_router.c
+index 5f5aefb..7c8e859 100644
+--- a/hw/arm/mt7981/mt7981_router.c
++++ b/hw/arm/mt7981/mt7981_router.c
+@@ -50,19 +50,21 @@
+ 
+ /* what is attached to a GMAC */
+ enum { GMAC_NONE, GMAC_RTL8221B, GMAC_GPHY, GMAC_MT7531, GMAC_YT8821,
+-       GMAC_GPY211, GMAC_I2P5GE, GMAC_AN8855 };
++       GMAC_GPY211, GMAC_I2P5GE, GMAC_AN8855, GMAC_MT7988SW };
+ 
+ static const char *const gmac_names[] = {
+     [GMAC_NONE] = "none", [GMAC_RTL8221B] = "rtl8221b",
+     [GMAC_GPHY] = "gphy", [GMAC_MT7531] = "mt7531",
+     [GMAC_YT8821] = "yt8821", [GMAC_GPY211] = "gpy211",
+     [GMAC_I2P5GE] = "i2p5ge", [GMAC_AN8855] = "an8855",
++    [GMAC_MT7988SW] = "mt7988-switch",
+ };
+ 
+ /* a switch (MT7531 or Airoha AN8855) on GMAC0 */
+ static bool gmac_switch(int gmac)
+ {
+-    return gmac == GMAC_MT7531 || gmac == GMAC_AN8855;
++    return gmac == GMAC_MT7531 || gmac == GMAC_AN8855 ||
++           gmac == GMAC_MT7988SW;
+ }
+ 
+ /* the eth model's gmacN-phy value for a GMAC_* PHY, 0 = no PHY */
+@@ -113,6 +115,11 @@ typedef struct RouterSoC {
+     hwaddr topmisc_base;        /* 0: 0x11d10000 (SPMC CPU power-on) */
+     hwaddr pcie_base;           /* PCIe Gen3 port 0 (0: none) */
+     int pcie_irq;
++    const char *cpu_type;       /* NULL: Cortex-A53 */
++    uint64_t midr;              /* 0: the CPU type's own MIDR */
++    hwaddr mcucfg_base;         /* 0: 0x10400000 (CPU boot addresses) */
++    hwaddr usb_base;            /* 0: 0x11200000 (xHCI) */
++    int usb_irq;                /* 0: SPI 173 */
+ } RouterSoC;
+ 
+ static const hwaddr def_uart_base[] = {
+@@ -169,6 +176,37 @@ static const RouterSoC soc_mt7987 = {
+     .pcie_irq = 168,
+ };
+ 
++/*
++ * MT7988A (Filogic 880) / MT7988D (Filogic 860, cpu@3 disabled): Cortex-A73
++ * cores (QEMU's cortex-a73: the A72 model with the A73 IDs), MCUCFG at
++ * 0x100e0000, NETSYS v3, internal 2.5G PHY, a built-in switch, PCIe Gen3,
++ * no built-in Wi-Fi
++ */
++static const RouterSoC soc_mt7988 = {
++    .name = "mt7988",
++    .desc = "MediaTek MT7988A/D router (configurable Ethernet/NAND/RAM/USB)",
++    .chip_id = 0x7988,
++    .ncpus = 4,
++    .gpio_base = 0x1001f000,
++    .npins = 84,
++    .efuse_base = 0x11f50000,
++    .switch_irq_pin = 0,
++    .nspi = 3,
++    .nor_spi = 0,
++    .gphy = false,
++    .i2p5ge = true,
++    .pdma2_base = 0x6800,
++    .uart_base = { 0x11000000, 0x11000100, 0x11000200 },
++    .spi_base = { 0x11007000, 0x11008000, 0x11009000 },
++    .pcie_base = 0x11300000,
++    .pcie_irq = 168,
++    .cpu_type = ARM_CPU_TYPE_NAME("cortex-a73"),
++    .mcucfg_base = 0x100e0000,
++    .usb_base = 0x11200000,
++    .usb_irq = 172,
++    .dram_end = 0x240000000ULL, /* U-Boot probes up to 8 GB above the base */
++};
++
+ /* MT7986A/B (Filogic 830): four cores, more pins, no built-in GbE PHY */
+ static const RouterSoC soc_mt7986 = {
+     .name = "mt7986",
+@@ -200,7 +238,7 @@ struct RouterState {
+     ARMCPU *cpus[MAX_CPUS];
+     DeviceState *gic;
+     MemoryRegion brom, sram, l2sram;
+-    MemoryRegion dram_alias[16];
++    MemoryRegion dram_alias[40];
+     SpiNandState *nand;
+     SpiNorState *nor;
+     DeviceState *eth;
+@@ -760,6 +798,17 @@ static void create_eth(RouterState *b, DeviceState *pinctrl)
+         qdev_prop_set_uint32(dev, "switch-model", 1);
+         qdev_prop_set_uint32(dev, "switch-addr", 1);
+     }
++    if (b->gmac[0] == GMAC_MT7988SW) {
++        if (b->soc->chip_id != 0x7988) {
++            error_report("gmac0=mt7988-switch: only the MT7988 has it");
++            exit(1);
++        }
++        /* MMIO at 0x15020000, internal PHYs 0..3 via its PHY_IAC */
++        qdev_prop_set_uint32(dev, "switch-model", 2);
++    }
++    if (b->soc->chip_id == 0x7988) {
++        qdev_prop_set_uint32(dev, "i2p5ge-phyid2", 0x9c11);
++    }
+     if (b->port5 != GMAC_NONE &&
+         (!gmac_ext_phy(b->port5) || b->gmac[0] != GMAC_MT7531)) {
+         error_report("port5 must be a 2.5G PHY (rtl8221b, yt8821, gpy211) "
+@@ -807,6 +856,10 @@ static void create_eth(RouterState *b, DeviceState *pinctrl)
+     for (int i = 0; i < 4; i++) {
+         sysbus_connect_irq(sbd, i, spi_irq(b, MT7981_IRQ_ETH0 + i));
+     }
++    if (b->gmac[0] == GMAC_MT7988SW) {
++        sysbus_mmio_map(sbd, 3, 0x15020000);
++        qdev_connect_gpio_out_named(dev, "switch-irq", 0, spi_irq(b, 209));
++    }
+     /* 2.5G PHY hardware reset (active low), only if the board wires one */
+     for (int g = 0; g < 2; g++) {
+         if (gmac_ext_phy(b->gmac[g]) && b->gmac_reset_gpio[g] >= 0) {
+@@ -820,7 +873,7 @@ static void create_eth(RouterState *b, DeviceState *pinctrl)
+                                     qdev_get_gpio_in_named(dev, "phy-reset", 2));
+     }
+     /* MT7531 interrupt -> EINT/GPIO (38 on MT7981, 66 on MT7986 boards) */
+-    if (b->gmac[0] == GMAC_MT7531) {
++    if (b->gmac[0] == GMAC_MT7531 && b->soc->switch_irq_pin) {
+         qdev_connect_gpio_out_named(dev, "switch-irq", 0,
+                                     qdev_get_gpio_in(pinctrl,
+                                                      b->switch_irq_pin >= 0 ?
+@@ -863,6 +916,9 @@ static void router_init(MachineState *machine)
+         object_property_set_bool(cpuobj, "has_el2", true, &error_fatal);
+         object_property_set_int(cpuobj, "cntfrq", 13000000, &error_fatal);
+         object_property_set_int(cpuobj, "rvbar", MT7981_BROM_BASE, &error_fatal);
++        if (b->soc->midr) {
++            object_property_set_int(cpuobj, "midr", b->soc->midr, &error_fatal);
++        }
+         if (i > 0) {
+             object_property_set_bool(cpuobj, "start-powered-off", true,
+                                      &error_fatal);
+@@ -907,6 +963,9 @@ static void router_init(MachineState *machine)
+     if (b->soc->topmisc_base) {
+         qdev_prop_set_uint64(dev, "topmisc-base", b->soc->topmisc_base);
+     }
++    if (b->soc->mcucfg_base) {
++        qdev_prop_set_uint64(dev, "mcucfg-base", b->soc->mcucfg_base);
++    }
+     qdev_prop_set_uint64(dev, "efuse-base", b->soc->efuse_base);
+     if (b->efuse_file) {
+         qdev_prop_set_string(dev, "efuse-file", b->efuse_file);
+@@ -1042,6 +1101,14 @@ flash_done:
+         qdev_prop_set_uint32(pinctrl, "bootstrap",
+                              (b->ddr == 4 ? BIT(8) : 0) | media << 6);
+     }
++    if (b->soc->chip_id == 0x7988) {
++        /*
++         * MT7988 boot strap [11:10]: 0 SPI-NOR, 1 SPI-NAND (SPIM), 2 eMMC,
++         * 3 SNFI-NAND / SD; U-Boot picks /chosen/rootdisk-<media> by it
++         */
++        uint32_t media = b->flash_emmc ? 2 : b->flash_nor ? 0 : 1;
++        qdev_prop_set_uint32(pinctrl, "bootstrap", media << 10);
++    }
+     sysbus_realize_and_unref(SYS_BUS_DEVICE(pinctrl), &error_fatal);
+     sysbus_mmio_map(SYS_BUS_DEVICE(pinctrl), 0, b->soc->gpio_base);
+     sysbus_mmio_map(SYS_BUS_DEVICE(pinctrl), 1, 0x1000b000);
+@@ -1074,8 +1141,10 @@ flash_done:
+     qdev_prop_set_uint32(DEVICE(&XHCI_SYSBUS(dev)->xhci), "p3",
+                          b->usb == 3 ? 1 : 0);
+     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+-    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, 0x11200000);
+-    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, spi_irq(b, 173));
++    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0,
++                    b->soc->usb_base ? b->soc->usb_base : 0x11200000);
++    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
++                       spi_irq(b, b->soc->usb_irq ? b->soc->usb_irq : 173));
+     if (nhost && !object_class_by_name("usb-host")) {
+         error_report("usb-host: this QEMU is built without USB "
+                      "pass-through (libusb)");
+@@ -1146,7 +1215,8 @@ flash_done:
+         RouterLedsHw hw = {
+             .pinctrl = pinctrl, .eth = b->eth, .sysctl = b->sysctl,
+             .nspi = b->soc->nspi, .pwm_base = 0x10048000,
+-            .pwm_chan_base = b->soc->chip_id == 0x7981 ? 0x80 :
++            .pwm_chan_base = b->soc->chip_id == 0x7981 ||
++                             b->soc->chip_id == 0x7988 ? 0x80 :
+                              b->soc->chip_id == 0x7987 ? 0x100 : 0x10,
+             .pwm_chan_width = b->soc->chip_id == 0x7987 ? 0x100 : 0x40,
+         };
+@@ -1397,6 +1467,7 @@ static void router_class_init(ObjectClass *oc, const void *data)
+     MachineClass *mc = MACHINE_CLASS(oc);
+     static const char * const valid_cpu_types[] = {
+         ARM_CPU_TYPE_NAME("cortex-a53"),
++        ARM_CPU_TYPE_NAME("cortex-a73"),
+         NULL
+     };
+ 
+@@ -1584,6 +1655,9 @@ static void router_soc_class_init(ObjectClass *oc, const void *data)
+     mc->max_cpus = soc->ncpus;
+     mc->min_cpus = soc->ncpus;
+     mc->default_cpus = soc->ncpus;
++    if (soc->cpu_type) {
++        mc->default_cpu_type = soc->cpu_type;
++    }
+ }
+ 
+ static const TypeInfo router_machine_types[] = {
+@@ -1610,6 +1684,11 @@ static const TypeInfo router_machine_types[] = {
+         .parent = TYPE_ROUTER_MACHINE,
+         .class_init = router_soc_class_init,
+         .class_data = &soc_mt7987,
++    }, {
++        .name = MACHINE_TYPE_NAME("mt7988-router"),
++        .parent = TYPE_ROUTER_MACHINE,
++        .class_init = router_soc_class_init,
++        .class_data = &soc_mt7988,
+     },
+ };
+ 
+diff --git a/hw/arm/mt7981/mt7981_sysctl.c b/hw/arm/mt7981/mt7981_sysctl.c
+index 2258e1f..a37f730 100644
+--- a/hw/arm/mt7981/mt7981_sysctl.c
++++ b/hw/arm/mt7981/mt7981_sysctl.c
+@@ -37,6 +37,7 @@ struct MT7981SysctlState {
+     bool ta_fail;           /* current test agent run compares wrong data */
+     uint64_t efuse_base;    /* 0x11f20000 (MT7981), 0x11d00000 (MT7986) */
+     uint64_t topmisc_base;  /* 0x11d10000, MT7987: 0x10021000 */
++    uint64_t mcucfg_base;   /* 0x10400000, MT7988: 0x100e0000 */
+     char *efuse_file;       /* eFuse dump (4 KiB) read at efuse_base */
+     char *efuse_uid;        /* 32 hex digits, per-chip block at 0x140 */
+     uint8_t efuse[0x1000];
+@@ -90,16 +91,37 @@ static uint32_t reg_default(MT7981SysctlState *s, hwaddr a)
+         case 0x8e8: return 0x08080808;
+         }
+         /*
+-         * MT7987 LVTS calibration (0x918, 16 bytes): golden temperature 50
++         * MT7987 / MT7988 LVTS calibration (0x918, 16 bytes): golden temperature 50
+          * in word 0 [31:24], per-sensor data at bytes 4..6 and 8..10
+          */
+-        if (s->chip_id == 0x7987) {
++        if (s->chip_id == 0x7987 || s->chip_id == 0x7988) {
+             switch (a - ef) {
+             case 0x918: return 50u << 24;
+             case 0x91c: return 0x00004000;
+             case 0x920: return 0x00004000;
+             }
+         }
++        /*
++         * MT7988: 4th sensor of the first LVTS controller (0x924) and the
++         * second controller's sensors (0x92c..0x93a), same raw value
++         */
++        if (s->chip_id == 0x7988) {
++            switch (a - ef) {
++            case 0x924: case 0x92c: case 0x930: case 0x934: case 0x938:
++                return 0x00004000;
++            }
++        }
++        /*
++         * MT7988 built-in switch GbE PHYs: phy-cal-data cells at 0x940 +
++         * 0x14 * port (5 words each), mid-scale like the MT7981 ones
++         */
++        if (s->chip_id == 0x7988 && a - ef >= 0x940 &&
++            a - ef < 0x940 + 4 * 0x14) {
++            static const uint32_t cal[5] = {
++                0x10101010, 0x18181818, 0x20202020, 0x08080808, 0x10101010,
++            };
++            return cal[((a - ef - 0x940) % 0x14) / 4];
++        }
+         return 0;
+     }
+     switch (a) {
+@@ -329,12 +351,14 @@ static uint64_t sysctl_read(void *opaque, hwaddr offset, unsigned size)
+      * calibration above (raw = (golden offset - T) * 2^14 / 204650)
+      */
+     case 0x1100a04c:            /* LVTS_ID: controller connected */
+-        if (s->chip_id == 0x7987) {
++    case 0x1100a14c:            /* (MT7988: a second controller at +0x100) */
++        if (s->chip_id == 0x7987 || s->chip_id == 0x7988) {
+             v = BIT(7);
+         }
+         break;
+     case 0x1100a090 ... 0x1100a0ac:
+-        if (s->chip_id == 0x7987) {
++    case 0x1100a190 ... 0x1100a1ac:
++        if (s->chip_id == 0x7987 || s->chip_id == 0x7988) {
+             uint8_t r;
+             qemu_guest_getrandom_nofail(&r, 1);
+             v = BIT(16) | (14782 + (r % 5) - 2);
+@@ -468,7 +492,7 @@ static void sysctl_write(void *opaque, hwaddr offset, uint64_t val,
+         if (v & BIT(1)) {
+             v |= BIT(30) | BIT(31);
+             if (!(old & BIT(1)) && cpu > 0) {
+-                uint64_t entry = reg_get(s, MT7981_MCUCFG_BASE + 0x38 + 8 * cpu,
++                uint64_t entry = reg_get(s, s->mcucfg_base + 0x38 + 8 * cpu,
+                                          0);
+                 mt7981_cpu_power_on(cpu, entry);
+             }
+@@ -560,6 +584,8 @@ static const Property sysctl_props[] = {
+     DEFINE_PROP_UINT64("dram-size", MT7981SysctlState, dram_size, 0),
+     DEFINE_PROP_UINT64("efuse-base", MT7981SysctlState, efuse_base,
+                        0x11f20000),
++    DEFINE_PROP_UINT64("mcucfg-base", MT7981SysctlState, mcucfg_base,
++                       MT7981_MCUCFG_BASE),
+     DEFINE_PROP_UINT64("topmisc-base", MT7981SysctlState, topmisc_base,
+                        MT7981_TOPMISC_BASE),
+     DEFINE_PROP_STRING("efuse-file", MT7981SysctlState, efuse_file),
+diff --git a/target/arm/tcg/cpu64.c b/target/arm/tcg/cpu64.c
+index 35cddba..2363ab7 100644
+--- a/target/arm/tcg/cpu64.c
++++ b/target/arm/tcg/cpu64.c
+@@ -332,6 +332,27 @@ static void aarch64_a72_initfn(Object *obj)
+     define_cortex_a72_a57_a53_cp_reginfo(cpu);
+ }
+ 
++/*
++ * Cortex-A73 (MediaTek MT7988): an ARMv8.0 core like the A72, which it is
++ * modelled on; its own MIDR, and CPUACTLR_EL1 at its A73 encoding
++ * (S3_0_C15_C0_0, used by TF-A's errata workarounds).
++ */
++static const ARMCPRegInfo cortex_a73_cp_reginfo[] = {
++    { .name = "A73_CPUACTLR_EL1", .state = ARM_CP_STATE_AA64,
++      .opc0 = 3, .opc1 = 0, .crn = 15, .crm = 0, .opc2 = 0,
++      .access = PL1_RW, .type = ARM_CP_CONST, .resetvalue = 0 },
++};
++
++static void aarch64_a73_initfn(Object *obj)
++{
++    ARMCPU *cpu = ARM_CPU(obj);
++
++    aarch64_a72_initfn(obj);
++    cpu->dtb_compatible = "arm,cortex-a73";
++    cpu->midr = 0x410fd092;     /* r0p2 */
++    define_arm_cp_regs(cpu, cortex_a73_cp_reginfo);
++}
++
+ static void aarch64_a76_initfn(Object *obj)
+ {
+     ARMCPU *cpu = ARM_CPU(obj);
+@@ -1314,6 +1335,7 @@ static const ARMCPUInfo aarch64_cpus[] = {
+     { .name = "cortex-a35",         .initfn = aarch64_a35_initfn },
+     { .name = "cortex-a55",         .initfn = aarch64_a55_initfn },
+     { .name = "cortex-a72",         .initfn = aarch64_a72_initfn },
++    { .name = "cortex-a73",         .initfn = aarch64_a73_initfn },
+     { .name = "cortex-a76",         .initfn = aarch64_a76_initfn },
+     { .name = "cortex-a710",        .initfn = aarch64_a710_initfn },
+     { .name = "a64fx",              .initfn = aarch64_a64fx_initfn },
+-- 
+2.47.3
+

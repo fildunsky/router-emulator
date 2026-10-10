@@ -233,6 +233,25 @@ def build_ubi(args, tmp):
             if not os.path.exists(path):
                 sys.exit(f"{args.sysupgrade}: no '{fn}' in sysupgrade tar")
             vols.append((name, path, "dynamic", None))
+    if getattr(args, "factory_volume", None):
+        # Factory in a UBI volume "factory" (e.g. Asus BT8): the dump, or
+        # erased with random MACs at 0x4 / 0xa (the Wi-Fi EEPROM layout)
+        size = parse_int(args.factory_volume)
+        data = bytearray(b"\xff" * size)
+        if args.factory:
+            fac = open(args.factory, "rb").read()[:size]
+            data[:len(fac)] = fac
+        else:
+            mac = [0x02] + [random.randrange(256) for _ in range(5)]
+            data[4:10] = bytes(mac)
+            mac[5] = (mac[5] + 1) & 0xff
+            data[10:16] = bytes(mac)
+            print("factory volume: random MACs %s (+1)"
+                  % ":".join("%02x" % b for b in data[4:10]))
+        path = os.path.join(tmp, "factory")
+        with open(path, "wb") as f:
+            f.write(data)
+        vols.append(("factory", path, "dynamic", None))
     if args.fit:
         vols.append(("fit", args.fit, "dynamic", None))
     if args.recovery:
@@ -347,7 +366,7 @@ def cmd_create(args):
         if len(data) > PARTS["fip"][1]:
             sys.exit("FIP too large")
         nand.write(PARTS["fip"][0], data)
-    if args.factory:
+    if args.factory and not args.factory_volume:
         nand.write(PARTS["factory"][0], open(args.factory, "rb").read())
     if "bdinfo" not in PARTS:
         if args.bdinfo or args.mac:
@@ -451,6 +470,10 @@ def main():
     c.add_argument("--fip-in-ubi", action="store_true",
                    help="FIP as UBI volume 'fip' (BL2 built for spim-nand-ubi) "
                         "instead of a raw FIP partition")
+    c.add_argument("--factory-volume", metavar="SIZE",
+                   help="Factory as UBI volume 'factory' of SIZE bytes (the "
+                        "--factory dump, else erased with random MACs at "
+                        "0x4 / 0xa) instead of a raw partition")
     c.add_argument("--wifi-eeprom", metavar="CHIP",
                    help="without --factory: minimal Wi-Fi EEPROM for this chip "
                         "(hex, e.g. 7986) at the start of Factory")

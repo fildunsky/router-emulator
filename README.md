@@ -1,4 +1,4 @@
-# Router Emulator (MediaTek MT7981B / Filogic 820, MT7986 / Filogic 830, MT7987 / Filogic 850)
+# Router Emulator (MediaTek MT7981B / Filogic 820, MT7986 / Filogic 830, MT7987 / Filogic 850, MT7988 / Filogic 860 / 880)
 
 **English** · [Русский](README.ru.md) · Build: [Linux](README.build.linux.md) · [Windows](README.build.windows.md)
 
@@ -21,7 +21,9 @@ MT7986A/B (Filogic 830) boards run on a second machine, `mt7986-router`
 (preset key `soc=mt7986`): the same peripherals, four cores, the MT7986
 BL2 with its own DRAM calibration and size detection, see
 [MT7986](#mt7986-filogic-830); MT7987A/B boards on `mt7987-router`
-(`soc=mt7987`, see [MT7987](#mt7987-filogic-850)).
+(`soc=mt7987`, see [MT7987](#mt7987-filogic-850)); MT7988A/D boards
+(Filogic 880 / 860) on `mt7988-router` (`soc=mt7988`, see
+[MT7988](#mt7988-filogic-880--860)).
 
 ## Quick start
 
@@ -48,11 +50,11 @@ or use dumps of a real router.
 
 | Option | Values | Meaning |
 |---|---|---|
-| `gmac0` | `mt7531` · `an8855` · `rtl8221b` · `yt8821` · `gpy211` · `none` | what GMAC0 (mac@0, SGMII0) is wired to; `an8855` = Airoha AN8855 switch at MDIO 1 (CPU port 5, e.g. Routerich BE7200) |
+| `gmac0` | `mt7531` · `an8855` · `mt7988-switch` · `rtl8221b` · `yt8821` · `gpy211` · `none` | what GMAC0 (mac@0, SGMII0) is wired to; `an8855` = Airoha AN8855 switch at MDIO 1 (CPU port 5, e.g. Routerich BE7200); `mt7988-switch` = the MT7988's built-in 4-port switch |
 | `ports` | e.g. `wan:lan1:lan2:lan3:lan4` | netdev ids of MT7531 ports 0..4, and port 5 with `port5=` (`-` = unused) |
 | `port5`, `port5-phy-addr`, `port5-reset-gpio` | `rtl8221b` · `yt8821` · `gpy211` · `none`; MDIO address (5); GPIO | a 2.5G PHY on MT7531 port 5 (SGMII), e.g. Netcore N60 Pro; its netdev is the 6th entry of `ports` |
 | `gmac0-port`, `gmac1-port` | netdev id | port of a PHY attached directly to a GMAC |
-| `gmac1` | `rtl8221b` · `yt8821` · `gpy211` · `gphy` · `i2p5ge` · `none` | GMAC1 (mac@1); `gphy` = MT7981 built-in 1G PHY; `i2p5ge` = MT7987 internal 2.5G PHY; `gpy211` = MaxLinear GPY211C |
+| `gmac1` | `rtl8221b` · `yt8821` · `gpy211` · `gphy` · `i2p5ge` · `none` | GMAC1 (mac@1); `gphy` = MT7981 built-in 1G PHY; `i2p5ge` = MT7987 / MT7988 internal 2.5G PHY; `gpy211` = MaxLinear GPY211C |
 | `gmac0-reset-gpio`, `gmac1-reset-gpio` | GPIO, `-1` (default) | hardware reset line of a 2.5G PHY; not wired by default (a missing line is harmless, a wrong one could hold the PHY in reset) |
 | `gmac0-phy-addr`, `gmac1-phy-addr` | MDIO address | address of that PHY (default 1 on gmac0, 6 on gmac1) |
 | `flash` | `nand` · `nor` · `emmc` | boot flash: SPI-NAND on SPI0 (default), SPI-NOR on SPI2 (MT7986: SPI0) or eMMC (see below) |
@@ -64,7 +66,7 @@ or use dumps of a real router.
 | `ddr` | `ddr3` · `ddr4` | soldered DRAM type: a BL2 built for the other type stops the machine, as DRAM init fails on a real board |
 | `usb-port` | `none` · `2` · `3` | USB connector (USB 3.0: devices attach at SuperSpeed) |
 | `usb-host` | `VID:PID[;VID:PID…]` | pass USB devices of this PC through to the router (USB 2.0 root ports 2, 3, …, also on boards without a connector), e.g. a Wi-Fi dongle, an LTE modem, a USB Ethernet adapter; see "USB Wi-Fi dongle" |
-| `pcie-wifi` | `none` · `mt7992` | MT7987 only: card in the PCIe slot. `mt7992` = MediaTek MT7992 Wi-Fi 7 (2.4 + 5 GHz); OpenWrt drives it with `kmod-mt7996e` and the firmware of `kmod-mt7992-firmware`, which official MT7987 images do not include |
+| `pcie-wifi` | `none` · `mt7992` | MT7987 / MT7988: card in the PCIe slot. `mt7992` = MediaTek MT7992 Wi-Fi 7 (2.4 + 5 GHz); OpenWrt drives it with `kmod-mt7996e` and the firmware of `kmod-mt7992-firmware`, which official MT7987 images do not include |
 | `reset-gpio`, `wps-gpio` | GPIO | buttons (QOM `/machine/pinctrl` `reset-button`, `wps-button`) |
 | `reset-active-high`, `wps-active-high` | `on` | button reads 1 when pressed (default: active low) |
 | `reset-hold` | ms | power on with reset held (U-Boot TFTP recovery) |
@@ -80,7 +82,9 @@ one lamp with two colours, each on its own GPIO (`:low` = GPIO_ACTIVE_LOW).
 Sources: `gpio:N[:low]` (SoC GPIO), `phy:ADDR:N` (LED pin N of the
 Ethernet PHY at MDIO address ADDR, as its LED registers program it:
 RTL8221B, GPY211; e.g. the WR3000P WAN lamp in current OpenWrt),
-`ws2812:BUS:N` (WS2812B RGB chain on SPI bus BUS, colour `rgb`: Redmi
+`swphy:PORT:N` (LED pin N of the switch's PHY of port PORT: MT7988
+built-in switch, e.g. the BPi-R4 port LEDs), `ws2812:BUS:N` (WS2812B RGB
+chain on SPI bus BUS, colour `rgb`: Redmi
 AX6000) and `pwm:N` (PWM channel, pwm-leds: BPi-R4 Lite). QEMU samples them
 every 50 ms; `qom-get /machine led-state` gives per LED (`;`) and colour
 (`,`) `0`, `1`, `b` (blinking) or `#rrggbb` / `b#rrggbb`. The Windows
@@ -135,6 +139,9 @@ routers use; saving from the editor drops `;` comments).
 | Routerich AX3000 | 3×1G LAN + WAN MT7531 (WAN = port 4) | DDR3 256 MB | 128 MB, no bdinfo | 2.0 | OpenWrt (ubootmod) |
 | Routerich AX3000 v1 | 1G WAN built-in PHY + 3×1G LAN MT7531 | DDR3 256 MB | 128 MB, no bdinfo | 2.0 | vendor (own dumps needed) |
 | Routerich BE7200 (MT7987A) | 2.5G WAN internal PHY + 3×1G LAN **Airoha AN8855**; Wi-Fi 7 MT7992 on PCIe | DDR4 1 GB | **512 MB** (W25N04KV) | 3.0 | OpenWrt |
+| Asus ZenWiFi BT8 (MT7988D, Filogic 860) | 2.5G WAN internal PHY + 2×1G LAN built-in switch (lan3 on GMAC2 and the MT7996 Wi-Fi not emulated) | DDR4 1 GB | 128 MB, FIP and Factory in UBI | 3.0 | OpenWrt (ubootmod) |
+| TP-Link TL-7DR7230 v1 (MT7988D, Filogic 860) | 2.5G WAN internal PHY + 4×1G LAN built-in switch | DDR4 1 GB | 128 MB, TP-Link layout | – | OpenWrt **snapshot** (no LuCI) |
+| Bananapi BPi-R4 (MT7988A, Filogic 880) | WAN + 3×1G LAN built-in switch (SFP+ cages not emulated) | DDR4 2 GB (real: 4 GB) | **eMMC** (`bpi-r4` layout) | 3.0 | OpenWrt |
 
 Netis boards have no bdinfo partition (FIP at 0x380000, ubi at 0x580000;
 MACs in Factory): presets set `openwrt-no-bdinfo=1`. The MT7986 boards use
@@ -218,6 +225,39 @@ tools/prepare-nand.sh --emmc --emmc-layout wh3000-pro --uboot cmcc_rax3000m-emmc
 ./emulator.sh -P huasifei-wh3000-pro-emmc
 ```
 
+## MT7988 (Filogic 880 / 860)
+
+`mt7988-router`: the MT7988A (Filogic 880, 4 cores) and the MT7988D
+(Filogic 860: the same die, the board DT disables cpu@3). Four Cortex-A73
+cores (TF-A for the MT7988 carries only Cortex-A73 code; QEMU's
+`cortex-a73` is the A72 model with the A73 IDs), MCUCFG at 0x100e0000,
+UARTs at 0x11000000, SPI0..2 at 0x11007000 / 8000 / 9000, eFuse at
+0x11f50000, NETSYS v3 (PDMA at 0x6800), the internal 2.5G PHY
+(`gmac1=i2p5ge`, MDIO 15, MT7988 firmware), the **built-in switch**
+(`gmac0=mt7988-switch`: 4 ports, its GbE PHYs with eFuse calibration and
+LED registers), xHCI ssusb1 (USB 3.0), MSDC (eMMC), PCIe (`pcie-wifi=`),
+two LVTS controllers and the boot strap register U-Boot picks
+`/chosen/rootdisk-<media>` by. The official BL2 (also the DDR3/DDR4
+"comb" ones) calibrates DRAM against the same controller model.
+
+Not emulated: GMAC2 / the 10G USXGMII ports (SFP+ cages, the BT8's lan3),
+the SNFI NAND controller (`snand` BL2s: the BPi-R4 runs from eMMC here),
+the RT5190A PMIC (cpufreq stays at the boot clock), MT7996 Wi-Fi cards.
+
+```bash
+tools/prepare-nand.sh --soc mt7988 --ubi-fip --ubi-factory 0x200000 asus_zenwifi-bt8 25.12.5
+./emulator.sh -P asus-zenwifi-bt8
+tools/prepare-nand.sh --soc mt7988 --emmc --emmc-layout bpi-r4 bananapi_bpi-r4 25.12.5
+./emulator.sh -P bananapi-bpi-r4
+```
+
+The Asus ZenWiFi BT8 keeps its MACs and Wi-Fi EEPROM in a UBI volume
+`factory` (`--ubi-factory SIZE`, preset key `openwrt-ubi-factory=`). The
+BPi-R4's eMMC image follows OpenWrt's `emmc-gpt.bin` (ubootenv, factory,
+fip, recovery, production; the sysupgrade FIT goes into `production`).
+The TP-Link TL-7DR7230 v1 exists in OpenWrt snapshot only: its preset
+has `openwrt-version=snapshot` (snapshot images have no LuCI; SSH works).
+
 ## What is emulated
 
 All device models live in `hw/arm/mt7981/` of the QEMU tree
@@ -225,7 +265,7 @@ All device models live in `hw/arm/mt7981/` of the QEMU tree
 
 | Block | Model | Notes |
 |---|---|---|
-| CPU, GIC | 2× (MT7986: 4×) Cortex-A53 (EL3/EL2), GICv3, arch timer 13 MHz | secondary CPUs started by BL31 through TOPMISC SPMC power-on; PSCI is BL31's |
+| CPU, GIC | 2× (MT7986, MT7987: 4×) Cortex-A53, MT7988: 4× Cortex-A73 (QEMU's cortex-a73: the A72 model with the A73 IDs and CPUACTLR_EL1) (EL3/EL2), GICv3, arch timer 13 MHz | secondary CPUs started by BL31 through TOPMISC SPMC power-on; PSCI is BL31's |
 | BootROM | high-level emulation (`mt7981_router.c`) | parses the `SPINAND!` header + GFH `FILE_INFO`, loads BL2 into L2 SRAM, jumps at EL3 |
 | DRAM controller | `mt7981_sysctl.c` + generated status table | broadcast mode, RTSWCMD/MRW responses, jitter meter, DQS gating lead/lag, RX data eye: MediaTek's binary DRAM calibration finds real windows, BL2 log is clean (DDR3 and DDR4); `DDRCOMMON0` DDR3EN/DDR4EN checked against `ddr=` |
 | Clocks, power, misc | `mt7981_sysctl.c` | sparse register file + special cases (frequency meter, CPU power-on, TRNG v2, eFuse calibration data, IPPC, thermal sensor ≈45 °C, EIP-97 ID, WED reset bits) |
@@ -237,13 +277,13 @@ All device models live in `hw/arm/mt7981/` of the QEMU tree
 | eMMC | `mt7981_msdc.c` + QEMU eMMC | MSDC host: commands, auto CMD23/CMD12, PIO FIFO (TF-A, U-Boot), GPD/BD DMA (Linux); card with boot0/boot1 and user area; BootROM boots `EMMC_BOOT` images from boot0 |
 | SPI-NOR | `spinor.c` | 3-byte addressing (up to 16 MB), selectable JEDEC ID, reads 1-1-1/1-1-2/1-1-4/1-2-2/1-4-4, page program, 4K/32K/64K/chip erase, status registers with QE; BootROM boots `SF_BOOT` images from it; same folder backing store |
 | Ethernet | `mt7981_eth.c` | frame engine: QDMA TX (Linux), PDMA RX, PDMA v2 (U-Boot); TSO + checksum offload; LynxI SGMII PCS ×2; any combination of switch / PHYs on the two GMACs |
-| Switch | `mt7981_eth.c` | MT7531: paged MDIO access, internal PHY indirect access, MTK special tag (DSA), learning FDB, port matrix, link IRQ → EINT 38. Airoha AN8855: 32-bit register bus over MDIO page 4, internal PHYs at MDIO 1..5, its registers translated into the MT7531 model (CPU port 5) |
+| Switch | `mt7981_eth.c` | MT7531: paged MDIO access, internal PHY indirect access, MTK special tag (DSA), learning FDB, port matrix, link IRQ → EINT 38. Airoha AN8855: 32-bit register bus over MDIO page 4, internal PHYs at MDIO 1..5, its registers translated into the MT7531 model (CPU port 5). MT7988 built-in switch: the MT7531 model memory mapped at 0x15020000, SoC GbE PHYs (MT7988 IDs, eFuse calibration) |
 | PHYs | `mt7981_eth.c` | MT7531 GPHY ×5; RTL8221B-VB-CG (C45, temperature sensor); Motorcomm YT8821 (extended registers, UTP/SerDes spaces, 2.5G status); MaxLinear GPY211C (C45, firmware version, mailbox, temperature sensor); MT7981 built-in GbE PHY (calibration handshake); a PHY on MT7531 port 5; optional hardware reset GPIOs |
 | GPIO / EINT | `mt7981_pinctrl.c` | buttons (reset/WPS, `reset-hold-ms` for timed presses), LED log, pad levels to board devices |
-| LEDs | `mt7981_leds.c`, `ws2812b.c` | front panel LEDs from the preset: GPIO, PHY LED registers (RTL8221B, GPY211), WS2812B on SPI, PWM channels; blinking detection; `led-state` |
+| LEDs | `mt7981_leds.c`, `ws2812b.c` | front panel LEDs from the preset: GPIO, PHY LED registers (RTL8221B, GPY211, MediaTek GbE / 2.5G PHYs, also of switch ports), WS2812B on SPI, PWM channels; blinking detection; `led-state` |
 | USB | QEMU xHCI + MTK IPPC | USB 2.0 / 3.0 connector |
 | Wi-Fi | `mt7981_wmac.c` | WFDMA rings + emulated WM/WA firmware command interface: firmware loads, both bands come up, hostapd runs, nothing is on the air (scans are empty) |
-| PCIe (MT7987) | `mt7987_pcie.c` | MediaTek Gen3 host: link, CFGNUM configuration TLPs, INTx, MSI capture, with QEMU's PCIe root port |
+| PCIe (MT7987, MT7988) | `mt7987_pcie.c` | MediaTek Gen3 host: link, CFGNUM configuration TLPs, INTx, MSI capture, with QEMU's PCIe root port |
 | Wi-Fi 7 card (MT7987) | `mt7992_wifi.c` | MT7992 for mt7996e: BAR0 remap windows, WFDMA rings, patch/RAM download, UNI command results, TX free events; radio silent |
 | Crypto (EIP-97) | ID only | the safexcel driver detects "no packet engine" and disables itself; software crypto is used |
 | WED | reset bits only | with `wed_enable=1` mt7915e detects the missing WO MCU and runs without offload |
@@ -269,9 +309,10 @@ firmware). Files smaller than the flash (a 128 MB dump started with
 with erased bytes (`0xff`) to the flash size, so what the router writes
 there is kept.
 
-- [`tools/prepare-nand.sh`](tools/prepare-nand.sh) `[--stock DIR [--nor] | --local DIR] [--flash-mb N] [--no-bdinfo] PROFILE [VERSION] [OUTDIR]` — builds a NAND folder for an OpenWrt device profile: downloads the official OpenWrt U-Boot images (`PROFILE-ubootmod-*` or `PROFILE-*`, sha256 verified), or uses own builds (`--local`), or keeps a vendor BL2/FIP (`--stock`) with the OpenWrt `sysupgrade.bin` in the vendor layout; `--no-bdinfo` for boards without a bdinfo partition, `--nor` for SPI-NOR boards (vendor BL2/FIP + the OpenWrt `sysupgrade.bin` in the `firmware` partition), `--soc mt7986` for MT7986 boards (partition files `mt7986.mtdN.*`, minimal Wi-Fi EEPROM in an empty Factory), `--ubi-fip` for "spim-nand-ubi" BL2s (BL2 at 0, UBI from 0x200000 with the FIP as volume `fip`). Factory/bdinfo come from `factory/`.
+- [`tools/prepare-nand.sh`](tools/prepare-nand.sh) `[--stock DIR [--nor] | --local DIR] [--flash-mb N] [--no-bdinfo] PROFILE [VERSION] [OUTDIR]` — builds a NAND folder for an OpenWrt device profile: downloads the official OpenWrt U-Boot images (`PROFILE-ubootmod-*` or `PROFILE-*`, sha256 verified), or uses own builds (`--local`), or keeps a vendor BL2/FIP (`--stock`) with the OpenWrt `sysupgrade.bin` in the vendor layout; `--no-bdinfo` for boards without a bdinfo partition, `--nor` for SPI-NOR boards (vendor BL2/FIP + the OpenWrt `sysupgrade.bin` in the `firmware` partition), `--soc mt7986` for MT7986 boards (partition files `mt7986.mtdN.*`, minimal Wi-Fi EEPROM in an empty Factory), `--ubi-fip` for "spim-nand-ubi" BL2s (BL2 at 0, UBI from 0x200000 with the FIP as volume `fip`), `--ubi-factory SIZE` (Factory as UBI volume `factory`, Asus BT8), `--emmc [--emmc-layout L]` (eMMC image, see [MT7988](#mt7988-filogic-880--860)). Factory/bdinfo come from `factory/`.
 - [`tools/mknand.py`](tools/mknand.py) — create / edit images: `create` (BL2, FIP, Factory, bdinfo, UBI from `.itb` or a `sysupgrade.bin`), `write --part fip`, `read`, `split`, `join`, `--flash-mb 256`, `--no-bdinfo`, `nor` (SPI-NOR folder).
-- [`tools/mkemmc.py`](tools/mkemmc.py) — eMMC image (`flash=emmc`): BL2 in boot0, GPT user area with u-boot-env, factory, fip, kernel, rootfs (GL-MT6000 layout, or `--layout wh3000-pro`), OpenWrt `squashfs-factory.bin` in kernel + rootfs or `--sysupgrade` (sysupgrade tar), `--boot-env` (OpenWrt U-Boot environment that boots the `kernel` partition).
+- [`tools/kernel-dts.sh`](tools/kernel-dts.sh) — the kernel's MediaTek DTS with the DTS parts of OpenWrt's patches (`work/kdts`), for boards whose DTS is in the kernel tree (BPi-R4); [`tools/dts-leds.py`](tools/dts-leds.py) reads them there.
+- [`tools/mkemmc.py`](tools/mkemmc.py) — eMMC image (`flash=emmc`): BL2 in boot0, GPT user area with u-boot-env, factory, fip, kernel, rootfs (GL-MT6000 layout, `--layout wh3000-pro`, or `--layout bpi-r4` with `--fit` / `--recovery` (FIT into production / recovery)), OpenWrt `squashfs-factory.bin` in kernel + rootfs or `--sysupgrade` (sysupgrade tar), `--boot-env` (OpenWrt U-Boot environment that boots the `kernel` partition).
 
 ## Running
 

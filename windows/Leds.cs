@@ -2,7 +2,7 @@
 // router console and the LED editor of the preset editor.
 //
 //   ledN=<name>: <colour> <source> [+ <colour> <source>...]
-//   sources: gpio:N[:low]  phy:ADDR:N  ws2812:BUS:N  pwm:N
+//   sources: gpio:N[:low]  phy:ADDR:N  swphy:PORT:N  ws2812:BUS:N  pwm:N
 //
 // QEMU evaluates the sources (machine property "led-state", see
 // mt7981_leds.c); the panel polls it over a QMP connection of its own.
@@ -54,7 +54,7 @@ namespace RouterEmulator
 
         public static bool ValidSource(string s)
         {
-            return Regex.IsMatch(s, @"^(gpio:\d+(:low)?|phy:\d+:\d+|ws2812:\d+:\d+|pwm:\d+)$");
+            return Regex.IsMatch(s, @"^(gpio:\d+(:low)?|(sw)?phy:\d+:\d+|ws2812:\d+:\d+|pwm:\d+)$");
         }
 
         public override string ToString()
@@ -299,7 +299,7 @@ namespace RouterEmulator
         readonly Label[] labA = new Label[3], labB = new Label[3];
         readonly CheckBox[] low = new CheckBox[3];
 
-        static readonly string[] Kinds = { "", "gpio", "phy", "ws2812", "pwm" };
+        static readonly string[] Kinds = { "", "gpio", "phy", "swphy", "ws2812", "pwm" };
 
         public LedEditForm(LedDef d)
         {
@@ -313,7 +313,7 @@ namespace RouterEmulator
             Controls.Add(name);
             var kindNames = new[] {
                 L.T("led.unused", "(not used)"), "GPIO", L.T("led.phy", "Ethernet PHY LED"),
-                "WS2812B (SPI)", "PWM",
+                L.T("led.swphy", "Switch port PHY LED"), "WS2812B (SPI)", "PWM",
             };
             int y = 48;
             for (int i = 0; i < 3; i++) {
@@ -368,9 +368,10 @@ namespace RouterEmulator
             string k = Kinds[Math.Max(0, kind[i].SelectedIndex)];
             color[i].Enabled = k != "";
             labA[i].Visible = numA[i].Visible = k != "";
-            labB[i].Visible = numB[i].Visible = k == "phy" || k == "ws2812";
+            labB[i].Visible = numB[i].Visible = k == "phy" || k == "swphy" || k == "ws2812";
             low[i].Visible = k == "gpio";
-            labA[i].Text = k == "gpio" ? "GPIO:" : k == "phy" ? "MDIO:" : k == "ws2812" ? "SPI:" : L.T("led.channel", "Channel:");
+            labA[i].Text = k == "gpio" ? "GPIO:" : k == "phy" ? "MDIO:" : k == "swphy" ? L.T("led.port", "Port:")
+                : k == "ws2812" ? "SPI:" : L.T("led.channel", "Channel:");
             labB[i].Text = "LED:";
             if (k == "ws2812") color[i].SelectedItem = "rgb";
         }
@@ -382,7 +383,7 @@ namespace RouterEmulator
                 string k = Kinds[Math.Max(0, kind[i].SelectedIndex)];
                 if (k == "") continue;
                 string src = k + ":" + numA[i].Value;
-                if (k == "phy" || k == "ws2812") src += ":" + numB[i].Value;
+                if (k == "phy" || k == "swphy" || k == "ws2812") src += ":" + numB[i].Value;
                 if (k == "gpio" && low[i].Checked) src += ":low";
                 d.Channels.Add(new LedChannel { Color = (string)color[i].SelectedItem ?? "white", Source = src });
             }
