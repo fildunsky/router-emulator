@@ -89,7 +89,7 @@ mkdir build && cd build
 ninja qemu-system-aarch64
 ```
 
-После правок в `src/qemu/hw/arm/mt7981/` достаточно запустить `ninja` в
+После правок в `src/qemu/hw/arm/filogic/` достаточно запустить `ninja` в
 `src/qemu/build`. Обновить серию патчей:
 `cd src/qemu && git commit ... && git format-patch -o ../../qemu-patches v10.1.0..mt7981`.
 

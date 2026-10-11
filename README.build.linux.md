@@ -89,7 +89,7 @@ mkdir build && cd build
 ninja qemu-system-aarch64
 ```
 
-After changing sources in `src/qemu/hw/arm/mt7981/` just run `ninja` in
+After changing sources in `src/qemu/hw/arm/filogic/` just run `ninja` in
 `src/qemu/build`. To update the patch series:
 `cd src/qemu && git commit ... && git format-patch -o ../../qemu-patches v10.1.0..mt7981`.
 

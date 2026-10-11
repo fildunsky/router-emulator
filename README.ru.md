@@ -184,7 +184,7 @@ MT7987 калибрует DRAM на той же модели контролле�
 плат: `nand-spi=2` (SPI-NAND на SPI2), `switch-irq-gpio=41`, `-m 2G`.
 
 Wi-Fi у MT7987 на PCIe: в машине есть контроллер Gen3 порта 0
-(`mt7987_pcie.c`: линк, TLP конфигурации, INTx, приём MSI; корневой порт
+(`mtk_pcie.c`: линк, TLP конфигурации, INTx, приём MSI; корневой порт
 — стандартный из QEMU), а с `pcie-wifi=mt7992` в слоте стоит карта
 MT7992, Wi-Fi 7 (`mt7992_wifi.c`, «немая», как встроенный Wi-Fi других
 SoC: прошивка загружается и отвечает, оба диапазона поднимаются, hostapd
@@ -262,30 +262,30 @@ TL-7DR7230 v1 есть только в снапшоте OpenWrt: в пресет
 
 ## Что эмулируется
 
-Все модели устройств — в `hw/arm/mt7981/` дерева QEMU
+Все модели устройств — в `hw/arm/filogic/` дерева QEMU
 (патчи: [`qemu-patches/`](qemu-patches/), база QEMU v10.1.0).
 
 | Блок | Модель | Примечания |
 |---|---|---|
 | CPU, GIC | 2× (MT7986, MT7987: 4×) Cortex-A53, MT7988: 4× Cortex-A73 (`cortex-a73` в QEMU: модель A72 с ID A73 и CPUACTLR_EL1) (EL3/EL2), GICv3, таймер 13 МГц | остальные ядра запускает BL31 через SPMC в TOPMISC; PSCI — от BL31 |
-| BootROM | высокоуровневая эмуляция (`mt7981_router.c`) | разбирает заголовок `SPINAND!` и GFH `FILE_INFO`, грузит BL2 в L2 SRAM, переходит на EL3 |
-| Контроллер DRAM | `mt7981_sysctl.c` + сгенерированная таблица статусов | broadcast, ответы RTSWCMD/MRW, jitter meter, lead/lag DQS gating, «глаз» приёма RX: бинарная калибровка DRAM от MediaTek находит настоящие окна, лог BL2 чистый (DDR3 и DDR4); биты DDR3EN/DDR4EN регистра `DDRCOMMON0` сверяются с `ddr=` |
-| Клоки, питание, прочее | `mt7981_sysctl.c` | разреженный регистровый файл + особые случаи (частотомер, включение CPU, TRNG v2, калибровочные данные eFuse, IPPC, термодатчик ≈45 °C, ID EIP-97, биты сброса WED) |
-| APXGPT | `mt7981_sysctl.c` | 8 таймеров общего назначения (нужны стоковым BL2) |
-| TOPRGU | `mt7981_toprgu.c` | watchdog с реальным таймаутом, программный сброс (reboot), статус сброса сохраняется |
+| BootROM | высокоуровневая эмуляция (`filogic_router.c`) | разбирает заголовок `SPINAND!` и GFH `FILE_INFO`, грузит BL2 в L2 SRAM, переходит на EL3 |
+| Контроллер DRAM | `mtk_sysctl.c` + сгенерированная таблица статусов | broadcast, ответы RTSWCMD/MRW, jitter meter, lead/lag DQS gating, «глаз» приёма RX: бинарная калибровка DRAM от MediaTek находит настоящие окна, лог BL2 чистый (DDR3 и DDR4); биты DDR3EN/DDR4EN регистра `DDRCOMMON0` сверяются с `ddr=` |
+| Клоки, питание, прочее | `mtk_sysctl.c` | разреженный регистровый файл + особые случаи (частотомер, включение CPU, TRNG v2, калибровочные данные eFuse, IPPC, термодатчик ≈45 °C, ID EIP-97, биты сброса WED) |
+| APXGPT | `mtk_sysctl.c` | 8 таймеров общего назначения (нужны стоковым BL2) |
+| TOPRGU | `mtk_toprgu.c` | watchdog с реальным таймаутом, программный сброс (reboot), статус сброса сохраняется |
 | UART ×3 | 16550 из QEMU + регистры MTK | |
-| SPI (IPM) | `mt7981_spim.c` | FIFO + DMA, полудуплексный режим spi-mem (TF-A/U-Boot/Linux) |
+| SPI (IPM) | `mtk_spim.c` | FIFO + DMA, полудуплексный режим spi-mem (TF-A/U-Boot/Linux) |
 | SPI-NAND | `spinand.c` | W25N01GV (2048+64) / W25N02KV (2048+128) / W25N04KV (512 МБ, 2048+128, две плоскости), on-die ECC, ONFI parameter page, страница уникального ID; хранилище — папка с дампами разделов (см. ниже) или один raw-образ с OOB |
-| eMMC | `mt7981_msdc.c` + eMMC из QEMU | контроллер MSDC: команды, авто CMD23/CMD12, PIO через FIFO (TF-A, U-Boot), DMA по дескрипторам GPD/BD (Linux); карта с boot0/boot1 и пользовательской областью; BootROM загружает образы `EMMC_BOOT` из boot0 |
+| eMMC | `mtk_msdc.c` + eMMC из QEMU | контроллер MSDC: команды, авто CMD23/CMD12, PIO через FIFO (TF-A, U-Boot), DMA по дескрипторам GPD/BD (Linux); карта с boot0/boot1 и пользовательской областью; BootROM загружает образы `EMMC_BOOT` из boot0 |
 | SPI-NOR | `spinor.c` | 3-байтовая адресация (до 16 МБ), задаваемый JEDEC ID, чтение 1-1-1/1-1-2/1-1-4/1-2-2/1-4-4, запись страниц, стирание 4K/32K/64K/всего чипа, регистры статуса с QE; BootROM загружает с него образы `SF_BOOT`; хранилище — такая же папка |
-| Ethernet | `mt7981_eth.c` | frame engine: QDMA TX (Linux), PDMA RX, PDMA v2 (U-Boot); TSO и offload контрольных сумм; 2× LynxI SGMII PCS; любая комбинация коммутатора и PHY на двух GMAC |
-| Коммутатор | `mt7981_eth.c` | MT7531: страничный доступ по MDIO, косвенный доступ к PHY, special tag MTK (DSA), FDB с обучением, port matrix, IRQ линка → EINT 38. Airoha AN8855: 32-битная шина регистров через страницу 4 MDIO, внутренние PHY на MDIO 1..5, регистры транслируются в модель MT7531 (CPU-порт 5). Встроенный коммутатор MT7988: модель MT7531 по MMIO 0x15020000, GbE PHY SoC (ID MT7988, калибровка из eFuse) |
-| PHY | `mt7981_eth.c` | 5× GPHY MT7531; RTL8221B-VB-CG (C45, термодатчик); Motorcomm YT8821 (расширенные регистры, пространства UTP/SerDes, статус 2.5G); MaxLinear GPY211C (C45, версия прошивки, mailbox, термодатчик); встроенный GbE PHY MT7981 (с калибровкой); PHY на порту 5 MT7531; необязательные GPIO аппаратного сброса |
-| GPIO / EINT | `mt7981_pinctrl.c` | кнопки (reset/WPS, `reset-hold-ms` для нажатия на время), лог светодиодов, уровни выводов для других устройств |
-| Светодиоды | `mt7981_leds.c`, `ws2812b.c` | светодиоды передней панели из пресета: GPIO, регистры LED у PHY (RTL8221B, GPY211, GbE / 2.5G PHY MediaTek, в том числе портов коммутатора), WS2812B на SPI, каналы PWM; распознавание мигания; `led-state` |
+| Ethernet | `mtk_eth.c` | frame engine: QDMA TX (Linux), PDMA RX, PDMA v2 (U-Boot); TSO и offload контрольных сумм; 2× LynxI SGMII PCS; любая комбинация коммутатора и PHY на двух GMAC |
+| Коммутатор | `mtk_eth.c` | MT7531: страничный доступ по MDIO, косвенный доступ к PHY, special tag MTK (DSA), FDB с обучением, port matrix, IRQ линка → EINT 38. Airoha AN8855: 32-битная шина регистров через страницу 4 MDIO, внутренние PHY на MDIO 1..5, регистры транслируются в модель MT7531 (CPU-порт 5). Встроенный коммутатор MT7988: модель MT7531 по MMIO 0x15020000, GbE PHY SoC (ID MT7988, калибровка из eFuse) |
+| PHY | `mtk_eth.c` | 5× GPHY MT7531; RTL8221B-VB-CG (C45, термодатчик); Motorcomm YT8821 (расширенные регистры, пространства UTP/SerDes, статус 2.5G); MaxLinear GPY211C (C45, версия прошивки, mailbox, термодатчик); встроенный GbE PHY MT7981 (с калибровкой); PHY на порту 5 MT7531; необязательные GPIO аппаратного сброса |
+| GPIO / EINT | `mtk_pinctrl.c` | кнопки (reset/WPS, `reset-hold-ms` для нажатия на время), лог светодиодов, уровни выводов для других устройств |
+| Светодиоды | `filogic_leds.c`, `ws2812b.c` | светодиоды передней панели из пресета: GPIO, регистры LED у PHY (RTL8221B, GPY211, GbE / 2.5G PHY MediaTek, в том числе портов коммутатора), WS2812B на SPI, каналы PWM; распознавание мигания; `led-state` |
 | USB | xHCI из QEMU + IPPC MTK | разъём USB 2.0 / 3.0 |
-| Wi-Fi | `mt7981_wmac.c` | кольца WFDMA + эмуляция командного интерфейса прошивок WM/WA: прошивка грузится, оба диапазона поднимаются, hostapd работает, в эфире ничего нет (сканирование пустое) |
-| PCIe (MT7987, MT7988) | `mt7987_pcie.c` | хост MediaTek Gen3: линк, TLP конфигурации через CFGNUM, INTx, приём MSI; корневой порт из QEMU |
+| Wi-Fi | `mtk_wmac.c` | кольца WFDMA + эмуляция командного интерфейса прошивок WM/WA: прошивка грузится, оба диапазона поднимаются, hostapd работает, в эфире ничего нет (сканирование пустое) |
+| PCIe (MT7987, MT7988) | `mtk_pcie.c` | хост MediaTek Gen3: линк, TLP конфигурации через CFGNUM, INTx, приём MSI; корневой порт из QEMU |
 | Карта Wi-Fi 7 (MT7987) | `mt7992_wifi.c` | MT7992 для mt7996e: окна BAR0, кольца WFDMA, загрузка патча и прошивок, ответы на UNI-команды, события TX free; радио «молчит» |
 | Крипто (EIP-97) | только ID | драйвер safexcel видит «нет packet engine» и отключается; работает программная криптография |
 | WED | только биты сброса | с `wed_enable=1` mt7915e видит, что WO MCU нет, и работает без offload |

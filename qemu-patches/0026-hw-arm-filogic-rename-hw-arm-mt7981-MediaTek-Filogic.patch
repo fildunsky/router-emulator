@@ -1,0 +1,2265 @@
+From 9f1dc3c4a809274c11da5180d018eac4e1fd40e2 Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Sun, 11 Oct 2026 14:25:14 -0400
+Subject: [PATCH 26/26] hw/arm/filogic: rename hw/arm/mt7981 (MediaTek Filogic
+ family)
+
+The emulation started with the MT7981 and grew to the MT7986, MT7987
+and MT7988, which share their peripherals.  Name it after the family:
+
+  hw/arm/mt7981/           -> hw/arm/filogic/
+  mt7981.h                 -> filogic.h
+  mt7981_router.c          -> filogic_router.c  (the four machines)
+  mt7981_leds.[ch]         -> filogic_leds.[ch]
+  mt7981_{eth,pinctrl,spim,sysctl,toprgu,msdc,wmac}.c
+                           -> mtk_*.c  (MediaTek IP blocks)
+  mt7987_pcie.c            -> mtk_pcie.c
+  mt7981_dramc_tbl.h       -> mtk_dramc_tbl.h
+  CONFIG_MT7981            -> CONFIG_MTK_FILOGIC
+
+QOM types, state structs and functions follow (mtk-eth / MtkEthState /
+mtk_eth_*, ...).  The machine names (mt79xx-router), the MT7981 address
+and IRQ constants and the flash file prefix stay.  No functional change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015RfXBtBMqiJKuedv8fLHqT
+---
+ hw/arm/Kconfig                                |   2 +-
+ hw/arm/{mt7981/mt7981.h => filogic/filogic.h} |  59 +++----
+ .../mt7981_leds.c => filogic/filogic_leds.c}  |  12 +-
+ .../mt7981_leds.h => filogic/filogic_leds.h}  |   8 +-
+ .../filogic_router.c}                         |  48 +++---
+ hw/arm/filogic/meson.build                    |  16 ++
+ hw/arm/{mt7981 => filogic}/mt7992_wifi.c      |   2 +-
+ .../mtk_dramc_tbl.h}                          |   0
+ .../mt7981_eth.c => filogic/mtk_eth.c}        | 154 +++++++++---------
+ .../mt7981_msdc.c => filogic/mtk_msdc.c}      |  38 ++---
+ .../mt7987_pcie.c => filogic/mtk_pcie.c}      |  12 +-
+ .../mtk_pinctrl.c}                            |  68 ++++----
+ .../mt7981_spim.c => filogic/mtk_spim.c}      |  26 +--
+ .../mt7981_sysctl.c => filogic/mtk_sysctl.c}  |  64 ++++----
+ .../mt7981_toprgu.c => filogic/mtk_toprgu.c}  |  28 ++--
+ .../mt7981_wmac.c => filogic/mtk_wmac.c}      |  40 ++---
+ hw/arm/{mt7981 => filogic}/spinand.c          |  12 +-
+ hw/arm/{mt7981 => filogic}/spinor.c           |  12 +-
+ hw/arm/{mt7981 => filogic}/ws2812b.c          |   2 +-
+ hw/arm/meson.build                            |   2 +-
+ hw/arm/mt7981/meson.build                     |  16 --
+ 21 files changed, 311 insertions(+), 310 deletions(-)
+ rename hw/arm/{mt7981/mt7981.h => filogic/filogic.h} (68%)
+ rename hw/arm/{mt7981/mt7981_leds.c => filogic/filogic_leds.c} (96%)
+ rename hw/arm/{mt7981/mt7981_leds.h => filogic/filogic_leds.h} (76%)
+ rename hw/arm/{mt7981/mt7981_router.c => filogic/filogic_router.c} (98%)
+ create mode 100644 hw/arm/filogic/meson.build
+ rename hw/arm/{mt7981 => filogic}/mt7992_wifi.c (99%)
+ rename hw/arm/{mt7981/mt7981_dramc_tbl.h => filogic/mtk_dramc_tbl.h} (100%)
+ rename hw/arm/{mt7981/mt7981_eth.c => filogic/mtk_eth.c} (93%)
+ rename hw/arm/{mt7981/mt7981_msdc.c => filogic/mtk_msdc.c} (91%)
+ rename hw/arm/{mt7981/mt7987_pcie.c => filogic/mtk_pcie.c} (97%)
+ rename hw/arm/{mt7981/mt7981_pinctrl.c => filogic/mtk_pinctrl.c} (86%)
+ rename hw/arm/{mt7981/mt7981_spim.c => filogic/mtk_spim.c} (93%)
+ rename hw/arm/{mt7981/mt7981_sysctl.c => filogic/mtk_sysctl.c} (91%)
+ rename hw/arm/{mt7981/mt7981_toprgu.c => filogic/mtk_toprgu.c} (87%)
+ rename hw/arm/{mt7981/mt7981_wmac.c => filogic/mtk_wmac.c} (94%)
+ rename hw/arm/{mt7981 => filogic}/spinand.c (98%)
+ rename hw/arm/{mt7981 => filogic}/spinor.c (98%)
+ rename hw/arm/{mt7981 => filogic}/ws2812b.c (99%)
+ delete mode 100644 hw/arm/mt7981/meson.build
+
+diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
+index fb865ae..1d3d2fb 100644
+--- a/hw/arm/Kconfig
++++ b/hw/arm/Kconfig
+@@ -699,7 +699,7 @@ config ARMSSE
+     select SSE_COUNTER
+     select SSE_TIMER
+ 
+-config MT7981
++config MTK_FILOGIC
+     bool
+     default y
+     depends on TCG && AARCH64
+diff --git a/hw/arm/mt7981/mt7981.h b/hw/arm/filogic/filogic.h
+similarity index 68%
+rename from hw/arm/mt7981/mt7981.h
+rename to hw/arm/filogic/filogic.h
+index 366f229..2744b1a 100644
+--- a/hw/arm/mt7981/mt7981.h
++++ b/hw/arm/filogic/filogic.h
+@@ -1,10 +1,11 @@
+ /*
+- * MediaTek MT7981 SoC emulation - shared definitions
++ * MediaTek Filogic SoC emulation (MT7981, MT7986, MT7987, MT7988) - shared
++ * definitions
+  *
+  * SPDX-License-Identifier: GPL-2.0-or-later
+  */
+-#ifndef HW_ARM_MT7981_H
+-#define HW_ARM_MT7981_H
++#ifndef HW_ARM_FILOGIC_H
++#define HW_ARM_FILOGIC_H
+ 
+ #include "hw/sysbus.h"
+ #include "qom/object.h"
+@@ -56,59 +57,59 @@
+ #define MT7981_IRQ_EINT         225
+ 
+ /* SPI-NAND */
+-#define TYPE_MT7981_SPINAND "mt7981-spinand"
+-OBJECT_DECLARE_SIMPLE_TYPE(SpiNandState, MT7981_SPINAND)
++#define TYPE_MTK_SPINAND "mtk-spinand"
++OBJECT_DECLARE_SIMPLE_TYPE(SpiNandState, MTK_SPINAND)
+ void spinand_read_logical(SpiNandState *s, uint64_t off, void *buf, size_t len);
+ uint32_t spinand_page_size(SpiNandState *s);
+ 
+-#define TYPE_MT7981_SPINOR "mt7981-spinor"
+-OBJECT_DECLARE_SIMPLE_TYPE(SpiNorState, MT7981_SPINOR)
++#define TYPE_MTK_SPINOR "mtk-spinor"
++OBJECT_DECLARE_SIMPLE_TYPE(SpiNorState, MTK_SPINOR)
+ void spinor_read(SpiNorState *s, uint64_t off, void *buf, size_t len);
+ 
+ /* MSDC SD/MMC host (eMMC) */
+-#define TYPE_MT7981_MSDC "mt7981-msdc"
+-OBJECT_DECLARE_SIMPLE_TYPE(MT7981MsdcState, MT7981_MSDC)
++#define TYPE_MTK_MSDC "mtk-msdc"
++OBJECT_DECLARE_SIMPLE_TYPE(MtkMsdcState, MTK_MSDC)
+ 
+ /* SPI master (IPM design) */
+-#define TYPE_MT7981_SPIM "mt7981-spim"
+-OBJECT_DECLARE_SIMPLE_TYPE(MT7981SpimState, MT7981_SPIM)
++#define TYPE_MTK_SPIM "mtk-spim"
++OBJECT_DECLARE_SIMPLE_TYPE(MtkSpimState, MTK_SPIM)
+ 
+ /* Top reset generation unit (watchdog) */
+-#define TYPE_MT7981_TOPRGU "mt7981-toprgu"
+-OBJECT_DECLARE_SIMPLE_TYPE(MT7981ToprguState, MT7981_TOPRGU)
++#define TYPE_MTK_TOPRGU "mtk-toprgu"
++OBJECT_DECLARE_SIMPLE_TYPE(MtkToprguState, MTK_TOPRGU)
+ 
+ /* Catch-all register file for clock/power/DRAM/misc blocks */
+-#define TYPE_MT7981_SYSCTL "mt7981-sysctl"
+-OBJECT_DECLARE_SIMPLE_TYPE(MT7981SysctlState, MT7981_SYSCTL)
++#define TYPE_MTK_SYSCTL "mtk-sysctl"
++OBJECT_DECLARE_SIMPLE_TYPE(MtkSysctlState, MTK_SYSCTL)
+ 
+ /* MTK UART (16550 + MTK extensions) */
+-#define TYPE_MT7981_UART "mt7981-uart"
+-OBJECT_DECLARE_SIMPLE_TYPE(MT7981UartState, MT7981_UART)
++#define TYPE_MTK_UART "mtk-uart"
++OBJECT_DECLARE_SIMPLE_TYPE(MtkUartState, MTK_UART)
+ 
+ /* Ethernet: frame engine + SGMII + MDIO + MT7531 switch + RTL8221B */
+-#define TYPE_MT7981_ETH "mt7981-eth"
+-OBJECT_DECLARE_SIMPLE_TYPE(MT7981EthState, MT7981_ETH)
++#define TYPE_MTK_ETH "mtk-eth"
++OBJECT_DECLARE_SIMPLE_TYPE(MtkEthState, MTK_ETH)
+ #define MT7981_ETH_NUM_PORTS    5   /* lan1..lan4 (switch), wan (gmac1) */
+ 
+ /* Pinctrl / GPIO / EINT */
+-#define TYPE_MT7981_PINCTRL "mt7981-pinctrl"
+-OBJECT_DECLARE_SIMPLE_TYPE(MT7981PinctrlState, MT7981_PINCTRL)
++#define TYPE_MTK_PINCTRL "mtk-pinctrl"
++OBJECT_DECLARE_SIMPLE_TYPE(MtkPinctrlState, MTK_PINCTRL)
+ 
+ /* MT7987 PCIe Gen3 host (with QEMU's root port and a card behind it) */
+-#define TYPE_MT7987_PCIE "mt7987-pcie"
++#define TYPE_MTK_PCIE "mtk-pcie"
+ 
+ /* MT7992 (Filogic 680) Wi-Fi 7 PCIe card, "radio silent" */
+ #define TYPE_MT7992_WIFI "mt7992-wifi"
+ 
+ /* Wi-Fi (WMAC) stub */
+-#define TYPE_MT7981_WMAC "mt7981-wmac"
+-OBJECT_DECLARE_SIMPLE_TYPE(MT7981WmacState, MT7981_WMAC)
++#define TYPE_MTK_WMAC "mtk-wmac"
++OBJECT_DECLARE_SIMPLE_TYPE(MtkWmacState, MTK_WMAC)
+ 
+-/* LED panel (mt7981_leds.c): state of the LED sources */
+-int mt7981_pinctrl_out(DeviceState *dev, int pin, uint32_t *toggles);
+-int mt7981_eth_phy_led(DeviceState *dev, int addr, int idx, bool sw,
++/* LED panel (filogic_leds.c): state of the LED sources */
++int mtk_pinctrl_out(DeviceState *dev, int pin, uint32_t *toggles);
++int mtk_eth_phy_led(DeviceState *dev, int addr, int idx, bool sw,
+                        uint32_t *frames);
+-uint32_t mt7981_sysctl_peek(DeviceState *dev, hwaddr a);
++uint32_t mtk_sysctl_peek(DeviceState *dev, hwaddr a);
+ 
+ /* WS2812B RGB LED chain on a SPI bus (decodes the leds-ws2812b stream) */
+ #define TYPE_WS2812B_SPI "ws2812b-spi"
+@@ -116,6 +117,6 @@ bool ws2812b_get(DeviceState *dev, int idx, uint8_t rgb[3], uint8_t lit[3],
+                  uint32_t *changes);
+ 
+ /* hook so the sysctl block can power on secondary cores */
+-void mt7981_cpu_power_on(int cpu, uint64_t entry);
++void filogic_cpu_power_on(int cpu, uint64_t entry);
+ 
+ #endif
+diff --git a/hw/arm/mt7981/mt7981_leds.c b/hw/arm/filogic/filogic_leds.c
+similarity index 96%
+rename from hw/arm/mt7981/mt7981_leds.c
+rename to hw/arm/filogic/filogic_leds.c
+index 482c3b6..95982d9 100644
+--- a/hw/arm/mt7981/mt7981_leds.c
++++ b/hw/arm/filogic/filogic_leds.c
+@@ -27,8 +27,8 @@
+ #include "qapi/error.h"
+ #include "hw/qdev-core.h"
+ #include "hw/ssi/ssi.h"
+-#include "mt7981.h"
+-#include "mt7981_leds.h"
++#include "filogic.h"
++#include "filogic_leds.h"
+ 
+ #define TICK_MS     50
+ #define WINDOW      4           /* ticks: 200 ms decide "blinking" */
+@@ -159,7 +159,7 @@ static void sample(RouterLeds *r, LedChan *c)
+ 
+     switch (c->src) {
+     case SRC_GPIO:
+-        v = mt7981_pinctrl_out(r->hw.pinctrl, c->a, &count);
++        v = mtk_pinctrl_out(r->hw.pinctrl, c->a, &count);
+         /* several level changes within 200 ms: a blinking trigger */
+         if (window(r, c, count) >= 3 && v >= 0) {
+             pstrcpy(c->state, sizeof(c->state), "b");
+@@ -170,7 +170,7 @@ static void sample(RouterLeds *r, LedChan *c)
+         break;
+     case SRC_PHY:
+     case SRC_SWPHY:
+-        v = r->hw.eth ? mt7981_eth_phy_led(r->hw.eth, c->a, c->b,
++        v = r->hw.eth ? mtk_eth_phy_led(r->hw.eth, c->a, c->b,
+                                            c->src == SRC_SWPHY, &count) : -1;
+         if (v < 0) {
+             pstrcpy(c->state, sizeof(c->state), "0");
+@@ -200,9 +200,9 @@ static void sample(RouterLeds *r, LedChan *c)
+         /* enable bits at the base, PWMTHRES (duty) in the channel block */
+         hwaddr ch = r->hw.pwm_base + r->hw.pwm_chan_base +
+                     c->a * r->hw.pwm_chan_width;
+-        bool on = (mt7981_sysctl_peek(r->hw.sysctl, r->hw.pwm_base) &
++        bool on = (mtk_sysctl_peek(r->hw.sysctl, r->hw.pwm_base) &
+                    BIT(c->a)) &&
+-                  (mt7981_sysctl_peek(r->hw.sysctl, ch + 0x30) & 0x1fff);
++                  (mtk_sysctl_peek(r->hw.sysctl, ch + 0x30) & 0x1fff);
+         pstrcpy(c->state, sizeof(c->state), on ? "1" : "0");
+         break;
+     }
+diff --git a/hw/arm/mt7981/mt7981_leds.h b/hw/arm/filogic/filogic_leds.h
+similarity index 76%
+rename from hw/arm/mt7981/mt7981_leds.h
+rename to hw/arm/filogic/filogic_leds.h
+index 9510982..85a678c 100644
+--- a/hw/arm/mt7981/mt7981_leds.h
++++ b/hw/arm/filogic/filogic_leds.h
+@@ -1,11 +1,11 @@
+ /*
+- * Front panel LEDs of the emulated board (see mt7981_leds.c)
++ * Front panel LEDs of the emulated board (see filogic_leds.c)
+  *
+  * SPDX-License-Identifier: GPL-2.0-or-later
+  */
+ 
+-#ifndef HW_ARM_MT7981_LEDS_H
+-#define HW_ARM_MT7981_LEDS_H
++#ifndef HW_ARM_FILOGIC_LEDS_H
++#define HW_ARM_FILOGIC_LEDS_H
+ 
+ #include "hw/qdev-core.h"
+ 
+@@ -21,7 +21,7 @@ typedef struct RouterLeds RouterLeds;
+ 
+ RouterLeds *router_leds_new(char **defs, int ndefs, const RouterLedsHw *hw,
+                             bool log, Error **errp);
+-/* "1,0;b;#ff0000": per LED, per colour (see mt7981_leds.c) */
++/* "1,0;b;#ff0000": per LED, per colour (see filogic_leds.c) */
+ char *router_leds_state(RouterLeds *r);
+ 
+ #endif
+diff --git a/hw/arm/mt7981/mt7981_router.c b/hw/arm/filogic/filogic_router.c
+similarity index 98%
+rename from hw/arm/mt7981/mt7981_router.c
+rename to hw/arm/filogic/filogic_router.c
+index 7c8e859..56ac0b4 100644
+--- a/hw/arm/mt7981/mt7981_router.c
++++ b/hw/arm/filogic/filogic_router.c
+@@ -41,8 +41,8 @@
+ #include "target/arm/cpu.h"
+ #include "target/arm/arm-powerctl.h"
+ #include "net/net.h"
+-#include "mt7981.h"
+-#include "mt7981_leds.h"
++#include "filogic.h"
++#include "filogic_leds.h"
+ 
+ #define MAX_CPUS        4
+ #define MAX_LEDS        32
+@@ -278,7 +278,7 @@ struct RouterState {
+     uint32_t reset_gpio, wps_gpio;
+     bool reset_active_high, wps_active_high;
+ 
+-    /* front panel LEDs (mt7981_leds.c) */
++    /* front panel LEDs (filogic_leds.c) */
+     char *led_def[MAX_LEDS];
+     RouterLeds *leds;
+     DeviceState *sysctl;        /* generic registers (PWM controller) */
+@@ -421,7 +421,7 @@ static qemu_irq spi_irq(RouterState *b, int spi)
+     return qdev_get_gpio_in(b->gic, spi);
+ }
+ 
+-void mt7981_cpu_power_on(int cpu, uint64_t entry)
++void filogic_cpu_power_on(int cpu, uint64_t entry)
+ {
+     int ret;
+ 
+@@ -674,17 +674,17 @@ static void create_uart(RouterState *b, hwaddr base, int irq, int idx)
+     SerialMM *smm;
+ 
+     /* 16550 core with 4-byte register stride, MTK extension regs above */
+-    memory_region_init(container, NULL, "mt7981-uart", 0x100);
++    memory_region_init(container, NULL, "mtk-uart", 0x100);
+     smm = serial_mm_init(container, 0, 2, spi_irq(b, irq), 115200,
+                          serial_hd(idx), DEVICE_LITTLE_ENDIAN);
+     if (idx == 0) {
+         /* in front of the transmit/receive register (offset 0) */
+         b->uart0 = smm;
+         memory_region_init_io(&b->uart0_tap, NULL, &uart0_tap_ops, b,
+-                              "mt7981-uart0-tap", 4);
++                              "mtk-uart0-tap", 4);
+         memory_region_add_subregion_overlap(container, 0, &b->uart0_tap, 1);
+     }
+-    extra = qdev_new(TYPE_MT7981_SYSCTL);
++    extra = qdev_new(TYPE_MTK_SYSCTL);
+     qdev_prop_set_uint64(extra, "base", base);
+     qdev_prop_set_uint64(extra, "size", 0x100);
+     sysbus_realize_and_unref(SYS_BUS_DEVICE(extra), &error_fatal);
+@@ -695,7 +695,7 @@ static void create_uart(RouterState *b, hwaddr base, int irq, int idx)
+ 
+ static DeviceState *create_spim(RouterState *b, hwaddr base, int irq)
+ {
+-    DeviceState *dev = qdev_new(TYPE_MT7981_SPIM);
++    DeviceState *dev = qdev_new(TYPE_MTK_SPIM);
+ 
+     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, base);
+@@ -714,7 +714,7 @@ static void create_emmc(RouterState *b)
+     DriveInfo *dinfo = drive_get(IF_SD, 0, 0);
+     Error *err = NULL;
+ 
+-    msdc = qdev_new(TYPE_MT7981_MSDC);
++    msdc = qdev_new(TYPE_MTK_MSDC);
+     sysbus_realize_and_unref(SYS_BUS_DEVICE(msdc), &error_fatal);
+     sysbus_mmio_map(SYS_BUS_DEVICE(msdc), 0, 0x11230000);
+     sysbus_connect_irq(SYS_BUS_DEVICE(msdc), 0, spi_irq(b, 143));
+@@ -765,7 +765,7 @@ static NetClientState *find_netdev(const char *id)
+ 
+ static void create_eth(RouterState *b, DeviceState *pinctrl)
+ {
+-    DeviceState *dev = qdev_new(TYPE_MT7981_ETH);
++    DeviceState *dev = qdev_new(TYPE_MTK_ETH);
+     SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
+     g_auto(GStrv) ports = g_strsplit(b->ports ? b->ports : "", ":", 0);
+     NetClientState *nc;
+@@ -932,13 +932,13 @@ static void router_init(MachineState *machine)
+     }
+ 
+     /* On-chip memories */
+-    memory_region_init_rom(&b->brom, NULL, "mt7981.brom", MT7981_BROM_SIZE,
++    memory_region_init_rom(&b->brom, NULL, "filogic.brom", MT7981_BROM_SIZE,
+                            &error_fatal);
+     memory_region_add_subregion(sysmem, MT7981_BROM_BASE, &b->brom);
+-    memory_region_init_ram(&b->sram, NULL, "mt7981.sram", MT7981_SRAM_SIZE,
++    memory_region_init_ram(&b->sram, NULL, "filogic.sram", MT7981_SRAM_SIZE,
+                            &error_fatal);
+     memory_region_add_subregion(sysmem, MT7981_SRAM_BASE, &b->sram);
+-    memory_region_init_ram(&b->l2sram, NULL, "mt7981.l2sram",
++    memory_region_init_ram(&b->l2sram, NULL, "filogic.l2sram",
+                            MT7981_L2SRAM_SIZE, &error_fatal);
+     memory_region_add_subregion(sysmem, MT7981_L2SRAM_BASE, &b->l2sram);
+ 
+@@ -948,13 +948,13 @@ static void router_init(MachineState *machine)
+          a < (b->soc->dram_end ? b->soc->dram_end : DRAM_ALIAS_END) &&
+          i < ARRAY_SIZE(b->dram_alias);
+          a += ram_size, i++) {
+-        memory_region_init_alias(&b->dram_alias[i], NULL, "mt7981.dram-alias",
++        memory_region_init_alias(&b->dram_alias[i], NULL, "filogic.dram-alias",
+                                  machine->ram, 0, ram_size);
+         memory_region_add_subregion(sysmem, a, &b->dram_alias[i]);
+     }
+ 
+     /* Generic register blocks (lowest priority, covers all MMIO space) */
+-    dev = qdev_new(TYPE_MT7981_SYSCTL);
++    dev = qdev_new(TYPE_MTK_SYSCTL);
+     qdev_prop_set_uint64(dev, "base", 0x08000000);
+     qdev_prop_set_uint64(dev, "size", MT7981_DRAM_BASE - 0x08000000);
+     qdev_prop_set_uint32(dev, "dram-type", b->ddr);
+@@ -988,7 +988,7 @@ static void router_init(MachineState *machine)
+     }
+ 
+     /* Watchdog / reset */
+-    dev = qdev_new(TYPE_MT7981_TOPRGU);
++    dev = qdev_new(TYPE_MTK_TOPRGU);
+     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, MT7981_TOPRGU_BASE);
+     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+@@ -1012,7 +1012,7 @@ static void router_init(MachineState *machine)
+          * SPI-NOR boot flash: MT7981 boards have it on SPI2 CS0 (spi0 is
+          * unused then), MT7986 boards on SPI0 CS0
+          */
+-        dev = qdev_new(TYPE_MT7981_SPINOR);
++        dev = qdev_new(TYPE_MTK_SPINOR);
+         qdev_prop_set_uint32(dev, "size-mb", b->nor_mb);
+         if (b->nor_id) {
+             unsigned long id = strtoul(b->nor_id, NULL, 16);
+@@ -1039,11 +1039,11 @@ static void router_init(MachineState *machine)
+                                &error_fatal);
+         qdev_connect_gpio_out_named(spi[b->soc->nor_spi], "cs", 0,
+                                     qdev_get_gpio_in_named(dev, SSI_GPIO_CS, 0));
+-        b->nor = MT7981_SPINOR(dev);
++        b->nor = MTK_SPINOR(dev);
+         goto flash_done;
+     }
+ 
+-    dev = qdev_new(TYPE_MT7981_SPINAND);
++    dev = qdev_new(TYPE_MTK_SPINAND);
+     qdev_prop_set_uint32(dev, "blocks", b->nand_mb * 8);
+     if (b->nand_mb >= 256) {
+         /*
+@@ -1078,11 +1078,11 @@ static void router_init(MachineState *machine)
+                            &error_fatal);
+     qdev_connect_gpio_out_named(spi[b->nand_spi], "cs", 0,
+                                 qdev_get_gpio_in_named(dev, SSI_GPIO_CS, 0));
+-    b->nand = MT7981_SPINAND(dev);
++    b->nand = MTK_SPINAND(dev);
+ flash_done:
+ 
+     /* GPIO / EINT */
+-    pinctrl = qdev_new(TYPE_MT7981_PINCTRL);
++    pinctrl = qdev_new(TYPE_MTK_PINCTRL);
+     object_property_add_child(OBJECT(machine), "pinctrl", OBJECT(pinctrl));
+     qdev_prop_set_bit(pinctrl, "gpio-log", b->gpio_log);
+     qdev_prop_set_uint32(pinctrl, "reset-hold", b->reset_hold);
+@@ -1173,7 +1173,7 @@ flash_done:
+                                &error_fatal);
+     }
+     g_strfreev(hosts);
+-    dev = qdev_new(TYPE_MT7981_SYSCTL);
++    dev = qdev_new(TYPE_MTK_SYSCTL);
+     qdev_prop_set_uint64(dev, "base", 0x11203e00);
+     qdev_prop_set_uint64(dev, "size", 0x100);
+     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+@@ -1181,7 +1181,7 @@ flash_done:
+             sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0), 10);
+ 
+     /* Wi-Fi (WMAC / CONNSYS) */
+-    dev = qdev_new(TYPE_MT7981_WMAC);
++    dev = qdev_new(TYPE_MTK_WMAC);
+     qdev_prop_set_uint32(dev, "sku", b->soc->wifi_sku);
+     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, MT7981_WMAC_BASE);
+@@ -1198,7 +1198,7 @@ flash_done:
+         } else if (!strcmp(card, "mt7992")) {
+             card = TYPE_MT7992_WIFI;
+         }   /* else: any QEMU PCI device type (tests) */
+-        dev = qdev_new(TYPE_MT7987_PCIE);
++        dev = qdev_new(TYPE_MTK_PCIE);
+         qdev_prop_set_string(dev, "card", card);
+         sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+         memory_region_add_subregion_overlap(sysmem, b->soc->pcie_base,
+diff --git a/hw/arm/filogic/meson.build b/hw/arm/filogic/meson.build
+new file mode 100644
+index 0000000..bdea364
+--- /dev/null
++++ b/hw/arm/filogic/meson.build
+@@ -0,0 +1,16 @@
++arm_common_ss.add(when: 'CONFIG_MTK_FILOGIC', if_true: files(
++  'filogic_router.c',
++  'mtk_sysctl.c',
++  'mtk_spim.c',
++  'mtk_toprgu.c',
++  'spinand.c',
++  'spinor.c',
++  'mtk_eth.c',
++  'mtk_pinctrl.c',
++  'mtk_wmac.c',
++  'mtk_msdc.c',
++  'mtk_pcie.c',
++  'mt7992_wifi.c',
++  'filogic_leds.c',
++  'ws2812b.c',
++))
+diff --git a/hw/arm/mt7981/mt7992_wifi.c b/hw/arm/filogic/mt7992_wifi.c
+similarity index 99%
+rename from hw/arm/mt7981/mt7992_wifi.c
+rename to hw/arm/filogic/mt7992_wifi.c
+index 8f331c8..3cf6773 100644
+--- a/hw/arm/mt7981/mt7992_wifi.c
++++ b/hw/arm/filogic/mt7992_wifi.c
+@@ -20,7 +20,7 @@
+ #include "hw/pci/pci_device.h"
+ #include "hw/pci/pcie.h"
+ #include "hw/qdev-properties.h"
+-#include "mt7981.h"
++#include "filogic.h"
+ 
+ OBJECT_DECLARE_SIMPLE_TYPE(Mt7992State, MT7992_WIFI)
+ 
+diff --git a/hw/arm/mt7981/mt7981_dramc_tbl.h b/hw/arm/filogic/mtk_dramc_tbl.h
+similarity index 100%
+rename from hw/arm/mt7981/mt7981_dramc_tbl.h
+rename to hw/arm/filogic/mtk_dramc_tbl.h
+diff --git a/hw/arm/mt7981/mt7981_eth.c b/hw/arm/filogic/mtk_eth.c
+similarity index 93%
+rename from hw/arm/mt7981/mt7981_eth.c
+rename to hw/arm/filogic/mtk_eth.c
+index 36e26f2..3e0f55e 100644
+--- a/hw/arm/mt7981/mt7981_eth.c
++++ b/hw/arm/filogic/mtk_eth.c
+@@ -30,7 +30,7 @@
+ #include "qemu/guest-random.h"
+ #include "system/dma.h"
+ #include "system/address-spaces.h"
+-#include "mt7981.h"
++#include "filogic.h"
+ 
+ #define FE_SIZE         0x80000
+ #define FE_SRAM_OFF     0x40000
+@@ -139,7 +139,7 @@ typedef struct SwFdb {
+ } SwFdb;
+ 
+ typedef struct EthPort {
+-    MT7981EthState *s;
++    MtkEthState *s;
+     NICState *nic;
+     NICConf conf;
+     int index;          /* 0..4 switch ports, 5 + n = PHY on GMAC n, */
+@@ -151,7 +151,7 @@ typedef struct Pdma {
+     bool v2;            /* 32 byte descriptors (U-Boot layout) */
+ } Pdma;
+ 
+-struct MT7981EthState {
++struct MtkEthState {
+     SysBusDevice parent_obj;
+     MemoryRegion iomem, sram, container;
+     MemoryRegion sgmii_mr[2];
+@@ -216,7 +216,7 @@ static void ht_set(GHashTable *h, uint32_t a, uint32_t v)
+     g_hash_table_insert(h, GUINT_TO_POINTER(a), GUINT_TO_POINTER(v));
+ }
+ 
+-static bool port_link(MT7981EthState *s, int idx)
++static bool port_link(MtkEthState *s, int idx)
+ {
+     NICState *nic = s->ports[idx].nic;
+     NetClientState *nc;
+@@ -599,7 +599,7 @@ static void phy_c45_write(EthPhy *p, int dev, int reg, uint16_t val)
+ #define SW_PMCR(p)      (0x3000 + (p) * 0x100)
+ #define SW_PMSR(p)      (0x3008 + (p) * 0x100)
+ 
+-static void sw_update_irq(MT7981EthState *s)
++static void sw_update_irq(MtkEthState *s)
+ {
+     uint32_t sts = ht_get(s->sw, SW_SYS_INT_STS, 0);
+     uint32_t en = ht_get(s->sw, SW_SYS_INT_EN, 0);
+@@ -633,9 +633,9 @@ static void pcs_write(uint32_t *regs, uint32_t off, uint32_t val)
+     regs[off / 4] = val;
+ }
+ 
+-static uint32_t mdio_iac(MT7981EthState *s, uint32_t cmd, bool sw_internal);
++static uint32_t mdio_iac(MtkEthState *s, uint32_t cmd, bool sw_internal);
+ 
+-static uint32_t sw_reg_read(MT7981EthState *s, uint32_t a)
++static uint32_t sw_reg_read(MtkEthState *s, uint32_t a)
+ {
+     uint32_t v;
+ 
+@@ -685,7 +685,7 @@ static uint32_t sw_reg_read(MT7981EthState *s, uint32_t a)
+     return v;
+ }
+ 
+-static void sw_reg_write(MT7981EthState *s, uint32_t a, uint32_t v)
++static void sw_reg_write(MtkEthState *s, uint32_t a, uint32_t v)
+ {
+     if (a >= 0x5000 && a < 0x7000) {
+         pcs_write(&s->sgmii[0][0], a & 0xfff, v);
+@@ -739,7 +739,7 @@ static void sw_reg_write(MT7981EthState *s, uint32_t a, uint32_t v)
+ }
+ 
+ /* c22 accesses from the FE MDIO master to the switch (paged protocol) */
+-static uint16_t sw_mdio_read(MT7981EthState *s, int reg)
++static uint16_t sw_mdio_read(MtkEthState *s, int reg)
+ {
+     uint32_t v;
+ 
+@@ -758,7 +758,7 @@ static uint16_t sw_mdio_read(MT7981EthState *s, int reg)
+     return 0;
+ }
+ 
+-static void sw_mdio_write(MT7981EthState *s, int reg, uint16_t val)
++static void sw_mdio_write(MtkEthState *s, int reg, uint16_t val)
+ {
+     static uint16_t lo_val;
+ 
+@@ -806,13 +806,13 @@ static uint32_t an_mask_to_sw(uint32_t m)
+     return (m & 0x1f) | ((m & BIT(5)) ? BIT(SW_CPU_PORT) : 0);
+ }
+ 
+-static void an_reset(MT7981EthState *s)
++static void an_reset(MtkEthState *s)
+ {
+     g_hash_table_remove_all(s->sw);
+     memset(s->fdb, 0, sizeof(s->fdb));
+ }
+ 
+-static uint32_t an_reg_read(MT7981EthState *s, uint32_t a)
++static uint32_t an_reg_read(MtkEthState *s, uint32_t a)
+ {
+     a &= ~3u;
+     switch (a) {
+@@ -840,7 +840,7 @@ static uint32_t an_reg_read(MT7981EthState *s, uint32_t a)
+     return ht_get(s->sw, a, 0);
+ }
+ 
+-static void an_reg_write(MT7981EthState *s, uint32_t a, uint32_t v)
++static void an_reg_write(MtkEthState *s, uint32_t a, uint32_t v)
+ {
+     a &= ~3u;
+     if (a == AN_RST_CTRL && (v & BIT(31))) {
+@@ -901,7 +901,7 @@ static void an_reg_write(MT7981EthState *s, uint32_t a, uint32_t v)
+  * 0x13/0x14 write data, 0x15/0x16 read address, 0x17/0x18 read data);
+  * any other page there, and the other addresses, reach the PHYs.
+  */
+-static bool an_mdio(MT7981EthState *s, int addr, int reg, bool wr,
++static bool an_mdio(MtkEthState *s, int addr, int reg, bool wr,
+                     uint16_t *val)
+ {
+     int i = (addr - (int)s->switch_addr) & 0x1f;
+@@ -954,7 +954,7 @@ static bool an_mdio(MT7981EthState *s, int addr, int reg, bool wr,
+  */
+ static void phy_reset_in(void *opaque, int n, int level)
+ {
+-    MT7981EthState *s = opaque;
++    MtkEthState *s = opaque;
+     EthPhy *p = n < 2 ? &s->dphy[n] : &s->p5phy;    /* 2: switch port 5 */
+     bool reset = !level;    /* active low */
+ 
+@@ -965,7 +965,7 @@ static void phy_reset_in(void *opaque, int n, int level)
+     p->in_reset = reset;
+ }
+ 
+-static EthPhy *mdio_find_phy(MT7981EthState *s, int addr, bool sw_internal)
++static EthPhy *mdio_find_phy(MtkEthState *s, int addr, bool sw_internal)
+ {
+     if (sw_internal) {
+         int base = (s->switch_addr + 1) & 0x1f;
+@@ -991,10 +991,10 @@ static EthPhy *mdio_find_phy(MT7981EthState *s, int addr, bool sw_internal)
+  * registers program it: -1 = no such PHY (or LED), else bit 0 = lit,
+  * bit 1 = blinks with traffic.  *frames counts the frames of its port.
+  */
+-int mt7981_eth_phy_led(DeviceState *dev, int addr, int idx, bool sw,
++int mtk_eth_phy_led(DeviceState *dev, int addr, int idx, bool sw,
+                        uint32_t *frames)
+ {
+-    MT7981EthState *s = MT7981_ETH(dev);
++    MtkEthState *s = MTK_ETH(dev);
+     EthPhy *p = NULL;
+     int port = -1;
+     uint32_t ctl, act;
+@@ -1081,7 +1081,7 @@ int mt7981_eth_phy_led(DeviceState *dev, int addr, int idx, bool sw,
+     }
+ }
+ 
+-static uint32_t mdio_iac(MT7981EthState *s, uint32_t v, bool sw_internal)
++static uint32_t mdio_iac(MtkEthState *s, uint32_t v, bool sw_internal)
+ {
+     int reg = (v >> 25) & 0x1f;   /* c45: device */
+     int addr = (v >> 20) & 0x1f;
+@@ -1132,10 +1132,10 @@ static uint32_t mdio_iac(MT7981EthState *s, uint32_t v, bool sw_internal)
+ /* ------------------------------------------------------------------ */
+ /* switch forwarding                                                  */
+ 
+-static void gdm_rx(MT7981EthState *s, int gdm, const uint8_t *buf, size_t len);
+-static bool gdm_can_rx(MT7981EthState *s);
++static void gdm_rx(MtkEthState *s, int gdm, const uint8_t *buf, size_t len);
++static bool gdm_can_rx(MtkEthState *s);
+ 
+-static void fdb_learn(MT7981EthState *s, const uint8_t *mac, int port)
++static void fdb_learn(MtkEthState *s, const uint8_t *mac, int port)
+ {
+     int free = -1;
+ 
+@@ -1159,7 +1159,7 @@ static void fdb_learn(MT7981EthState *s, const uint8_t *mac, int port)
+     s->fdb[free].valid = true;
+ }
+ 
+-static int fdb_lookup(MT7981EthState *s, const uint8_t *mac)
++static int fdb_lookup(MtkEthState *s, const uint8_t *mac)
+ {
+     if (mac[0] & 1) {
+         return -1;
+@@ -1172,18 +1172,18 @@ static int fdb_lookup(MT7981EthState *s, const uint8_t *mac)
+     return -1;
+ }
+ 
+-static uint32_t sw_matrix(MT7981EthState *s, int port)
++static uint32_t sw_matrix(MtkEthState *s, int port)
+ {
+     uint32_t pcr = ht_get(s->sw, SW_PCR(port), 0x00ff0000);
+     return (pcr >> 16) & 0x7f;
+ }
+ 
+-static bool sw_spec_tag(MT7981EthState *s)
++static bool sw_spec_tag(MtkEthState *s)
+ {
+     return ht_get(s->sw, SW_PVC(SW_CPU_PORT), 0) & BIT(5);
+ }
+ 
+-static void sw_egress(MT7981EthState *s, int src, int dst,
++static void sw_egress(MtkEthState *s, int src, int dst,
+                       const uint8_t *buf, size_t len)
+ {
+     if (dst == SW_CPU_PORT) {
+@@ -1216,12 +1216,12 @@ static void sw_egress(MT7981EthState *s, int src, int dst,
+  * from an 802.1Q tag or the port VID, the VLAN table limits the ports and
+  * tells per port whether the frame leaves tagged.
+  */
+-static bool sw_vlan_aware(MT7981EthState *s, int port)
++static bool sw_vlan_aware(MtkEthState *s, int port)
+ {
+     return ht_get(s->sw, SW_PCR(port), 0x00ff0000) & 3;
+ }
+ 
+-static void sw_vlan_egress(MT7981EthState *s, int src, int dst, uint32_t vid,
++static void sw_vlan_egress(MtkEthState *s, int src, int dst, uint32_t vid,
+                            uint16_t tci, const uint8_t *untagged, size_t ulen)
+ {
+     uint32_t e1 = ht_get(s->sw, 0x100000 | vid, 0);
+@@ -1241,7 +1241,7 @@ static void sw_vlan_egress(MT7981EthState *s, int src, int dst, uint32_t vid,
+     }
+ }
+ 
+-static void sw_forward_vlan(MT7981EthState *s, int src, const uint8_t *buf,
++static void sw_forward_vlan(MtkEthState *s, int src, const uint8_t *buf,
+                             size_t len)
+ {
+     g_autofree uint8_t *u = g_malloc(len);
+@@ -1284,7 +1284,7 @@ static void sw_forward_vlan(MT7981EthState *s, int src, const uint8_t *buf,
+ }
+ 
+ /* frame entering the switch on port 'src' (not special tagged) */
+-static void sw_forward(MT7981EthState *s, int src, const uint8_t *buf,
++static void sw_forward(MtkEthState *s, int src, const uint8_t *buf,
+                        size_t len)
+ {
+     uint32_t allowed = sw_matrix(s, src) & ~BIT(src);
+@@ -1403,9 +1403,9 @@ static void fix_checksums(uint8_t *f, size_t len)
+     stw_be_p(f + l4 + coff, c);
+ }
+ 
+-typedef void (*FrameSink)(MT7981EthState *s, int gdm, uint8_t *f, size_t len);
++typedef void (*FrameSink)(MtkEthState *s, int gdm, uint8_t *f, size_t len);
+ 
+-static void tso_segment(MT7981EthState *s, int gdm, uint8_t *f, size_t len,
++static void tso_segment(MtkEthState *s, int gdm, uint8_t *f, size_t len,
+                         FrameSink sink)
+ {
+     size_t l3, l4, hlen, payload, off;
+@@ -1462,7 +1462,7 @@ static void tso_segment(MT7981EthState *s, int gdm, uint8_t *f, size_t len,
+ /* GMAC egress (frame engine -> wire)                                 */
+ 
+ /* deliver a CPU frame (special tag already removed) into the switch */
+-static void sw_cpu_deliver(MT7981EthState *s, int mask, uint8_t *f,
++static void sw_cpu_deliver(MtkEthState *s, int mask, uint8_t *f,
+                            size_t len)
+ {
+     if (mask <= 0) {
+@@ -1477,7 +1477,7 @@ static void sw_cpu_deliver(MT7981EthState *s, int mask, uint8_t *f,
+     }
+ }
+ 
+-static void gmac_out(MT7981EthState *s, int gdm, uint8_t *f, size_t len)
++static void gmac_out(MtkEthState *s, int gdm, uint8_t *f, size_t len)
+ {
+     if (gdm == 0 && s->has_switch) {
+         sw_cpu_deliver(s, s->tx_mask, f, len);
+@@ -1487,13 +1487,13 @@ static void gmac_out(MT7981EthState *s, int gdm, uint8_t *f, size_t len)
+     }
+ }
+ 
+-static void fe_transmit(MT7981EthState *s, int fport, uint8_t *f, size_t len,
++static void fe_transmit(MtkEthState *s, int fport, uint8_t *f, size_t len,
+                         bool csum, bool tso, uint32_t vlan)
+ {
+     int gdm = fport - 1;    /* PSE port 1 = GDM1, 2 = GDM2 */
+ 
+     if (gdm < 0 || gdm > 1) {
+-        qemu_log_mask(LOG_GUEST_ERROR, "mt7981-eth: TX to PSE port %d\n",
++        qemu_log_mask(LOG_GUEST_ERROR, "mtk-eth: TX to PSE port %d\n",
+                       fport);
+         return;
+     }
+@@ -1529,7 +1529,7 @@ static void fe_transmit(MT7981EthState *s, int fport, uint8_t *f, size_t len,
+ /* ------------------------------------------------------------------ */
+ /* IRQs                                                               */
+ 
+-static void fe_update_irq(MT7981EthState *s)
++static void fe_update_irq(MtkEthState *s)
+ {
+     uint32_t q = s->qdma_regs[(QDMA_TX_IRQ_STS - 0x4400) / 4] &
+                  s->qdma_regs[(QDMA_TX_IRQ_MSK - 0x4400) / 4];
+@@ -1555,7 +1555,7 @@ static void fe_update_irq(MT7981EthState *s)
+ /* ------------------------------------------------------------------ */
+ /* RX: deliver a frame from a GMAC into the PDMA ring                 */
+ 
+-static Pdma *rx_engine(MT7981EthState *s)
++static Pdma *rx_engine(MtkEthState *s)
+ {
+     if (s->pdma[0].regs[PDMA_GLO_CFG / 4] & RX_DMA_EN &&
+         s->pdma[0].regs[PDMA_RX_RING(0) / 4 + 1]) {
+@@ -1568,7 +1568,7 @@ static Pdma *rx_engine(MT7981EthState *s)
+     return NULL;
+ }
+ 
+-static bool gdm_can_rx(MT7981EthState *s)
++static bool gdm_can_rx(MtkEthState *s)
+ {
+     Pdma *d = rx_engine(s);
+     uint32_t *r;
+@@ -1580,7 +1580,7 @@ static bool gdm_can_rx(MT7981EthState *s)
+     return r[3] != r[2];    /* DRX != CRX: free descriptor available */
+ }
+ 
+-static void gdm_rx(MT7981EthState *s, int gdm, const uint8_t *buf, size_t len)
++static void gdm_rx(MtkEthState *s, int gdm, const uint8_t *buf, size_t len)
+ {
+     Pdma *d = rx_engine(s);
+     uint32_t *r;
+@@ -1624,7 +1624,7 @@ static void gdm_rx(MT7981EthState *s, int gdm, const uint8_t *buf, size_t len)
+     }
+     off = (d->regs[PDMA_GLO_CFG / 4] & RX_2B_OFFSET) ? 2 : 0;
+     if (len + off > bufsz) {
+-        qemu_log_mask(LOG_GUEST_ERROR, "mt7981-eth: RX frame %zu > buffer "
++        qemu_log_mask(LOG_GUEST_ERROR, "mtk-eth: RX frame %zu > buffer "
+                       "%u, dropped\n", len, bufsz);
+         return;
+     }
+@@ -1662,7 +1662,7 @@ static void gdm_rx(MT7981EthState *s, int gdm, const uint8_t *buf, size_t len)
+ /* ------------------------------------------------------------------ */
+ /* TX engines                                                         */
+ 
+-static void qdma_kick(MT7981EthState *s)
++static void qdma_kick(MtkEthState *s)
+ {
+     uint32_t *q = s->qdma_regs;
+     uint32_t ctx = q[(QDMA_CTX_PTR - 0x4400) / 4];
+@@ -1728,7 +1728,7 @@ static void qdma_kick(MT7981EthState *s)
+     fe_update_irq(s);
+ }
+ 
+-static void pdma_tx_kick(MT7981EthState *s, Pdma *d, int ring)
++static void pdma_tx_kick(MtkEthState *s, Pdma *d, int ring)
+ {
+     uint32_t *r = &d->regs[PDMA_TX_RING(ring) / 4];
+     uint32_t dsz = d->v2 ? 32 : 16;
+@@ -1777,7 +1777,7 @@ static void pdma_tx_kick(MT7981EthState *s, Pdma *d, int ring)
+ /* ------------------------------------------------------------------ */
+ /* MMIO                                                               */
+ 
+-static void flush_rx_queues(MT7981EthState *s)
++static void flush_rx_queues(MtkEthState *s)
+ {
+     for (int i = 0; i < ARRAY_SIZE(s->ports); i++) {
+         if (s->ports[i].nic) {
+@@ -1794,7 +1794,7 @@ static uint64_t pdma_read(Pdma *d, hwaddr off)
+     return d->regs[off / 4];
+ }
+ 
+-static void pdma_write(MT7981EthState *s, Pdma *d, hwaddr off, uint32_t v)
++static void pdma_write(MtkEthState *s, Pdma *d, hwaddr off, uint32_t v)
+ {
+     if (off == PDMA_IRQ_STATUS || PDMA_IS_GRP_STS(off)) {
+         d->regs[PDMA_IRQ_STATUS / 4] &= ~v;
+@@ -1832,7 +1832,7 @@ static void pdma_write(MT7981EthState *s, Pdma *d, hwaddr off, uint32_t v)
+ 
+ static uint64_t fe_read(void *opaque, hwaddr addr, unsigned size)
+ {
+-    MT7981EthState *s = opaque;
++    MtkEthState *s = opaque;
+     uint32_t v;
+ 
+     if (addr >= PDMA_BASE && addr < PDMA_BASE + 0x300) {
+@@ -1866,7 +1866,7 @@ static uint64_t fe_read(void *opaque, hwaddr addr, unsigned size)
+ static void fe_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
+ {
+ 
+-    MT7981EthState *s = opaque;
++    MtkEthState *s = opaque;
+     uint32_t v = val;
+ 
+     if (addr >= PDMA_BASE && addr < PDMA_BASE + 0x300) {
+@@ -1948,7 +1948,7 @@ static ssize_t port_receive(NetClientState *nc, const uint8_t *buf,
+                             size_t size)
+ {
+     EthPort *p = qemu_get_nic_opaque(nc);
+-    MT7981EthState *s = p->s;
++    MtkEthState *s = p->s;
+     uint8_t pad[60];
+ 
+     if (size < 60) {
+@@ -1975,7 +1975,7 @@ static ssize_t port_receive(NetClientState *nc, const uint8_t *buf,
+ static void port_link_changed(NetClientState *nc)
+ {
+     EthPort *p = qemu_get_nic_opaque(nc);
+-    MT7981EthState *s = p->s;
++    MtkEthState *s = p->s;
+     bool link = port_link(s, p->index);
+ 
+     if (p->index == 7) {
+@@ -2006,7 +2006,7 @@ static NetClientInfo port_info = {
+ 
+ static void eth_reset(DeviceState *dev)
+ {
+-    MT7981EthState *s = MT7981_ETH(dev);
++    MtkEthState *s = MTK_ETH(dev);
+ 
+     g_hash_table_remove_all(s->fe);
+     g_hash_table_remove_all(s->sw);
+@@ -2041,7 +2041,7 @@ static void eth_reset(DeviceState *dev)
+ 
+ static void eth_realize(DeviceState *dev, Error **errp)
+ {
+-    MT7981EthState *s = MT7981_ETH(dev);
++    MtkEthState *s = MTK_ETH(dev);
+ 
+     for (int i = 0; i < ARRAY_SIZE(s->ports); i++) {
+         EthPort *p = &s->ports[i];
+@@ -2081,7 +2081,7 @@ static const MemoryRegionOps swmmio_ops = {
+ 
+ static void eth_init(Object *obj)
+ {
+-    MT7981EthState *s = MT7981_ETH(obj);
++    MtkEthState *s = MTK_ETH(obj);
+     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+ 
+     s->fe = g_hash_table_new(g_direct_hash, g_direct_equal);
+@@ -2089,17 +2089,17 @@ static void eth_init(Object *obj)
+     s->txbuf = g_malloc(MAX_FRAME + 64);
+     s->pdma[1].v2 = true;
+ 
+-    memory_region_init(&s->container, obj, "mt7981-eth", FE_SIZE);
+-    memory_region_init_io(&s->iomem, obj, &fe_ops, s, "mt7981-fe", FE_SRAM_OFF);
++    memory_region_init(&s->container, obj, "mtk-eth", FE_SIZE);
++    memory_region_init_io(&s->iomem, obj, &fe_ops, s, "mtk-fe", FE_SRAM_OFF);
+     memory_region_add_subregion(&s->container, 0, &s->iomem);
+-    memory_region_init_ram(&s->sram, obj, "mt7981-fe-sram", FE_SRAM_SIZE,
++    memory_region_init_ram(&s->sram, obj, "mtk-fe-sram", FE_SRAM_SIZE,
+                            &error_fatal);
+     memory_region_add_subregion(&s->container, FE_SRAM_OFF, &s->sram);
+     sysbus_init_mmio(sbd, &s->container);
+ 
+     for (int i = 0; i < 2; i++) {
+         memory_region_init_io(&s->sgmii_mr[i], obj, &sgmii_ops, s->sgmii[i],
+-                              "mt7981-sgmii", 0x1000);
++                              "mtk-sgmii", 0x1000);
+         sysbus_init_mmio(sbd, &s->sgmii_mr[i]);
+     }
+     /* region 3: MT7988 built-in switch (mapped by the machine if present) */
+@@ -2114,33 +2114,33 @@ static void eth_init(Object *obj)
+ }
+ 
+ static const Property eth_props[] = {
+-    DEFINE_PROP_NETDEV("netdev-p0", MT7981EthState, ports[0].conf.peers),
+-    DEFINE_PROP_NETDEV("netdev-p1", MT7981EthState, ports[1].conf.peers),
+-    DEFINE_PROP_NETDEV("netdev-p2", MT7981EthState, ports[2].conf.peers),
+-    DEFINE_PROP_NETDEV("netdev-p3", MT7981EthState, ports[3].conf.peers),
+-    DEFINE_PROP_NETDEV("netdev-p4", MT7981EthState, ports[4].conf.peers),
+-    DEFINE_PROP_NETDEV("netdev-gmac0", MT7981EthState, ports[5].conf.peers),
+-    DEFINE_PROP_NETDEV("netdev-gmac1", MT7981EthState, ports[6].conf.peers),
+-    DEFINE_PROP_NETDEV("netdev-p5", MT7981EthState, ports[7].conf.peers),
+-    DEFINE_PROP_BOOL("switch", MT7981EthState, has_switch, true),
++    DEFINE_PROP_NETDEV("netdev-p0", MtkEthState, ports[0].conf.peers),
++    DEFINE_PROP_NETDEV("netdev-p1", MtkEthState, ports[1].conf.peers),
++    DEFINE_PROP_NETDEV("netdev-p2", MtkEthState, ports[2].conf.peers),
++    DEFINE_PROP_NETDEV("netdev-p3", MtkEthState, ports[3].conf.peers),
++    DEFINE_PROP_NETDEV("netdev-p4", MtkEthState, ports[4].conf.peers),
++    DEFINE_PROP_NETDEV("netdev-gmac0", MtkEthState, ports[5].conf.peers),
++    DEFINE_PROP_NETDEV("netdev-gmac1", MtkEthState, ports[6].conf.peers),
++    DEFINE_PROP_NETDEV("netdev-p5", MtkEthState, ports[7].conf.peers),
++    DEFINE_PROP_BOOL("switch", MtkEthState, has_switch, true),
+     /*
+      * 0 = none, 1 = RTL8221B, 2 = MT7981 built-in GbE PHY, 3 = YT8821,
+      * 4 = GPY211, 5 = MT7987 internal 2.5G PHY
+      */
+-    DEFINE_PROP_UINT32("gmac0-phy", MT7981EthState, dphy_type[0], 0),
+-    DEFINE_PROP_UINT32("gmac1-phy", MT7981EthState, dphy_type[1], 0),
+-    DEFINE_PROP_UINT32("gmac0-phy-addr", MT7981EthState, dphy_addr[0], 1),
+-    DEFINE_PROP_UINT32("gmac1-phy-addr", MT7981EthState, dphy_addr[1], 6),
+-    DEFINE_PROP_UINT32("switch-addr", MT7981EthState, switch_addr, 31),
++    DEFINE_PROP_UINT32("gmac0-phy", MtkEthState, dphy_type[0], 0),
++    DEFINE_PROP_UINT32("gmac1-phy", MtkEthState, dphy_type[1], 0),
++    DEFINE_PROP_UINT32("gmac0-phy-addr", MtkEthState, dphy_addr[0], 1),
++    DEFINE_PROP_UINT32("gmac1-phy-addr", MtkEthState, dphy_addr[1], 6),
++    DEFINE_PROP_UINT32("switch-addr", MtkEthState, switch_addr, 31),
+     /*
+      * 0 = MediaTek MT7531, 1 = Airoha AN8855 (CPU port 5, PBUS access),
+      * 2 = MT7988 built-in switch (MMIO, region 3; no MDIO address)
+      */
+-    DEFINE_PROP_UINT32("switch-model", MT7981EthState, switch_model, 0),
+-    DEFINE_PROP_UINT32("i2p5ge-phyid2", MT7981EthState, i2p5ge_phyid2, 0),
+-    DEFINE_PROP_UINT32("pdma2-base", MT7981EthState, pdma2_base, 0x6000),
+-    DEFINE_PROP_UINT32("port5-phy", MT7981EthState, p5phy_type, 0),
+-    DEFINE_PROP_UINT32("port5-phy-addr", MT7981EthState, p5phy_addr, 5),
++    DEFINE_PROP_UINT32("switch-model", MtkEthState, switch_model, 0),
++    DEFINE_PROP_UINT32("i2p5ge-phyid2", MtkEthState, i2p5ge_phyid2, 0),
++    DEFINE_PROP_UINT32("pdma2-base", MtkEthState, pdma2_base, 0x6000),
++    DEFINE_PROP_UINT32("port5-phy", MtkEthState, p5phy_type, 0),
++    DEFINE_PROP_UINT32("port5-phy-addr", MtkEthState, p5phy_addr, 5),
+ };
+ 
+ static void eth_class_init(ObjectClass *klass, const void *data)
+@@ -2154,9 +2154,9 @@ static void eth_class_init(ObjectClass *klass, const void *data)
+ }
+ 
+ static const TypeInfo eth_info = {
+-    .name = TYPE_MT7981_ETH,
++    .name = TYPE_MTK_ETH,
+     .parent = TYPE_SYS_BUS_DEVICE,
+-    .instance_size = sizeof(MT7981EthState),
++    .instance_size = sizeof(MtkEthState),
+     .instance_init = eth_init,
+     .class_init = eth_class_init,
+ };
+diff --git a/hw/arm/mt7981/mt7981_msdc.c b/hw/arm/filogic/mtk_msdc.c
+similarity index 91%
+rename from hw/arm/mt7981/mt7981_msdc.c
+rename to hw/arm/filogic/mtk_msdc.c
+index b2d3127..cb2db98 100644
+--- a/hw/arm/mt7981/mt7981_msdc.c
++++ b/hw/arm/filogic/mtk_msdc.c
+@@ -17,7 +17,7 @@
+ #include "hw/sd/sd.h"
+ #include "system/dma.h"
+ #include "system/address-spaces.h"
+-#include "mt7981.h"
++#include "filogic.h"
+ 
+ #define MSDC_CFG        0x00
+ #define MSDC_PS         0x08
+@@ -58,7 +58,7 @@
+ #define GPD_BDP         BIT(1)
+ #define BD_EOL          BIT(0)
+ 
+-struct MT7981MsdcState {
++struct MtkMsdcState {
+     SysBusDevice parent_obj;
+     MemoryRegion iomem;
+     qemu_irq irq;
+@@ -70,19 +70,19 @@ struct MT7981MsdcState {
+     bool auto_stop;         /* auto CMD12 once the data is through */
+ };
+ 
+-static void msdc_update_irq(MT7981MsdcState *s)
++static void msdc_update_irq(MtkMsdcState *s)
+ {
+     qemu_set_irq(s->irq, !!(s->regs[MSDC_INT / 4] & s->regs[MSDC_INTEN / 4]));
+ }
+ 
+-static void msdc_raise(MT7981MsdcState *s, uint32_t bits)
++static void msdc_raise(MtkMsdcState *s, uint32_t bits)
+ {
+     s->regs[MSDC_INT / 4] |= bits;
+     msdc_update_irq(s);
+ }
+ 
+ /* send one command; false: no response (timeout) */
+-static bool msdc_command(MT7981MsdcState *s, uint8_t cmd, uint32_t arg,
++static bool msdc_command(MtkMsdcState *s, uint8_t cmd, uint32_t arg,
+                          int rsptyp, uint32_t *resp_out)
+ {
+     SDRequest req = { .cmd = cmd, .arg = arg };
+@@ -108,7 +108,7 @@ static bool msdc_command(MT7981MsdcState *s, uint8_t cmd, uint32_t arg,
+     return true;
+ }
+ 
+-static void msdc_auto_stop(MT7981MsdcState *s)
++static void msdc_auto_stop(MtkMsdcState *s)
+ {
+     uint32_t r[4];
+ 
+@@ -124,7 +124,7 @@ static void msdc_auto_stop(MT7981MsdcState *s)
+     }
+ }
+ 
+-static void msdc_xfer_done(MT7981MsdcState *s)
++static void msdc_xfer_done(MtkMsdcState *s)
+ {
+     msdc_auto_stop(s);
+     msdc_raise(s, INT_XFER_COMPL);
+@@ -134,7 +134,7 @@ static void msdc_xfer_done(MT7981MsdcState *s)
+  * SDC_CMD: vol_swt << 30 | auto_cmd << 28 | blklen << 16 | stop << 14 |
+  * rw << 13 | dtype << 11 | rsptyp << 7 | opcode
+  */
+-static void msdc_start_command(MT7981MsdcState *s, uint32_t raw)
++static void msdc_start_command(MtkMsdcState *s, uint32_t raw)
+ {
+     uint8_t cmd = raw & 0x3f;
+     int rsptyp = (raw >> 7) & 7;
+@@ -155,7 +155,7 @@ static void msdc_start_command(MT7981MsdcState *s, uint32_t raw)
+         }
+     }
+     if (!msdc_command(s, cmd, s->regs[SDC_ARG / 4], rsptyp, r)) {
+-        qemu_log_mask(LOG_GUEST_ERROR, "mt7981-msdc: CMD%d arg 0x%x: no "
++        qemu_log_mask(LOG_GUEST_ERROR, "mtk-msdc: CMD%d arg 0x%x: no "
+                       "response\n", cmd, s->regs[SDC_ARG / 4]);
+         msdc_raise(s, INT_CMDTMO);
+         return;
+@@ -178,7 +178,7 @@ static void msdc_start_command(MT7981MsdcState *s, uint32_t raw)
+  * Linux: one GPD with BDP set points at a chain of BDs, each a buffer
+  * (address with 4 high bits in bd_info[31:28], length in [23:0]).
+  */
+-static void msdc_dma_start(MT7981MsdcState *s)
++static void msdc_dma_start(MtkMsdcState *s)
+ {
+     uint64_t gpd = ((uint64_t)(s->regs[DMA_SA_H4BIT / 4] & 0xf) << 32) |
+                    s->regs[MSDC_DMA_SA / 4];
+@@ -193,7 +193,7 @@ static void msdc_dma_start(MT7981MsdcState *s)
+         g[i] = le32_to_cpu(g[i]);
+     }
+     if (!(g[0] & GPD_BDP)) {
+-        qemu_log_mask(LOG_UNIMP, "mt7981-msdc: GPD without BDs\n");
++        qemu_log_mask(LOG_UNIMP, "mtk-msdc: GPD without BDs\n");
+         msdc_xfer_done(s);
+         return;
+     }
+@@ -229,7 +229,7 @@ static void msdc_dma_start(MT7981MsdcState *s)
+     msdc_xfer_done(s);
+ }
+ 
+-static void msdc_reset_fifo(MT7981MsdcState *s)
++static void msdc_reset_fifo(MtkMsdcState *s)
+ {
+     s->xfer_left = 0;
+     s->auto_stop = false;
+@@ -237,7 +237,7 @@ static void msdc_reset_fifo(MT7981MsdcState *s)
+ 
+ static uint64_t msdc_read(void *opaque, hwaddr addr, unsigned size)
+ {
+-    MT7981MsdcState *s = opaque;
++    MtkMsdcState *s = opaque;
+     uint32_t v = s->regs[(addr & ~3) / 4];
+ 
+     switch (addr & ~3) {
+@@ -279,7 +279,7 @@ static uint64_t msdc_read(void *opaque, hwaddr addr, unsigned size)
+ static void msdc_write(void *opaque, hwaddr addr, uint64_t val,
+                        unsigned size)
+ {
+-    MT7981MsdcState *s = opaque;
++    MtkMsdcState *s = opaque;
+     uint32_t v = val;
+     hwaddr a = addr & ~3;
+ 
+@@ -343,7 +343,7 @@ static const MemoryRegionOps msdc_ops = {
+ 
+ static void msdc_reset(DeviceState *dev)
+ {
+-    MT7981MsdcState *s = MT7981_MSDC(dev);
++    MtkMsdcState *s = MTK_MSDC(dev);
+ 
+     memset(s->regs, 0, sizeof(s->regs));
+     msdc_reset_fifo(s);
+@@ -352,10 +352,10 @@ static void msdc_reset(DeviceState *dev)
+ 
+ static void msdc_init(Object *obj)
+ {
+-    MT7981MsdcState *s = MT7981_MSDC(obj);
++    MtkMsdcState *s = MTK_MSDC(obj);
+ 
+     qbus_init(&s->sdbus, sizeof(s->sdbus), TYPE_SD_BUS, DEVICE(s), "sd-bus");
+-    memory_region_init_io(&s->iomem, obj, &msdc_ops, s, "mt7981-msdc",
++    memory_region_init_io(&s->iomem, obj, &msdc_ops, s, "mtk-msdc",
+                           0x1000);
+     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
+     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
+@@ -370,9 +370,9 @@ static void msdc_class_init(ObjectClass *klass, const void *data)
+ }
+ 
+ static const TypeInfo msdc_info = {
+-    .name = TYPE_MT7981_MSDC,
++    .name = TYPE_MTK_MSDC,
+     .parent = TYPE_SYS_BUS_DEVICE,
+-    .instance_size = sizeof(MT7981MsdcState),
++    .instance_size = sizeof(MtkMsdcState),
+     .instance_init = msdc_init,
+     .class_init = msdc_class_init,
+ };
+diff --git a/hw/arm/mt7981/mt7987_pcie.c b/hw/arm/filogic/mtk_pcie.c
+similarity index 97%
+rename from hw/arm/mt7981/mt7987_pcie.c
+rename to hw/arm/filogic/mtk_pcie.c
+index 737b400..ff7108c 100644
+--- a/hw/arm/mt7981/mt7987_pcie.c
++++ b/hw/arm/filogic/mtk_pcie.c
+@@ -24,7 +24,7 @@
+ #include "hw/pci/pci_host.h"
+ #include "hw/pci/msi.h"
+ #include "system/address-spaces.h"
+-#include "mt7981.h"
++#include "filogic.h"
+ 
+ #define REG_SIZE            0x2000
+ 
+@@ -50,7 +50,7 @@
+ #define LTSSM_L0            0x10
+ #define LTSSM_DETECT_QUIET  0x00
+ 
+-OBJECT_DECLARE_SIMPLE_TYPE(Mt7987PcieState, MT7987_PCIE)
++OBJECT_DECLARE_SIMPLE_TYPE(Mt7987PcieState, MTK_PCIE)
+ 
+ struct Mt7987PcieState {
+     PCIHostState parent_obj;
+@@ -223,7 +223,7 @@ static const MemoryRegionOps pcie_ops = {
+ 
+ static void mt7987_pcie_reset(DeviceState *dev)
+ {
+-    Mt7987PcieState *s = MT7987_PCIE(dev);
++    Mt7987PcieState *s = MTK_PCIE(dev);
+ 
+     memset(s->r, 0, sizeof(s->r));
+     memset(s->msi_status, 0, sizeof(s->msi_status));
+@@ -239,12 +239,12 @@ static const char *mt7987_pcie_root_bus_path(PCIHostState *h, PCIBus *rootbus)
+ 
+ static void mt7987_pcie_realize(DeviceState *dev, Error **errp)
+ {
+-    Mt7987PcieState *s = MT7987_PCIE(dev);
++    Mt7987PcieState *s = MTK_PCIE(dev);
+     PCIHostState *h = PCI_HOST_BRIDGE(dev);
+     SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
+     MemoryRegion *sysmem = get_system_memory();
+ 
+-    memory_region_init_io(&s->regs, OBJECT(s), &pcie_ops, s, "mt7987-pcie",
++    memory_region_init_io(&s->regs, OBJECT(s), &pcie_ops, s, "mtk-pcie",
+                           REG_SIZE);
+     sysbus_init_mmio(sbd, &s->regs);
+     sysbus_init_irq(sbd, &s->irq);
+@@ -303,7 +303,7 @@ static void mt7987_pcie_class_init(ObjectClass *klass, const void *data)
+ }
+ 
+ static const TypeInfo mt7987_pcie_info = {
+-    .name = TYPE_MT7987_PCIE,
++    .name = TYPE_MTK_PCIE,
+     .parent = TYPE_PCI_HOST_BRIDGE,
+     .instance_size = sizeof(Mt7987PcieState),
+     .class_init = mt7987_pcie_class_init,
+diff --git a/hw/arm/mt7981/mt7981_pinctrl.c b/hw/arm/filogic/mtk_pinctrl.c
+similarity index 86%
+rename from hw/arm/mt7981/mt7981_pinctrl.c
+rename to hw/arm/filogic/mtk_pinctrl.c
+index 16e8ade..66c9898 100644
+--- a/hw/arm/mt7981/mt7981_pinctrl.c
++++ b/hw/arm/filogic/mtk_pinctrl.c
+@@ -18,14 +18,14 @@
+ #include "qapi/visitor.h"
+ #include "hw/irq.h"
+ #include "hw/qdev-properties.h"
+-#include "mt7981.h"
++#include "filogic.h"
+ 
+ #define MAX_PINS    128
+ #define NWORDS      (MAX_PINS / 32)
+ #define NMODE       (MAX_PINS / 8)
+ #define EINT_PORTS  7
+ 
+-struct MT7981PinctrlState {
++struct MtkPinctrlState {
+     SysBusDevice parent_obj;
+     MemoryRegion gpio_mr, eint_mr;
+     qemu_irq irq;
+@@ -49,7 +49,7 @@ struct MT7981PinctrlState {
+     bool gpio_log;
+ };
+ 
+-static bool pin_level(MT7981PinctrlState *s, int pin)
++static bool pin_level(MtkPinctrlState *s, int pin)
+ {
+     int w = pin / 32, b = pin % 32;
+ 
+@@ -63,7 +63,7 @@ static bool pin_level(MT7981PinctrlState *s, int pin)
+  * Propagate pad levels to board devices: a pin driven as output follows
+  * DOUT, an input pin floats high (board pull-ups).
+  */
+-static void pins_update(MT7981PinctrlState *s)
++static void pins_update(MtkPinctrlState *s)
+ {
+     for (int pin = 0; pin < (int)s->npins; pin++) {
+         int w = pin / 32, b = pin % 32;
+@@ -80,9 +80,9 @@ static void pins_update(MT7981PinctrlState *s)
+  * An LED on a pin: -1 while the pin is not driven (input, the LED stays
+  * dark), else the output level.  *toggles counts level changes.
+  */
+-int mt7981_pinctrl_out(DeviceState *dev, int pin, uint32_t *toggles)
++int mtk_pinctrl_out(DeviceState *dev, int pin, uint32_t *toggles)
+ {
+-    MT7981PinctrlState *s = MT7981_PINCTRL(dev);
++    MtkPinctrlState *s = MTK_PINCTRL(dev);
+ 
+     if (pin < 0 || pin >= (int)s->npins) {
+         return -1;
+@@ -94,7 +94,7 @@ int mt7981_pinctrl_out(DeviceState *dev, int pin, uint32_t *toggles)
+     return !!(s->dout[pin / 32] & BIT(pin % 32));
+ }
+ 
+-static void eint_update(MT7981PinctrlState *s)
++static void eint_update(MtkPinctrlState *s)
+ {
+     bool level = false;
+ 
+@@ -115,7 +115,7 @@ static void eint_update(MT7981PinctrlState *s)
+     qemu_set_irq(s->irq, level);
+ }
+ 
+-static void set_input(MT7981PinctrlState *s, int pin, bool level)
++static void set_input(MtkPinctrlState *s, int pin, bool level)
+ {
+     int w = pin / 32, b = pin % 32, p = pin / 32;
+     bool old = s->ext_level[w] & BIT(b);
+@@ -141,7 +141,7 @@ static void pinctrl_gpio_in(void *opaque, int pin, int level)
+ }
+ 
+ /* GPIO block: DIR 0x000, DOUT 0x100, DIN 0x200, MODE 0x300 */
+-static uint32_t *gpio_reg(MT7981PinctrlState *s, hwaddr a)
++static uint32_t *gpio_reg(MtkPinctrlState *s, hwaddr a)
+ {
+     int idx = (a & 0xff) >> 4;
+ 
+@@ -155,7 +155,7 @@ static uint32_t *gpio_reg(MT7981PinctrlState *s, hwaddr a)
+ 
+ static uint64_t gpio_read(void *opaque, hwaddr a, unsigned size)
+ {
+-    MT7981PinctrlState *s = opaque;
++    MtkPinctrlState *s = opaque;
+     uint32_t *r;
+ 
+     if (a == 0x6f0) {
+@@ -177,7 +177,7 @@ static uint64_t gpio_read(void *opaque, hwaddr a, unsigned size)
+ 
+ static void gpio_write(void *opaque, hwaddr a, uint64_t val, unsigned size)
+ {
+-    MT7981PinctrlState *s = opaque;
++    MtkPinctrlState *s = opaque;
+     uint32_t *r = gpio_reg(s, a);
+     uint32_t old_out[NWORDS];
+ 
+@@ -221,7 +221,7 @@ static const MemoryRegionOps gpio_ops = {
+ 
+ static uint64_t eint_read(void *opaque, hwaddr a, unsigned size)
+ {
+-    MT7981PinctrlState *s = opaque;
++    MtkPinctrlState *s = opaque;
+     int port = (a & 0x3f) / 4;
+ 
+     if (port < EINT_PORTS && a < 0x500) {
+@@ -239,7 +239,7 @@ static uint64_t eint_read(void *opaque, hwaddr a, unsigned size)
+ 
+ static void eint_write(void *opaque, hwaddr a, uint64_t val, unsigned size)
+ {
+-    MT7981PinctrlState *s = opaque;
++    MtkPinctrlState *s = opaque;
+     int port = (a & 0x3f) / 4;
+ 
+     if (port < EINT_PORTS && a < 0x500) {
+@@ -275,7 +275,7 @@ static const MemoryRegionOps eint_ops = {
+ 
+ static void pinctrl_reset(DeviceState *dev)
+ {
+-    MT7981PinctrlState *s = MT7981_PINCTRL(dev);
++    MtkPinctrlState *s = MTK_PINCTRL(dev);
+     uint32_t keep[NWORDS];
+ 
+     memcpy(keep, s->ext_level, sizeof(keep));
+@@ -300,7 +300,7 @@ static void pinctrl_reset(DeviceState *dev)
+ static void button_get(Object *obj, Visitor *v, const char *name,
+                        void *opaque, Error **errp)
+ {
+-    MT7981PinctrlState *s = MT7981_PINCTRL(obj);
++    MtkPinctrlState *s = MTK_PINCTRL(obj);
+     bool reset = !strcmp(name, "reset-button");
+     uint32_t pin = reset ? s->button_reset_pin : s->button_wps_pin;
+     bool high = reset ? s->reset_active_high : s->wps_active_high;
+@@ -312,7 +312,7 @@ static void button_get(Object *obj, Visitor *v, const char *name,
+ static void button_set(Object *obj, Visitor *v, const char *name,
+                        void *opaque, Error **errp)
+ {
+-    MT7981PinctrlState *s = MT7981_PINCTRL(obj);
++    MtkPinctrlState *s = MTK_PINCTRL(obj);
+     bool reset = !strcmp(name, "reset-button");
+     uint32_t pin = reset ? s->button_reset_pin : s->button_wps_pin;
+     bool high = reset ? s->reset_active_high : s->wps_active_high;
+@@ -330,12 +330,12 @@ static void button_set(Object *obj, Visitor *v, const char *name,
+  */
+ static void reset_release_cb(void *opaque)
+ {
+-    MT7981PinctrlState *s = opaque;
++    MtkPinctrlState *s = opaque;
+ 
+     set_input(s, s->button_reset_pin, !s->reset_active_high);
+ }
+ 
+-static void hold_reset(MT7981PinctrlState *s, uint32_t ms)
++static void hold_reset(MtkPinctrlState *s, uint32_t ms)
+ {
+     set_input(s, s->button_reset_pin, s->reset_active_high);
+     timer_mod(s->reset_release, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + ms);
+@@ -344,7 +344,7 @@ static void hold_reset(MT7981PinctrlState *s, uint32_t ms)
+ static void hold_get(Object *obj, Visitor *v, const char *name,
+                      void *opaque, Error **errp)
+ {
+-    MT7981PinctrlState *s = MT7981_PINCTRL(obj);
++    MtkPinctrlState *s = MTK_PINCTRL(obj);
+     uint32_t ms = 0;
+ 
+     if (timer_pending(s->reset_release)) {
+@@ -357,7 +357,7 @@ static void hold_get(Object *obj, Visitor *v, const char *name,
+ static void hold_set(Object *obj, Visitor *v, const char *name,
+                      void *opaque, Error **errp)
+ {
+-    MT7981PinctrlState *s = MT7981_PINCTRL(obj);
++    MtkPinctrlState *s = MTK_PINCTRL(obj);
+     uint32_t ms;
+ 
+     if (visit_type_uint32(v, name, &ms, errp)) {
+@@ -367,7 +367,7 @@ static void hold_set(Object *obj, Visitor *v, const char *name,
+ 
+ static void pinctrl_realize(DeviceState *dev, Error **errp)
+ {
+-    MT7981PinctrlState *s = MT7981_PINCTRL(dev);
++    MtkPinctrlState *s = MTK_PINCTRL(dev);
+ 
+     if (!s->npins || s->npins > MAX_PINS) {
+         error_setg(errp, "npins must be 1..%d", MAX_PINS);
+@@ -392,12 +392,12 @@ static void pinctrl_realize(DeviceState *dev, Error **errp)
+ 
+ static void pinctrl_init(Object *obj)
+ {
+-    MT7981PinctrlState *s = MT7981_PINCTRL(obj);
++    MtkPinctrlState *s = MTK_PINCTRL(obj);
+     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+ 
+-    memory_region_init_io(&s->gpio_mr, obj, &gpio_ops, s, "mt7981-gpio",
++    memory_region_init_io(&s->gpio_mr, obj, &gpio_ops, s, "mtk-gpio",
+                           0x1000);
+-    memory_region_init_io(&s->eint_mr, obj, &eint_ops, s, "mt7981-eint",
++    memory_region_init_io(&s->eint_mr, obj, &eint_ops, s, "mtk-eint",
+                           0x1000);
+     sysbus_init_mmio(sbd, &s->gpio_mr);
+     sysbus_init_mmio(sbd, &s->eint_mr);
+@@ -420,14 +420,14 @@ static void pinctrl_init(Object *obj)
+ }
+ 
+ static const Property pinctrl_props[] = {
+-    DEFINE_PROP_UINT32("npins", MT7981PinctrlState, npins, 57),
+-    DEFINE_PROP_UINT32("bootstrap", MT7981PinctrlState, bootstrap, 0),
+-    DEFINE_PROP_UINT32("reset-pin", MT7981PinctrlState, button_reset_pin, 1),
+-    DEFINE_PROP_UINT32("wps-pin", MT7981PinctrlState, button_wps_pin, 0),
+-    DEFINE_PROP_BOOL("gpio-log", MT7981PinctrlState, gpio_log, false),
+-    DEFINE_PROP_UINT32("reset-hold", MT7981PinctrlState, reset_hold_ms, 0),
+-    DEFINE_PROP_BOOL("reset-active-high", MT7981PinctrlState, reset_active_high, false),
+-    DEFINE_PROP_BOOL("wps-active-high", MT7981PinctrlState, wps_active_high, false),
++    DEFINE_PROP_UINT32("npins", MtkPinctrlState, npins, 57),
++    DEFINE_PROP_UINT32("bootstrap", MtkPinctrlState, bootstrap, 0),
++    DEFINE_PROP_UINT32("reset-pin", MtkPinctrlState, button_reset_pin, 1),
++    DEFINE_PROP_UINT32("wps-pin", MtkPinctrlState, button_wps_pin, 0),
++    DEFINE_PROP_BOOL("gpio-log", MtkPinctrlState, gpio_log, false),
++    DEFINE_PROP_UINT32("reset-hold", MtkPinctrlState, reset_hold_ms, 0),
++    DEFINE_PROP_BOOL("reset-active-high", MtkPinctrlState, reset_active_high, false),
++    DEFINE_PROP_BOOL("wps-active-high", MtkPinctrlState, wps_active_high, false),
+ };
+ 
+ static void pinctrl_class_init(ObjectClass *klass, const void *data)
+@@ -441,9 +441,9 @@ static void pinctrl_class_init(ObjectClass *klass, const void *data)
+ }
+ 
+ static const TypeInfo pinctrl_info = {
+-    .name = TYPE_MT7981_PINCTRL,
++    .name = TYPE_MTK_PINCTRL,
+     .parent = TYPE_SYS_BUS_DEVICE,
+-    .instance_size = sizeof(MT7981PinctrlState),
++    .instance_size = sizeof(MtkPinctrlState),
+     .instance_init = pinctrl_init,
+     .class_init = pinctrl_class_init,
+ };
+diff --git a/hw/arm/mt7981/mt7981_spim.c b/hw/arm/filogic/mtk_spim.c
+similarity index 93%
+rename from hw/arm/mt7981/mt7981_spim.c
+rename to hw/arm/filogic/mtk_spim.c
+index e8aff20..775b1f7 100644
+--- a/hw/arm/mt7981/mt7981_spim.c
++++ b/hw/arm/filogic/mtk_spim.c
+@@ -15,7 +15,7 @@
+ #include "hw/qdev-properties.h"
+ #include "system/dma.h"
+ #include "system/address-spaces.h"
+-#include "mt7981.h"
++#include "filogic.h"
+ 
+ #define SPI_CFG0        0x00
+ #define SPI_CFG1        0x04
+@@ -49,7 +49,7 @@
+ 
+ #define FIFO_SIZE       32
+ 
+-struct MT7981SpimState {
++struct MtkSpimState {
+     SysBusDevice parent_obj;
+     MemoryRegion iomem;
+     qemu_irq irq;
+@@ -66,7 +66,7 @@ struct MT7981SpimState {
+     bool busy;
+ };
+ 
+-static void spim_update_irq(MT7981SpimState *s)
++static void spim_update_irq(MtkSpimState *s)
+ {
+     uint32_t cmd = s->regs[SPI_CMD / 4];
+     bool level = (s->status0 & 1 && cmd & CMD_FINISH_IE) ||
+@@ -74,7 +74,7 @@ static void spim_update_irq(MT7981SpimState *s)
+     qemu_set_irq(s->irq, level);
+ }
+ 
+-static void spim_cs(MT7981SpimState *s, bool active)
++static void spim_cs(MtkSpimState *s, bool active)
+ {
+     if (s->cs_active != active) {
+         s->cs_active = active;
+@@ -82,12 +82,12 @@ static void spim_cs(MT7981SpimState *s, bool active)
+     }
+ }
+ 
+-static uint64_t spim_addr(MT7981SpimState *s, int lo, int hi)
++static uint64_t spim_addr(MtkSpimState *s, int lo, int hi)
+ {
+     return (uint64_t)s->regs[lo / 4] | ((uint64_t)s->regs[hi / 4] << 32);
+ }
+ 
+-static void spim_run(MT7981SpimState *s)
++static void spim_run(MtkSpimState *s)
+ {
+     uint32_t cmd = s->regs[SPI_CMD / 4];
+     uint32_t cfg1 = s->regs[SPI_CFG1 / 4];
+@@ -169,7 +169,7 @@ static void spim_run(MT7981SpimState *s)
+ 
+ static uint64_t spim_read(void *opaque, hwaddr addr, unsigned size)
+ {
+-    MT7981SpimState *s = opaque;
++    MtkSpimState *s = opaque;
+     uint32_t val;
+ 
+     switch (addr) {
+@@ -202,7 +202,7 @@ static uint64_t spim_read(void *opaque, hwaddr addr, unsigned size)
+ 
+ static void spim_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
+ {
+-    MT7981SpimState *s = opaque;
++    MtkSpimState *s = opaque;
+     uint32_t old;
+ 
+     switch (addr) {
+@@ -253,7 +253,7 @@ static const MemoryRegionOps spim_ops = {
+ 
+ static void spim_reset(DeviceState *dev)
+ {
+-    MT7981SpimState *s = MT7981_SPIM(dev);
++    MtkSpimState *s = MTK_SPIM(dev);
+ 
+     memset(s->regs, 0, sizeof(s->regs));
+     s->regs[SPI_STATUS1 / 4] = 1;
+@@ -265,11 +265,11 @@ static void spim_reset(DeviceState *dev)
+ 
+ static void spim_init(Object *obj)
+ {
+-    MT7981SpimState *s = MT7981_SPIM(obj);
++    MtkSpimState *s = MTK_SPIM(obj);
+     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+ 
+     /* 0x100: on the MT7987 the next block (LVTS) starts 0x800 after SPI2 */
+-    memory_region_init_io(&s->iomem, obj, &spim_ops, s, "mt7981-spim", 0x100);
++    memory_region_init_io(&s->iomem, obj, &spim_ops, s, "mtk-spim", 0x100);
+     sysbus_init_mmio(sbd, &s->iomem);
+     sysbus_init_irq(sbd, &s->irq);
+     s->bus = ssi_create_bus(DEVICE(obj), "spi");
+@@ -285,9 +285,9 @@ static void spim_class_init(ObjectClass *klass, const void *data)
+ }
+ 
+ static const TypeInfo spim_info = {
+-    .name = TYPE_MT7981_SPIM,
++    .name = TYPE_MTK_SPIM,
+     .parent = TYPE_SYS_BUS_DEVICE,
+-    .instance_size = sizeof(MT7981SpimState),
++    .instance_size = sizeof(MtkSpimState),
+     .instance_init = spim_init,
+     .class_init = spim_class_init,
+ };
+diff --git a/hw/arm/mt7981/mt7981_sysctl.c b/hw/arm/filogic/mtk_sysctl.c
+similarity index 91%
+rename from hw/arm/mt7981/mt7981_sysctl.c
+rename to hw/arm/filogic/mtk_sysctl.c
+index a37f730..089e4e6 100644
+--- a/hw/arm/mt7981/mt7981_sysctl.c
++++ b/hw/arm/filogic/mtk_sysctl.c
+@@ -17,10 +17,10 @@
+ #include "qemu/timer.h"
+ #include "qemu/guest-random.h"
+ #include "hw/qdev-properties.h"
+-#include "mt7981.h"
+-#include "mt7981_dramc_tbl.h"
++#include "filogic.h"
++#include "mtk_dramc_tbl.h"
+ 
+-struct MT7981SysctlState {
++struct MtkSysctlState {
+     SysBusDevice parent_obj;
+     MemoryRegion iomem;
+     uint64_t base;
+@@ -44,7 +44,7 @@ struct MT7981SysctlState {
+     uint8_t efuse_set[0x1000 / 4];  /* word comes from efuse[] */
+ };
+ 
+-static uint32_t reg_get(MT7981SysctlState *s, hwaddr a, uint32_t def)
++static uint32_t reg_get(MtkSysctlState *s, hwaddr a, uint32_t def)
+ {
+     gpointer v;
+     if (g_hash_table_lookup_extended(s->regs, GUINT_TO_POINTER(a), NULL, &v)) {
+@@ -53,13 +53,13 @@ static uint32_t reg_get(MT7981SysctlState *s, hwaddr a, uint32_t def)
+     return def;
+ }
+ 
+-static void reg_set(MT7981SysctlState *s, hwaddr a, uint32_t v)
++static void reg_set(MtkSysctlState *s, hwaddr a, uint32_t v)
+ {
+     g_hash_table_insert(s->regs, GUINT_TO_POINTER(a), GUINT_TO_POINTER(v));
+ }
+ 
+ /* Reset values of registers which are not zero on real hardware */
+-static uint32_t reg_default(MT7981SysctlState *s, hwaddr a)
++static uint32_t reg_default(MtkSysctlState *s, hwaddr a)
+ {
+     hwaddr ef = s->efuse_base;
+ 
+@@ -160,14 +160,14 @@ static uint32_t gpt_rate(uint32_t clk)
+     return ((clk & 0x10) ? 32768 : 13000000) / div[clk & 0xf];
+ }
+ 
+-static uint64_t gpt_now(MT7981SysctlState *s, int n)
++static uint64_t gpt_now(MtkSysctlState *s, int n)
+ {
+     uint32_t clk = reg_get(s, GPT_BASE + 0x14 + 0x10 * n, 0);
+     int64_t ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+     return muldiv64(ns, gpt_rate(clk), NANOSECONDS_PER_SECOND);
+ }
+ 
+-static bool gpt_read(MT7981SysctlState *s, hwaddr a, uint32_t *v)
++static bool gpt_read(MtkSysctlState *s, hwaddr a, uint32_t *v)
+ {
+     hwaddr off = a - GPT_BASE;
+     int n = (int)(off / 0x10) - 1;
+@@ -183,7 +183,7 @@ static bool gpt_read(MT7981SysctlState *s, hwaddr a, uint32_t *v)
+     return true;
+ }
+ 
+-static void gpt_write(MT7981SysctlState *s, hwaddr a, uint32_t v)
++static void gpt_write(MtkSysctlState *s, hwaddr a, uint32_t v)
+ {
+     hwaddr off = a - GPT_BASE;
+     int n = (int)(off / 0x10) - 1;
+@@ -214,7 +214,7 @@ dramc_nao_overrides[] = {
+  * interface to calibrate, so every command completes immediately and every
+  * training step sees a perfect, error free result.
+  */
+-static bool dramc_nao_read(MT7981SysctlState *s, hwaddr a, uint32_t *v)
++static bool dramc_nao_read(MtkSysctlState *s, hwaddr a, uint32_t *v)
+ {
+     hwaddr off = a & 0xffff;
+     int blk;
+@@ -307,16 +307,16 @@ static bool dramc_nao_read(MT7981SysctlState *s, hwaddr a, uint32_t *v)
+ }
+ 
+ /* a register as last written (LED panel: PWM controller) */
+-uint32_t mt7981_sysctl_peek(DeviceState *dev, hwaddr a)
++uint32_t mtk_sysctl_peek(DeviceState *dev, hwaddr a)
+ {
+-    MT7981SysctlState *s = MT7981_SYSCTL(dev);
++    MtkSysctlState *s = MTK_SYSCTL(dev);
+ 
+     return reg_get(s, a & ~3, reg_default(s, a & ~3));
+ }
+ 
+ static uint64_t sysctl_read(void *opaque, hwaddr offset, unsigned size)
+ {
+-    MT7981SysctlState *s = opaque;
++    MtkSysctlState *s = opaque;
+     hwaddr a = s->base + offset;
+     uint32_t v = reg_get(s, a & ~3, reg_default(s, a & ~3));
+     bool known = true;
+@@ -396,7 +396,7 @@ static uint64_t sysctl_read(void *opaque, hwaddr offset, unsigned size)
+         known = false;
+     }
+     if (!known) {
+-        qemu_log_mask(LOG_UNIMP, "mt7981-sysctl: read  0x%08" HWADDR_PRIx
++        qemu_log_mask(LOG_UNIMP, "mtk-sysctl: read  0x%08" HWADDR_PRIx
+                       " -> 0x%08x\n", a, v);
+     }
+     if (size < 4) {
+@@ -409,7 +409,7 @@ static uint64_t sysctl_read(void *opaque, hwaddr offset, unsigned size)
+ static void sysctl_write(void *opaque, hwaddr offset, uint64_t val,
+                          unsigned size)
+ {
+-    MT7981SysctlState *s = opaque;
++    MtkSysctlState *s = opaque;
+     hwaddr a = s->base + offset;
+     hwaddr aa = a & ~3;
+     uint32_t v = val;
+@@ -421,7 +421,7 @@ static void sysctl_write(void *opaque, hwaddr offset, uint64_t val,
+             ((v << shift) & mask);
+     }
+ 
+-    qemu_log_mask(LOG_UNIMP, "mt7981-sysctl: write 0x%08" HWADDR_PRIx
++    qemu_log_mask(LOG_UNIMP, "mtk-sysctl: write 0x%08" HWADDR_PRIx
+                   " <- 0x%08x\n", aa, v);
+ 
+     if (in(aa, GPT_BASE, 0x100)) {
+@@ -494,7 +494,7 @@ static void sysctl_write(void *opaque, hwaddr offset, uint64_t val,
+             if (!(old & BIT(1)) && cpu > 0) {
+                 uint64_t entry = reg_get(s, s->mcucfg_base + 0x38 + 8 * cpu,
+                                          0);
+-                mt7981_cpu_power_on(cpu, entry);
++                filogic_cpu_power_on(cpu, entry);
+             }
+         } else {
+             v &= ~(BIT(30) | BIT(31));
+@@ -518,7 +518,7 @@ static const MemoryRegionOps sysctl_ops = {
+ 
+ static void sysctl_reset(DeviceState *dev)
+ {
+-    MT7981SysctlState *s = MT7981_SYSCTL(dev);
++    MtkSysctlState *s = MTK_SYSCTL(dev);
+ 
+     g_hash_table_remove_all(s->regs);
+     s->freqmeter_valid = 0;
+@@ -530,10 +530,10 @@ static void sysctl_reset(DeviceState *dev)
+ 
+ static void sysctl_realize(DeviceState *dev, Error **errp)
+ {
+-    MT7981SysctlState *s = MT7981_SYSCTL(dev);
++    MtkSysctlState *s = MTK_SYSCTL(dev);
+ 
+     memory_region_init_io(&s->iomem, OBJECT(dev), &sysctl_ops, s,
+-                          "mt7981-sysctl", s->size);
++                          "mtk-sysctl", s->size);
+     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
+     s->regs = g_hash_table_new(g_direct_hash, g_direct_equal);
+ 
+@@ -577,19 +577,19 @@ static void sysctl_realize(DeviceState *dev, Error **errp)
+ }
+ 
+ static const Property sysctl_props[] = {
+-    DEFINE_PROP_UINT64("base", MT7981SysctlState, base, 0),
+-    DEFINE_PROP_UINT64("size", MT7981SysctlState, size, 0x1000),
+-    DEFINE_PROP_UINT32("dram-type", MT7981SysctlState, dram_type, 0),
+-    DEFINE_PROP_UINT32("chip-id", MT7981SysctlState, chip_id, 0x7981),
+-    DEFINE_PROP_UINT64("dram-size", MT7981SysctlState, dram_size, 0),
+-    DEFINE_PROP_UINT64("efuse-base", MT7981SysctlState, efuse_base,
++    DEFINE_PROP_UINT64("base", MtkSysctlState, base, 0),
++    DEFINE_PROP_UINT64("size", MtkSysctlState, size, 0x1000),
++    DEFINE_PROP_UINT32("dram-type", MtkSysctlState, dram_type, 0),
++    DEFINE_PROP_UINT32("chip-id", MtkSysctlState, chip_id, 0x7981),
++    DEFINE_PROP_UINT64("dram-size", MtkSysctlState, dram_size, 0),
++    DEFINE_PROP_UINT64("efuse-base", MtkSysctlState, efuse_base,
+                        0x11f20000),
+-    DEFINE_PROP_UINT64("mcucfg-base", MT7981SysctlState, mcucfg_base,
++    DEFINE_PROP_UINT64("mcucfg-base", MtkSysctlState, mcucfg_base,
+                        MT7981_MCUCFG_BASE),
+-    DEFINE_PROP_UINT64("topmisc-base", MT7981SysctlState, topmisc_base,
++    DEFINE_PROP_UINT64("topmisc-base", MtkSysctlState, topmisc_base,
+                        MT7981_TOPMISC_BASE),
+-    DEFINE_PROP_STRING("efuse-file", MT7981SysctlState, efuse_file),
+-    DEFINE_PROP_STRING("efuse-uid", MT7981SysctlState, efuse_uid),
++    DEFINE_PROP_STRING("efuse-file", MtkSysctlState, efuse_file),
++    DEFINE_PROP_STRING("efuse-uid", MtkSysctlState, efuse_uid),
+ };
+ 
+ static void sysctl_class_init(ObjectClass *klass, const void *data)
+@@ -603,9 +603,9 @@ static void sysctl_class_init(ObjectClass *klass, const void *data)
+ }
+ 
+ static const TypeInfo sysctl_info = {
+-    .name = TYPE_MT7981_SYSCTL,
++    .name = TYPE_MTK_SYSCTL,
+     .parent = TYPE_SYS_BUS_DEVICE,
+-    .instance_size = sizeof(MT7981SysctlState),
++    .instance_size = sizeof(MtkSysctlState),
+     .class_init = sysctl_class_init,
+ };
+ 
+diff --git a/hw/arm/mt7981/mt7981_toprgu.c b/hw/arm/filogic/mtk_toprgu.c
+similarity index 87%
+rename from hw/arm/mt7981/mt7981_toprgu.c
+rename to hw/arm/filogic/mtk_toprgu.c
+index 7a89f44..7495cb4 100644
+--- a/hw/arm/mt7981/mt7981_toprgu.c
++++ b/hw/arm/filogic/mtk_toprgu.c
+@@ -10,7 +10,7 @@
+ #include "qemu/timer.h"
+ #include "hw/irq.h"
+ #include "system/runstate.h"
+-#include "mt7981.h"
++#include "filogic.h"
+ 
+ #define WDT_MODE        0x00
+ #define WDT_LENGTH      0x04
+@@ -29,7 +29,7 @@
+ #define STA_HW_WDT      BIT(31)
+ #define STA_SW_WDT      BIT(30)
+ 
+-struct MT7981ToprguState {
++struct MtkToprguState {
+     SysBusDevice parent_obj;
+     MemoryRegion iomem;
+     qemu_irq irq;
+@@ -39,14 +39,14 @@ struct MT7981ToprguState {
+     bool irq_pending;
+ };
+ 
+-static int64_t wdt_period_ns(MT7981ToprguState *s)
++static int64_t wdt_period_ns(MtkToprguState *s)
+ {
+     uint32_t units = (s->regs[WDT_LENGTH / 4] >> 5) & 0x7ff;
+     /* 1 unit = 512 ticks of the 32.768 kHz clock */
+     return (int64_t)(units ? units : 0x7ff) * 512 * NANOSECONDS_PER_SECOND / 32768;
+ }
+ 
+-static void wdt_restart(MT7981ToprguState *s)
++static void wdt_restart(MtkToprguState *s)
+ {
+     if (s->regs[WDT_MODE / 4] & MODE_EN) {
+         timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+@@ -58,7 +58,7 @@ static void wdt_restart(MT7981ToprguState *s)
+ 
+ static void wdt_expired(void *opaque)
+ {
+-    MT7981ToprguState *s = opaque;
++    MtkToprguState *s = opaque;
+     uint32_t mode = s->regs[WDT_MODE / 4];
+ 
+     if ((mode & MODE_IRQ_EN) && !s->irq_pending) {
+@@ -71,21 +71,21 @@ static void wdt_expired(void *opaque)
+         wdt_restart(s);
+         return;
+     }
+-    qemu_log("mt7981-toprgu: watchdog timeout, resetting system\n");
++    qemu_log("mtk-toprgu: watchdog timeout, resetting system\n");
+     s->next_status = STA_HW_WDT;
+     qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+ }
+ 
+ static uint64_t toprgu_read(void *opaque, hwaddr addr, unsigned size)
+ {
+-    MT7981ToprguState *s = opaque;
++    MtkToprguState *s = opaque;
+ 
+     return s->regs[addr / 4];
+ }
+ 
+ static void toprgu_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
+ {
+-    MT7981ToprguState *s = opaque;
++    MtkToprguState *s = opaque;
+ 
+     switch (addr) {
+     case WDT_MODE:
+@@ -116,7 +116,7 @@ static void toprgu_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
+         return;
+     case WDT_SWRST:
+         if ((val & 0xffff) == 0x1209) {
+-            qemu_log("mt7981-toprgu: software reset\n");
++            qemu_log("mtk-toprgu: software reset\n");
+             s->next_status = STA_SW_WDT;
+             qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+         }
+@@ -141,7 +141,7 @@ static const MemoryRegionOps toprgu_ops = {
+ 
+ static void toprgu_reset(DeviceState *dev)
+ {
+-    MT7981ToprguState *s = MT7981_TOPRGU(dev);
++    MtkToprguState *s = MTK_TOPRGU(dev);
+ 
+     memset(s->regs, 0, sizeof(s->regs));
+     /* Like the real chip the watchdog is enabled out of reset */
+@@ -156,9 +156,9 @@ static void toprgu_reset(DeviceState *dev)
+ 
+ static void toprgu_init(Object *obj)
+ {
+-    MT7981ToprguState *s = MT7981_TOPRGU(obj);
++    MtkToprguState *s = MTK_TOPRGU(obj);
+ 
+-    memory_region_init_io(&s->iomem, obj, &toprgu_ops, s, "mt7981-toprgu",
++    memory_region_init_io(&s->iomem, obj, &toprgu_ops, s, "mtk-toprgu",
+                           0x1000);
+     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
+     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
+@@ -174,9 +174,9 @@ static void toprgu_class_init(ObjectClass *klass, const void *data)
+ }
+ 
+ static const TypeInfo toprgu_info = {
+-    .name = TYPE_MT7981_TOPRGU,
++    .name = TYPE_MTK_TOPRGU,
+     .parent = TYPE_SYS_BUS_DEVICE,
+-    .instance_size = sizeof(MT7981ToprguState),
++    .instance_size = sizeof(MtkToprguState),
+     .instance_init = toprgu_init,
+     .class_init = toprgu_class_init,
+ };
+diff --git a/hw/arm/mt7981/mt7981_wmac.c b/hw/arm/filogic/mtk_wmac.c
+similarity index 94%
+rename from hw/arm/mt7981/mt7981_wmac.c
+rename to hw/arm/filogic/mtk_wmac.c
+index 735b434..75860dd 100644
+--- a/hw/arm/mt7981/mt7981_wmac.c
++++ b/hw/arm/filogic/mtk_wmac.c
+@@ -18,7 +18,7 @@
+ #include "system/dma.h"
+ #include "system/address-spaces.h"
+ #include "hw/qdev-properties.h"
+-#include "mt7981.h"
++#include "filogic.h"
+ 
+ #define WIN_SIZE        0x1000000
+ 
+@@ -104,7 +104,7 @@
+ #define FW_STATE_FW_DOWNLOAD 1
+ #define FW_STATE_RDY         7
+ 
+-struct MT7981WmacState {
++struct MtkWmacState {
+     SysBusDevice parent_obj;
+     MemoryRegion iomem;
+     qemu_irq irq[4];
+@@ -126,13 +126,13 @@ static void rset(GHashTable *h, uint32_t a, uint32_t v)
+     g_hash_table_insert(h, GUINT_TO_POINTER(a), GUINT_TO_POINTER(v));
+ }
+ 
+-static void wmac_update_irq(MT7981WmacState *s)
++static void wmac_update_irq(MtkWmacState *s)
+ {
+     qemu_set_irq(s->irq[0], !!(rget(s->regs, W_INT_SRC) &
+                                rget(s->regs, W_INT_MASK)));
+ }
+ 
+-static void raise_int(MT7981WmacState *s, uint32_t bits)
++static void raise_int(MtkWmacState *s, uint32_t bits)
+ {
+     rset(s->regs, W_INT_SRC, rget(s->regs, W_INT_SRC) | bits);
+     wmac_update_irq(s);
+@@ -143,7 +143,7 @@ static const uint32_t rx_int_bit[NRXQ] = {
+ };
+ 
+ /* Put one buffer into RX ring q.  Returns false if the ring is full. */
+-static bool rx_push(MT7981WmacState *s, int q, const void *buf, uint32_t len)
++static bool rx_push(MtkWmacState *s, int q, const void *buf, uint32_t len)
+ {
+     uint32_t base = rget(s->regs, W_RX_RING(q));
+     uint32_t ndesc = rget(s->regs, W_RX_RING(q) + 4) & 0xfff;
+@@ -154,7 +154,7 @@ static bool rx_push(MT7981WmacState *s, int q, const void *buf, uint32_t len)
+ 
+     if (!base || !ndesc || dma == cpu ||
+         !(rget(s->regs, W_GLO_CFG) & BIT(2))) {
+-        qemu_log_mask(LOG_GUEST_ERROR, "mt7981-wmac: RX ring %d full\n", q);
++        qemu_log_mask(LOG_GUEST_ERROR, "mtk-wmac: RX ring %d full\n", q);
+         return false;
+     }
+     da = base + (uint64_t)(dma % ndesc) * 16;
+@@ -175,7 +175,7 @@ static bool rx_push(MT7981WmacState *s, int q, const void *buf, uint32_t len)
+ }
+ 
+ /* Send an MCU event (response) */
+-static void mcu_event(MT7981WmacState *s, int rxq, uint8_t eid, uint8_t seq,
++static void mcu_event(MtkWmacState *s, int rxq, uint8_t eid, uint8_t seq,
+                       uint8_t ext_eid, const void *payload, uint32_t plen)
+ {
+     uint32_t len = 36 + plen;
+@@ -193,7 +193,7 @@ static void mcu_event(MT7981WmacState *s, int rxq, uint8_t eid, uint8_t seq,
+     rx_push(s, rxq, ev, len);
+ }
+ 
+-static void mcu_command(MT7981WmacState *s, int txq, const uint8_t *m,
++static void mcu_command(MtkWmacState *s, int txq, const uint8_t *m,
+                         uint32_t len)
+ {
+     uint8_t cid, seq, ext_cid;
+@@ -210,7 +210,7 @@ static void mcu_command(MT7981WmacState *s, int txq, const uint8_t *m,
+     ext_cid = m[41];
+     memset(payload, 0, sizeof(payload));
+ 
+-    qemu_log_mask(LOG_UNIMP, "mt7981-wmac: MCU cmd cid 0x%02x ext 0x%02x "
++    qemu_log_mask(LOG_UNIMP, "mtk-wmac: MCU cmd cid 0x%02x ext 0x%02x "
+                   "seq %d len %u q%d\n", cid, ext_cid, seq, len, txq);
+     if (wmac_trace) {
+         fprintf(stderr, "wmac MCU cid 0x%02x ext 0x%02x seq %d len %u q%d\n",
+@@ -254,7 +254,7 @@ static void mcu_command(MT7981WmacState *s, int txq, const uint8_t *m,
+ }
+ 
+ /* data frame on band0/1: complete it immediately (TX free event) */
+-static void data_tx(MT7981WmacState *s, const uint8_t *txwi, uint32_t len)
++static void data_tx(MtkWmacState *s, const uint8_t *txwi, uint32_t len)
+ {
+     uint8_t ev[16];
+     uint16_t token;
+@@ -282,7 +282,7 @@ static uint32_t tx_int_bit(int q)
+     return 0;
+ }
+ 
+-static void tx_kick(MT7981WmacState *s, int q)
++static void tx_kick(MtkWmacState *s, int q)
+ {
+     uint32_t base = rget(s->regs, W_TX_RING(q));
+     uint32_t ndesc = rget(s->regs, W_TX_RING(q) + 4) & 0xfff;
+@@ -336,14 +336,14 @@ static void tx_kick(MT7981WmacState *s, int q)
+     raise_int(s, tx_int_bit(q));
+ }
+ 
+-static uint32_t abs_read(MT7981WmacState *s, uint32_t a)
++static uint32_t abs_read(MtkWmacState *s, uint32_t a)
+ {
+     return rget(s->remap, a);
+ }
+ 
+ static uint64_t wmac_read(void *opaque, hwaddr addr, unsigned size)
+ {
+-    MT7981WmacState *s = opaque;
++    MtkWmacState *s = opaque;
+     uint32_t a = addr & ~3;
+     uint32_t v;
+ 
+@@ -411,7 +411,7 @@ static uint64_t wmac_read(void *opaque, hwaddr addr, unsigned size)
+ 
+ static void wmac_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
+ {
+-    MT7981WmacState *s = opaque;
++    MtkWmacState *s = opaque;
+     uint32_t a = addr & ~3;
+     uint32_t v = val;
+ 
+@@ -500,7 +500,7 @@ static const MemoryRegionOps wmac_ops = {
+ 
+ static void wmac_reset(DeviceState *dev)
+ {
+-    MT7981WmacState *s = MT7981_WMAC(dev);
++    MtkWmacState *s = MTK_WMAC(dev);
+ 
+     g_hash_table_remove_all(s->regs);
+     g_hash_table_remove_all(s->remap);
+@@ -512,12 +512,12 @@ static void wmac_reset(DeviceState *dev)
+ 
+ static void wmac_init(Object *obj)
+ {
+-    MT7981WmacState *s = MT7981_WMAC(obj);
++    MtkWmacState *s = MTK_WMAC(obj);
+ 
+     wmac_trace = getenv("MT7981_WMAC_TRACE") != NULL;
+     s->regs = g_hash_table_new(g_direct_hash, g_direct_equal);
+     s->remap = g_hash_table_new(g_direct_hash, g_direct_equal);
+-    memory_region_init_io(&s->iomem, obj, &wmac_ops, s, "mt7981-wmac",
++    memory_region_init_io(&s->iomem, obj, &wmac_ops, s, "mtk-wmac",
+                           WIN_SIZE);
+     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
+     for (int i = 0; i < 4; i++) {
+@@ -526,7 +526,7 @@ static void wmac_init(Object *obj)
+ }
+ 
+ static const Property wmac_props[] = {
+-    DEFINE_PROP_UINT32("sku", MT7981WmacState, sku, 0),
++    DEFINE_PROP_UINT32("sku", MtkWmacState, sku, 0),
+ };
+ 
+ static void wmac_class_init(ObjectClass *klass, const void *data)
+@@ -539,9 +539,9 @@ static void wmac_class_init(ObjectClass *klass, const void *data)
+ }
+ 
+ static const TypeInfo wmac_info = {
+-    .name = TYPE_MT7981_WMAC,
++    .name = TYPE_MTK_WMAC,
+     .parent = TYPE_SYS_BUS_DEVICE,
+-    .instance_size = sizeof(MT7981WmacState),
++    .instance_size = sizeof(MtkWmacState),
+     .instance_init = wmac_init,
+     .class_init = wmac_class_init,
+ };
+diff --git a/hw/arm/mt7981/spinand.c b/hw/arm/filogic/spinand.c
+similarity index 98%
+rename from hw/arm/mt7981/spinand.c
+rename to hw/arm/filogic/spinand.c
+index e66fc90..dbb53e2 100644
+--- a/hw/arm/mt7981/spinand.c
++++ b/hw/arm/filogic/spinand.c
+@@ -18,7 +18,7 @@
+ #include "hw/qdev-properties-system.h"
+ #include "system/block-backend.h"
+ #include "migration/vmstate.h"
+-#include "mt7981.h"
++#include "filogic.h"
+ 
+ #define CMD_RESET           0xff
+ #define CMD_GET_FEATURE     0x0f
+@@ -443,7 +443,7 @@ static int read_cache_hdr_len(uint8_t cmd)
+ 
+ static uint32_t spinand_transfer(SSIPeripheral *dev, uint32_t val)
+ {
+-    SpiNandState *s = MT7981_SPINAND(dev);
++    SpiNandState *s = MTK_SPINAND(dev);
+     uint32_t pos = s->pos++;
+     uint8_t *f;
+     uint32_t ret = 0xff;
+@@ -568,7 +568,7 @@ static uint32_t spinand_transfer(SSIPeripheral *dev, uint32_t val)
+ 
+ static int spinand_set_cs(SSIPeripheral *dev, bool select)
+ {
+-    SpiNandState *s = MT7981_SPINAND(dev);
++    SpiNandState *s = MTK_SPINAND(dev);
+ 
+     if (select) {
+         s->pos = 0;
+@@ -578,7 +578,7 @@ static int spinand_set_cs(SSIPeripheral *dev, bool select)
+ 
+ static void spinand_realize(SSIPeripheral *dev, Error **errp)
+ {
+-    SpiNandState *s = MT7981_SPINAND(dev);
++    SpiNandState *s = MTK_SPINAND(dev);
+     uint64_t size = storage_size(s);
+ 
+     s->storage = g_malloc(size);
+@@ -647,7 +647,7 @@ static void spinand_realize(SSIPeripheral *dev, Error **errp)
+ 
+ static void spinand_reset(DeviceState *dev)
+ {
+-    SpiNandState *s = MT7981_SPINAND(dev);
++    SpiNandState *s = MTK_SPINAND(dev);
+ 
+     s->feat_prot = 0x7c;    /* all blocks locked after power on */
+     s->feat_cfg = CFG_ECC_EN | CFG_BUF;
+@@ -686,7 +686,7 @@ static void spinand_class_init(ObjectClass *klass, const void *data)
+ }
+ 
+ static const TypeInfo spinand_info = {
+-    .name = TYPE_MT7981_SPINAND,
++    .name = TYPE_MTK_SPINAND,
+     .parent = TYPE_SSI_PERIPHERAL,
+     .instance_size = sizeof(SpiNandState),
+     .class_init = spinand_class_init,
+diff --git a/hw/arm/mt7981/spinor.c b/hw/arm/filogic/spinor.c
+similarity index 98%
+rename from hw/arm/mt7981/spinor.c
+rename to hw/arm/filogic/spinor.c
+index 3fb35f2..0e0f940 100644
+--- a/hw/arm/mt7981/spinor.c
++++ b/hw/arm/filogic/spinor.c
+@@ -32,7 +32,7 @@
+ #include "hw/qdev-properties.h"
+ #include "hw/qdev-properties-system.h"
+ #include "system/block-backend.h"
+-#include "mt7981.h"
++#include "filogic.h"
+ 
+ #define SR1_WIP     0x01
+ #define SR1_WEL     0x02
+@@ -281,7 +281,7 @@ static void do_erase(SpiNorState *s, uint32_t addr, uint32_t len)
+ 
+ static uint32_t spinor_transfer(SSIPeripheral *dev, uint32_t val)
+ {
+-    SpiNorState *s = MT7981_SPINOR(dev);
++    SpiNorState *s = MTK_SPINOR(dev);
+     uint32_t pos = s->pos++;
+     int alen, dummy;
+ 
+@@ -409,7 +409,7 @@ static uint32_t spinor_transfer(SSIPeripheral *dev, uint32_t val)
+ 
+ static int spinor_set_cs(SSIPeripheral *dev, bool select)
+ {
+-    SpiNorState *s = MT7981_SPINOR(dev);
++    SpiNorState *s = MTK_SPINOR(dev);
+ 
+     if (select) {
+         s->pos = 0;
+@@ -433,7 +433,7 @@ static int spinor_set_cs(SSIPeripheral *dev, bool select)
+ 
+ static void spinor_realize(SSIPeripheral *dev, Error **errp)
+ {
+-    SpiNorState *s = MT7981_SPINOR(dev);
++    SpiNorState *s = MTK_SPINOR(dev);
+     uint64_t size = nor_size(s);
+ 
+     s->storage = g_malloc(size);
+@@ -468,7 +468,7 @@ static void spinor_realize(SSIPeripheral *dev, Error **errp)
+ 
+ static void spinor_reset(DeviceState *dev)
+ {
+-    SpiNorState *s = MT7981_SPINOR(dev);
++    SpiNorState *s = MTK_SPINOR(dev);
+ 
+     s->sr[0] = 0;
+     s->sr[1] = 0x02;    /* QE set, as on boards wired for quad I/O */
+@@ -504,7 +504,7 @@ static void spinor_class_init(ObjectClass *klass, const void *data)
+ }
+ 
+ static const TypeInfo spinor_info = {
+-    .name = TYPE_MT7981_SPINOR,
++    .name = TYPE_MTK_SPINOR,
+     .parent = TYPE_SSI_PERIPHERAL,
+     .instance_size = sizeof(SpiNorState),
+     .class_init = spinor_class_init,
+diff --git a/hw/arm/mt7981/ws2812b.c b/hw/arm/filogic/ws2812b.c
+similarity index 99%
+rename from hw/arm/mt7981/ws2812b.c
+rename to hw/arm/filogic/ws2812b.c
+index 312f1e7..408bb5a 100644
+--- a/hw/arm/mt7981/ws2812b.c
++++ b/hw/arm/filogic/ws2812b.c
+@@ -12,7 +12,7 @@
+ #include "qemu/osdep.h"
+ #include "qemu/module.h"
+ #include "hw/ssi/ssi.h"
+-#include "mt7981.h"
++#include "filogic.h"
+ 
+ #define WS_MAX_LEDS     16
+ 
+diff --git a/hw/arm/meson.build b/hw/arm/meson.build
+index b8417ba..dedbb7a 100644
+--- a/hw/arm/meson.build
++++ b/hw/arm/meson.build
+@@ -83,6 +83,6 @@ arm_common_ss.add(when: 'CONFIG_VEXPRESS', if_true: files('vexpress.c'))
+ 
+ arm_common_ss.add(files('boot.c'))
+ 
+-subdir('mt7981')
++subdir('filogic')
+ hw_arch += {'arm': arm_ss}
+ hw_common_arch += {'arm': arm_common_ss}
+diff --git a/hw/arm/mt7981/meson.build b/hw/arm/mt7981/meson.build
+deleted file mode 100644
+index 7722300..0000000
+--- a/hw/arm/mt7981/meson.build
++++ /dev/null
+@@ -1,16 +0,0 @@
+-arm_common_ss.add(when: 'CONFIG_MT7981', if_true: files(
+-  'mt7981_router.c',
+-  'mt7981_sysctl.c',
+-  'mt7981_spim.c',
+-  'mt7981_toprgu.c',
+-  'spinand.c',
+-  'spinor.c',
+-  'mt7981_eth.c',
+-  'mt7981_pinctrl.c',
+-  'mt7981_wmac.c',
+-  'mt7981_msdc.c',
+-  'mt7987_pcie.c',
+-  'mt7992_wifi.c',
+-  'mt7981_leds.c',
+-  'ws2812b.c',
+-))
+-- 
+2.47.3
+

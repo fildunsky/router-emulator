@@ -5,7 +5,7 @@
 //   sources: gpio:N[:low]  phy:ADDR:N  swphy:PORT:N  ws2812:BUS:N  pwm:N
 //
 // QEMU evaluates the sources (machine property "led-state", see
-// mt7981_leds.c); the panel polls it over a QMP connection of its own.
+// filogic_leds.c); the panel polls it over a QMP connection of its own.
 
 using System;
 using System.Collections.Generic;
