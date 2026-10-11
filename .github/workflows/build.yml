@@ -79,13 +79,14 @@ jobs:
 
   build:
     needs: version
-    runs-on: ubuntu-latest
+    # linux-aarch64 builds natively on an Arm runner
+    runs-on: ${{ matrix.target == 'linux-aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     timeout-minutes: 120
     strategy:
       # let one package finish even when the other one fails
       fail-fast: false
       matrix:
-        target: [linux, win64]
+        target: [linux, linux-aarch64, win64]
     steps:
       - uses: actions/checkout@v4
 
@@ -96,6 +97,7 @@ jobs:
             pkg-config python3 python3-venv libglib2.0-dev libpixman-1-dev \
             libslirp-dev libfdt-dev libusb-1.0-0-dev zlib1g-dev mtd-utils \
             wget socat curl patchelf zip
+          if [ "${{ matrix.target }}" = linux-aarch64 ]; then sudo apt-get install -y bash-static; fi
           if [ "${{ matrix.target }}" = win64 ]; then
             sudo apt-get install -y mono-mcs mono-devel
             if [ "${{ needs.version.outputs.release }}" = true ]; then sudo apt-get install -y wine wine64; fi
@@ -103,7 +105,7 @@ jobs:
 
       # --- Linux ---------------------------------------------------------
       - name: Build QEMU (no UI or audio, small dependency set)
-        if: matrix.target == 'linux'
+        if: matrix.target != 'win64'
         env:
           CONFIGURE_ARGS: >-
             --disable-gtk --disable-sdl --disable-opengl --disable-vnc
@@ -111,7 +113,7 @@ jobs:
         run: ./build.sh
 
       - name: Machine is there
-        if: matrix.target == 'linux'
+        if: matrix.target != 'win64'
         run: |
           src/qemu/build/qemu-system-aarch64 -M help | grep mt7981-router
           src/qemu/build/qemu-system-aarch64 -M help | grep mt7986-router
@@ -119,11 +121,11 @@ jobs:
           src/qemu/build/qemu-system-aarch64 -M mt7981-router,help
 
       - name: NAND image (official OpenWrt for cudy_wr3000p-v1)
-        if: matrix.target == 'linux'
+        if: matrix.target != 'win64'
         run: tools/prepare-nand.sh cudy_wr3000p-v1 "$OPENWRT"
 
       - name: Boot to the console (BL2, U-Boot, kernel, procd)
-        if: matrix.target == 'linux'
+        if: matrix.target != 'win64'
         run: |
           mkdir -p work
           python3 tests/quick.py --limit 600 -P cudy-wr3000p-v1 \
@@ -132,7 +134,7 @@ jobs:
             'Linux version@60' 'Please press Enter@480'
 
       - name: Headless run, LuCI through the LAN forward
-        if: matrix.target == 'linux'
+        if: matrix.target != 'win64'
         run: |
           ./emulator.sh -P cudy-wr3000p-v1 -w offline -l user -u none \
             -S work/console.sock -L work/logs > work/run.log 2>&1 &
@@ -149,8 +151,11 @@ jobs:
           wait
 
       - name: Linux package
-        if: matrix.target == 'linux'
-        run: tools/package-linux.sh
+        if: matrix.target != 'win64'
+        run: |
+          # aarch64: glibc and a static bash in the package (TV boxes, CoreELEC)
+          if [ "${{ matrix.target }}" = linux-aarch64 ]; then export BASH_STATIC=/bin/bash-static; fi
+          tools/package-linux.sh
 
       # --- Windows (cross-built on Linux) --------------------------------
       - name: Windows package
@@ -359,7 +364,9 @@ jobs:
           generate_release_notes: true
           body: |
             Packages: `...-win64.zip` (Windows 10/11 x64, run `emulator.exe`) and
-            `...-linux-x86_64.tar.gz` (run `./emulator.sh`). **No flash images are
+            `...-linux-x86_64.tar.gz` (run `./emulator.sh`), `...-linux-aarch64.tar.gz`
+            (64-bit Arm Linux: Raspberry Pi 4/5, TV boxes with CoreELEC; also with a
+            32-bit userland, run `./bash emulator.sh` where there is no bash). **No flash images are
             included**: build them with `tools/prepare-nand.sh` (see README.md /
             README.ru.md), or use dumps of a real router.
           files: |

@@ -43,6 +43,16 @@ The release contains no NAND folders: create them with
 `tools/prepare-nand.sh` (Linux or WSL) and copy them next to `emulator.exe`,
 or use dumps of a real router.
 
+64-bit Arm Linux (Raspberry Pi 4/5, Arm servers, TV boxes with CoreELEC /
+LibreELEC): `Router-Emulator-<version>-linux-aarch64.tar.gz`. It brings its
+own C library and a static `bash`, so it needs only an aarch64 kernel: it
+also runs under a 32-bit userland (`uname -m` says `aarch64` or `armv8l`;
+a 32-bit ARMv7 kernel cannot run it: QEMU 10 emulates 64-bit guests on
+64-bit hosts only). Build the flash folders on a PC and copy them over, then
+`./bash emulator.sh -P ... -w user -l user` where `bash` is busybox. An
+Amlogic S905 box (4x Cortex-A53, 1 GB) boots the WR3000S to LuCI in about
+8 minutes.
+
 ## Board hardware (machine options)
 
 `-M mt7981-router,nand-dir=DIR,<options>` (or `mt7986-router`) and
@@ -444,7 +454,8 @@ Lite (NAND on SPI2, FIP in UBI, internal 2.5G PHY). Flash folders are built for 
 packaged.
 To release, change [`VERSION`](VERSION) and push to `main`: when the tag
 `v<VERSION>` does not exist yet, CI builds with PGO, tests, creates the tag
-and the GitHub Release with `...-linux-x86_64.tar.gz` and `...-win64.zip`
+and the GitHub Release with `...-linux-x86_64.tar.gz`, `...-linux-aarch64.tar.gz`
+and `...-win64.zip`
 (no flash folders). Locally `build-windows.sh` also makes `...-dumps.zip`:
 only the flash folders it built (`Router-Emulator/nand-*`, `nor-*`,
 `emmc-*`), to unpack over a package.

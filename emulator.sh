@@ -105,6 +105,11 @@ if [ ! -x "$QEMU" ]; then
     echo "QEMU not built: run ./build.sh" >&2
     exit 1
 fi
+# the aarch64 package brings its own C library (any aarch64 kernel, even
+# with a 32-bit userland): QEMU starts through the packaged loader
+QRUN=("$QEMU")
+LDSO=$(dirname "$QEMU")/lib/ld-linux-aarch64.so.1
+[ -x "$LDSO" ] && QRUN=("$LDSO" --library-path "$(dirname "$QEMU")/lib" "$QEMU")
 
 # --- preset: [preset] key=value lines ---------------------------------
 ini_get() { awk -F= -v k="$2" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$1"; }
@@ -173,7 +178,9 @@ if [ "$WAN" = bridge ] || [ -n "$lan_br" ]; then
     # (re)create taps; needs root once per boot of the host
     if ! ip link show wr-wan >/dev/null 2>&1 ||
        { [ -n "$lan_br" ] && [ "$(basename "$(readlink -f /sys/class/net/wr-lan1/master 2>/dev/null)")" != "$lan_br" ]; }; then
-        sudo "$ROOT/tools/host-bridge.sh" taps br0 "$USER" "${lan_br:-br-wrlan}"
+        # root (e.g. CoreELEC) needs no sudo; $BASH: also the packaged ./bash
+        $([ "$(id -u)" = 0 ] || echo sudo) "$BASH" "$ROOT/tools/host-bridge.sh" \
+            taps br0 "${USER:-root}" "${lan_br:-br-wrlan}"
     fi
 fi
 
@@ -257,7 +264,7 @@ for UH in ${UHS//;/ }; do
 done
 
 rm -f "$MON"
-"$QEMU" -M "$SOC-router,nand-dir=${NAND//,/,,}$MOPTS$GPIO" -m "${RAM}M" \
+"${QRUN[@]}" -M "$SOC-router,nand-dir=${NAND//,/,,}$MOPTS$GPIO" -m "${RAM}M" \
     $([ -n "$CONSOCK" ] && echo "-display none" || echo -nographic) \
     "${CON[@]}" \
     "${NET[@]}" "${USB[@]}" "${DEBUG[@]}" "${EXTRA[@]}"

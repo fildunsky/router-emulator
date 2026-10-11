@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the Linux package dist/Router-Emulator-<version>-linux-x86_64.tar.gz
+# Build the Linux package dist/Router-Emulator-<version>-linux-<arch>.tar.gz
 # from an existing QEMU build (./build.sh):
 #   - qemu/qemu-system-aarch64 (stripped) with the shared libraries it needs
 #     in qemu/lib/ (all but the C library itself), found through
@@ -8,6 +8,14 @@
 #   - emulator.sh, presets, tools (prepare-nand.sh, mknand.py, host-bridge.sh),
 #     tests/quick.py, docs
 # No flash folders: they are built with tools/prepare-nand.sh.
+#
+# aarch64 (ARCH=aarch64, the default on an aarch64 host) packages the C
+# library and its loader too: emulator.sh starts QEMU through
+# qemu/lib/ld-linux-aarch64.so.1, so it runs on any aarch64 kernel, also
+# under a 32-bit userland (TV boxes with CoreELEC, Raspberry Pi OS 32-bit).
+# BASH_STATIC=FILE adds a static bash as ./bash for systems without one.
+# Cross builds: LDD="<target ld.so> --list" (runs through binfmt/qemu-user),
+# STRIP=aarch64-linux-gnu-strip.
 #
 #   tools/package-linux.sh [QEMU_BINARY]     (default src/qemu/build/...)
 #
@@ -23,25 +31,43 @@ BIN=${1:-src/qemu/build/qemu-system-aarch64}
 command -v patchelf >/dev/null || { echo "patchelf is needed" >&2; exit 1; }
 EMU_VERSION=$(cat VERSION)
 APP=Router-Emulator
-ARCH=$(uname -m)
+ARCH=${ARCH:-$(uname -m)}
+LDD=${LDD:-ldd}
+STRIP=${STRIP:-strip}
+BUNDLE_LIBC=0
+[ "$ARCH" = aarch64 ] && BUNDLE_LIBC=1
 TGZ=$APP-$EMU_VERSION-linux-$ARCH.tar.gz
 PKG=$ROOT/work/linuxpkg/$APP
 rm -rf "$PKG" && mkdir -p "$PKG/qemu/lib" "$PKG/usb" "$PKG/tools" "$PKG/tests"
 
 install -m 755 "$BIN" "$PKG/qemu/qemu-system-aarch64"
-strip --strip-all "$PKG/qemu/qemu-system-aarch64"
-# shared libraries, except the parts of glibc (they must match the system)
-ldd "$BIN" | awk '/=> \// { print $1, $3 }' | while read -r name path; do
+$STRIP --strip-all "$PKG/qemu/qemu-system-aarch64"
+# shared libraries; the parts of glibc only with BUNDLE_LIBC (otherwise
+# they must match the system)
+$LDD "$BIN" | awk '/=> \// { print $1, $3 } /^\t\/[^ ]*ld-linux/ { print $1, $1 }' |
+while read -r name path; do
+    name=$(basename "$name")
+    glibc=0
     case $name in
     ld-linux*|libc.so*|libm.so*|libmvec.so*|libpthread.so*|libdl.so*|\
-    librt.so*|libresolv.so*|libutil.so*|libgcc_s.so*) continue ;;
+    librt.so*|libresolv.so*|libutil.so*|libgcc_s.so*) glibc=1 ;;
     esac
+    [ $glibc = 1 ] && [ $BUNDLE_LIBC = 0 ] && continue
     cp -L "$path" "$PKG/qemu/lib/$name"
     chmod 644 "$PKG/qemu/lib/$name"
-    strip --strip-unneeded "$PKG/qemu/lib/$name"
+    case $name in ld-linux*) chmod 755 "$PKG/qemu/lib/$name" ;; esac
+    [ $glibc = 1 ] && continue
+    $STRIP --strip-unneeded "$PKG/qemu/lib/$name"
     patchelf --set-rpath '$ORIGIN' "$PKG/qemu/lib/$name"
 done
+# glibc loads libgcc_s with dlopen (thread exit / cancellation)
+if [ $BUNDLE_LIBC = 1 ] && [ ! -f "$PKG/qemu/lib/libgcc_s.so.1" ]; then
+    libc=$($LDD "$BIN" | awk '$1 == "libc.so.6" { print $3 }')
+    cp -L "$(dirname "$libc")/libgcc_s.so.1" "$PKG/qemu/lib/"
+    chmod 644 "$PKG/qemu/lib/libgcc_s.so.1"
+fi
 patchelf --set-rpath '$ORIGIN/lib' "$PKG/qemu/qemu-system-aarch64"
+[ -n "$BASH_STATIC" ] && install -m 755 "$BASH_STATIC" "$PKG/bash"
 
 cp emulator.sh VERSION LICENSE README.md README.ru.md \
    README.build.linux.md README.build.linux.ru.md "$PKG/"
@@ -52,9 +78,11 @@ cp usb/README.txt "$PKG/usb/"
 
 # the packaged binary must start without the build tree and without the
 # libraries of this machine's QEMU build directory
-(cd / && env -i PATH=/usr/bin:/bin "$PKG/qemu/qemu-system-aarch64" -M help |
+QRUN=("$PKG/qemu/qemu-system-aarch64")
+[ $BUNDLE_LIBC = 1 ] && QRUN=("$PKG/qemu/lib/ld-linux-aarch64.so.1" --library-path "$PKG/qemu/lib" "${QRUN[@]}")
+(cd / && env -i PATH=/usr/bin:/bin "${QRUN[@]}" -M help |
     grep -q mt7981-router) || { echo "packaged QEMU does not start" >&2; exit 1; }
 
-mkdir -p dist && rm -f "dist/$APP"-*-linux-*.tar.gz
+mkdir -p dist && rm -f "dist/$APP"-*-linux-"$ARCH".tar.gz
 tar -C work/linuxpkg -czf "dist/$TGZ" --owner=0 --group=0 "$APP"
 ls -la "dist/$TGZ"
