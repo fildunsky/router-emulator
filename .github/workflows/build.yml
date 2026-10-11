@@ -201,8 +201,10 @@ jobs:
             [ -n "$(get openwrt-emmc-layout)" ] && set -- "$@" --emmc-layout "$(get openwrt-emmc-layout)"
             [ -n "$(get openwrt-uboot)" ] && set -- "$@" --uboot "$(get openwrt-uboot)"
             [ "$(get openwrt-ubi-fip)" = 1 ] && set -- "$@" --ubi-fip
+            [ -n "$(get openwrt-ubi-factory)" ] && set -- "$@" --ubi-factory "$(get openwrt-ubi-factory)"
             [ -n "$(get openwrt-parts)" ] && set -- "$@" --parts "$(get openwrt-parts)"
-            tools/prepare-nand.sh "$@" "$(get openwrt)" "$OPENWRT" "work/flash/$(get nand-dir)"
+            ver=$(get openwrt-version)
+            tools/prepare-nand.sh "$@" "$(get openwrt)" "${ver:-$OPENWRT}" "work/flash/$(get nand-dir)"
           done
           (cd work/flash && zip -qr1 "$GITHUB_WORKSPACE/ci-flash.zip" .)
       - uses: actions/upload-artifact@v4
