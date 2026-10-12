@@ -210,8 +210,11 @@ else
         for s in $1; do
             f=$b-$s
             if grep -q -- " \*$f\$" "$DL/sha256sums"; then
-                [ -f "$DL/$f" ] || wget -q -O "$DL/$f" "$URL/$f"
-                (cd "$DL" && grep -- " \*$f\$" sha256sums | sha256sum -c --quiet)
+                # a cached copy that no longer matches (snapshots change)
+                # is downloaded again
+                ok() { (cd "$DL" && grep -- " \*$f\$" sha256sums | sha256sum -c --quiet) >/dev/null 2>&1; }
+                [ -f "$DL/$f" ] && ok || wget -q -O "$DL/$f" "$URL/$f"
+                ok || { echo "$DL/$f: sha256 mismatch" >&2; exit 1; }
                 echo "$DL/$f"
                 return
             fi
