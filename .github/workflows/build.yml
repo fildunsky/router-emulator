@@ -48,11 +48,14 @@ env:
   #   asus-zenwifi-bt8 MT7988D (Filogic 860), built-in switch, NAND with
   #                    the FIP and Factory in UBI
   #   bananapi-bpi-r4  MT7988A (Filogic 880), built-in switch, eMMC
+  #   teltonika-rutc50 SPI-NOR boot + SPI-NAND (nor-nand), own U-Boot
+  #                    (tools/uboot-rutc50), 74HC595 LEDs on SPI1
+  #   openwrt-one      SPI-NAND boot + SPI-NOR recovery (nor-nand)
   TEST_PRESETS: >-
     cudy-wr3000p-v1 cudy-wr3000h-v1 cudy-wr3000s-v1 cudy-tr3000-v1 netis-nx31
     xiaomi-redmi-ax6000 netcore-n60 netcore-n60-pro glinet-gl-mt6000
     huasifei-wh3000-pro-emmc bananapi-bpi-r4-lite routerich-be7200
-    asus-zenwifi-bt8 bananapi-bpi-r4
+    asus-zenwifi-bt8 bananapi-bpi-r4 teltonika-rutc50 openwrt-one
 
 jobs:
   # release or not: VERSION without its tag on main, or the tag itself
@@ -208,6 +211,7 @@ jobs:
             [ "$(get openwrt-ubi-fip)" = 1 ] && set -- "$@" --ubi-fip
             [ -n "$(get openwrt-ubi-factory)" ] && set -- "$@" --ubi-factory "$(get openwrt-ubi-factory)"
             [ -n "$(get openwrt-parts)" ] && set -- "$@" --parts "$(get openwrt-parts)"
+            [ -n "$(get openwrt-nor-nand)" ] && set -- "$@" --nor-nand "$(get openwrt-nor-nand)"
             ver=$(get openwrt-version)
             tools/prepare-nand.sh "$@" "$(get openwrt)" "${ver:-$OPENWRT}" "work/flash/$(get nand-dir)"
           done

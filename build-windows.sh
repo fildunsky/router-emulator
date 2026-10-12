@@ -122,6 +122,7 @@ for f in presets/*.ini; do
     [ -n "$(get openwrt-ubi-factory)" ] && set -- "$@" --ubi-factory "$(get openwrt-ubi-factory)"
     [ -n "$(get openwrt-parts)" ] && set -- "$@" --parts "$(get openwrt-parts)"
     [ "$(get openwrt-nor)" = 1 ] && set -- "$@" --nor --nor-mb "$(get nor)"
+    [ -n "$(get openwrt-nor-nand)" ] && set -- "$@" --nor-nand "$(get openwrt-nor-nand)"
     # a board without images for this version must not break the package
     tools/prepare-nand.sh "$@" --flash-mb "$(get nand)" "$prof" "$ver" "$PKG/$dir" ||
         { echo "skip $f: no NAND image"; rm -rf "${PKG:?}/$dir"; }

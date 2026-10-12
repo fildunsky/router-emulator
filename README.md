@@ -60,14 +60,15 @@ Amlogic S905 box (4x Cortex-A53, 1 GB) boots the WR3000S to LuCI in about
 
 | Option | Values | Meaning |
 |---|---|---|
-| `gmac0` | `mt7531` · `an8855` · `mt7988-switch` · `rtl8221b` · `yt8821` · `gpy211` · `none` | what GMAC0 (mac@0, SGMII0) is wired to; `an8855` = Airoha AN8855 switch at MDIO 1 (CPU port 5, e.g. Routerich BE7200); `mt7988-switch` = the MT7988's built-in 4-port switch |
+| `gmac0` | `mt7531` · `an8855` · `mt7988-switch` · `rtl8221b` · `yt8821` · `gpy211` · `en8811h` · `none` | what GMAC0 (mac@0, SGMII0) is wired to; `an8855` = Airoha AN8855 switch at MDIO 1 (CPU port 5, e.g. Routerich BE7200); `mt7988-switch` = the MT7988's built-in 4-port switch; `en8811h` = Airoha EN8811H 2.5G PHY (OpenWrt One) |
 | `ports` | e.g. `wan:lan1:lan2:lan3:lan4` | netdev ids of MT7531 ports 0..4, and port 5 with `port5=` (`-` = unused) |
 | `port5`, `port5-phy-addr`, `port5-reset-gpio` | `rtl8221b` · `yt8821` · `gpy211` · `none`; MDIO address (5); GPIO | a 2.5G PHY on MT7531 port 5 (SGMII), e.g. Netcore N60 Pro; its netdev is the 6th entry of `ports` |
 | `gmac0-port`, `gmac1-port` | netdev id | port of a PHY attached directly to a GMAC |
-| `gmac1` | `rtl8221b` · `yt8821` · `gpy211` · `gphy` · `i2p5ge` · `none` | GMAC1 (mac@1); `gphy` = MT7981 built-in 1G PHY; `i2p5ge` = MT7987 / MT7988 internal 2.5G PHY; `gpy211` = MaxLinear GPY211C |
+| `gmac1` | `rtl8221b` · `yt8821` · `gpy211` · `en8811h` · `gphy` · `i2p5ge` · `none` | GMAC1 (mac@1); `gphy` = MT7981 built-in 1G PHY; `i2p5ge` = MT7987 / MT7988 internal 2.5G PHY; `gpy211` = MaxLinear GPY211C |
 | `gmac0-reset-gpio`, `gmac1-reset-gpio` | GPIO, `-1` (default) | hardware reset line of a 2.5G PHY; not wired by default (a missing line is harmless, a wrong one could hold the PHY in reset) |
 | `gmac0-phy-addr`, `gmac1-phy-addr` | MDIO address | address of that PHY (default 1 on gmac0, 6 on gmac1) |
 | `flash` | `nand` · `nor` · `emmc` | boot flash: SPI-NAND on SPI0 (default), SPI-NOR on SPI2 (MT7986: SPI0) or eMMC (see below) |
+| `nor-nand` | `on` | a SPI-NOR **and** a SPI-NAND (Teltonika RUTC50, OpenWrt One): the flash folder holds the NOR partition files, its subfolder `nand` the NAND ones; `flash=nor` / `flash=nand` picks the boot flash (see [SPI-NOR + SPI-NAND](#spi-nor--spi-nand-teltonika-rutc50-openwrt-one)) |
 | `nand` | `128` · `256` · `512` | W25N01GV / W25N02KV / W25N04KV SPI-NAND |
 | `nand-spi` | `0` (default) · `1` · `2` | SPI controller of the SPI-NAND (BPI-R4 Lite: 2) |
 | `switch-irq-gpio` | GPIO | EINT of the MT7531 interrupt (default 38 / 66 / 41 for MT7981 / MT7986 / MT7987) |
@@ -95,7 +96,9 @@ RTL8221B, GPY211; e.g. the WR3000P WAN lamp in current OpenWrt),
 `swphy:PORT:N` (LED pin N of the switch's PHY of port PORT: MT7988
 built-in switch, e.g. the BPi-R4 port LEDs), `ws2812:BUS:N` (WS2812B RGB
 chain on SPI bus BUS, colour `rgb`: Redmi
-AX6000) and `pwm:N` (PWM channel, pwm-leds: BPi-R4 Lite). QEMU samples them
+AX6000), `hc595:BUS:N` (output N of a 74HC595 shift register chain on SPI
+bus BUS, Linux gpio-74x164: the Teltonika RUTC50 mobile, SIM and signal
+LEDs) and `pwm:N` (PWM channel, pwm-leds: BPi-R4 Lite, OpenWrt One). QEMU samples them
 every 50 ms; `qom-get /machine led-state` gives per LED (`;`) and colour
 (`,`) `0`, `1`, `b` (blinking) or `#rrggbb` / `b#rrggbb`. The Windows
 launcher shows them as a row of lamps above the console; with `-g`
@@ -118,7 +121,9 @@ A preset is an INI file: `name`, `description`, `soc` (`mt7981` default,
 build-only keys (`openwrt=` OpenWrt profile, `openwrt-local=` own build,
 `openwrt-stock=` vendor bootloader dumps) and machine options. Both
 launchers use them; the Windows launcher has an editor for them (Ethernet,
-switch port labels, RAM type/size, NAND, USB, button GPIOs with an
+switch port labels, RAM type/size, boot flash and a second flash
+(SPI-NOR + SPI-NAND, `nor-nand`), USB, LEDs (GPIO, PHY, WS2812B, 74HC595,
+PWM), button GPIOs with an
 "active high" tick — unticked = active low, the default and what most
 routers use; saving from the editor drops `;` comments).
 
@@ -152,6 +157,8 @@ routers use; saving from the editor drops `;` comments).
 | Asus ZenWiFi BT8 (MT7988D, Filogic 860) | 2.5G WAN internal PHY + 2×1G LAN built-in switch (lan3 on GMAC2 and the MT7996 Wi-Fi not emulated) | DDR4 1 GB | 128 MB, FIP and Factory in UBI | 3.0 | OpenWrt (ubootmod) |
 | TP-Link TL-7DR7230 v1 (MT7988D, Filogic 860) | 2.5G WAN internal PHY + 4×1G LAN built-in switch | DDR4 1 GB | 128 MB, TP-Link layout | – | OpenWrt **snapshot** (no LuCI) |
 | Bananapi BPi-R4 (MT7988A, Filogic 880) | WAN + 3×1G LAN built-in switch (SFP+ cages not emulated) | DDR4 2 GB (real: 4 GB) | **eMMC** (`bpi-r4` layout) | 3.0 | OpenWrt |
+| Teltonika RUTC50 | 1G WAN built-in PHY + 4×1G LAN MT7531 (the mobile modem is not emulated); LEDs on a **74HC595** | DDR3 256 MB | **SPI-NOR 16 MB boot + SPI-NAND 512 MB** (rutos-a / rutos-b) | 3.0 | OpenWrt RFB BL2 + own U-Boot ([`tools/uboot-rutc50`](tools/uboot-rutc50)) |
+| OpenWrt One | 2.5G WAN **Airoha EN8811H** + 1G LAN built-in PHY | DDR4 1 GB | **SPI-NAND 256 MB boot + SPI-NOR 16 MB** recovery | 2.0 | OpenWrt |
 
 Netis boards have no bdinfo partition (FIP at 0x380000, ubi at 0x580000;
 MACs in Factory): presets set `openwrt-no-bdinfo=1`. The MT7986 boards use
@@ -268,6 +275,46 @@ fip, recovery, production; the sysupgrade FIT goes into `production`).
 The TP-Link TL-7DR7230 v1 exists in OpenWrt snapshot only: its preset
 has `openwrt-version=snapshot` (snapshot images have no LuCI; SSH works).
 
+## SPI-NOR + SPI-NAND (Teltonika RUTC50, OpenWrt One)
+
+With `nor-nand=on` a board has both flashes: the SPI-NOR on SPI2 and the
+SPI-NAND on SPI0 (`nand-spi`). The flash folder holds the NOR partition
+files and its subfolder `nand` the NAND ones (same `*mtdN*` naming, each
+flash on its own); `flash=nor` or `flash=nand` says which one the BootROM
+boots from — the boot switch of the OpenWrt One.
+
+```
+nor-rutc50/mt7981.mtd0.BL2.bin … mt7981.mtd8.recovery.bin    SPI-NOR 16 MB
+nor-rutc50/nand/mt7981.mtd0.rutos-a.bin, mt7981.mtd1.rutos-b.bin   SPI-NAND 512 MB
+```
+
+- **Teltonika RUTC50**: boots from the NOR (BL2, u-boot-env, factory,
+  config with the MACs, FIP, bootconfig-a/b, event-log, recovery); the
+  system is UBI (kernel, rootfs, rootfs_data) in the NAND partition
+  `rutos-a`. OpenWrt has no bootloader for it and OpenWrt's MT7981 SPI-NOR
+  U-Boot builds cannot read UBI (RFB) or boot only the NOR (OpenWrt One),
+  so the preset uses the OpenWrt MT7981 RFB SPI-NOR BL2 and a U-Boot built
+  by [`tools/uboot-rutc50/build.sh`](tools/uboot-rutc50/build.sh)
+  (OpenWrt's U-Boot sources and patches, the RFB SPI-NOR config with UBI,
+  the RUTC50 flash layout; the FIP in that folder is the result). Its
+  environment boots `rutos-a` with `ubi.mtd=rutos-a`, as the Teltonika
+  bootloader does, so OpenWrt's sysupgrade and bootcount scripts work. The
+  mobile, SIM and signal LEDs are on a 74HC595 on SPI1 (`hc595:1:N`).
+- **OpenWrt One**: the official `snand-factory.bin` (BL2 + UBI with FIP,
+  ubootenv, recovery, production) and `nor-factory.bin` (recovery BL2,
+  Factory with the Wi-Fi EEPROM, FIP and the recovery system). The preset
+  boots the NAND; `-o flash=nor` is the boot switch at NOR (recovery
+  U-Boot and system). The 2.5G WAN PHY is an Airoha EN8811H
+  (`gmac0=en8811h`): Linux loads its MCU firmware over MDIO, then the link
+  comes up at 2.5 Gbit/s.
+
+```bash
+tools/prepare-nand.sh --nor-nand rutc50 teltonika_rutc50 25.12.5
+./emulator.sh -P teltonika-rutc50
+tools/prepare-nand.sh --nor-nand openwrt-one openwrt_one 25.12.5
+./emulator.sh -P openwrt-one            # -o flash=nor: recovery from the NOR
+```
+
 ## What is emulated
 
 All device models live in `hw/arm/filogic/` of the QEMU tree
@@ -285,12 +332,12 @@ All device models live in `hw/arm/filogic/` of the QEMU tree
 | SPI (IPM) | `mtk_spim.c` | FIFO + DMA, half-duplex spi-mem mode used by TF-A/U-Boot/Linux |
 | SPI-NAND | `spinand.c` | W25N01GV (2048+64) / W25N02KV (2048+128) / W25N04KV (512 MB, 2048+128, two planes), on-die ECC, ONFI parameter page, unique ID page; backing store = folder of partition dumps (see below) or one raw image with OOB |
 | eMMC | `mtk_msdc.c` + QEMU eMMC | MSDC host: commands, auto CMD23/CMD12, PIO FIFO (TF-A, U-Boot), GPD/BD DMA (Linux); card with boot0/boot1 and user area; BootROM boots `EMMC_BOOT` images from boot0 |
-| SPI-NOR | `spinor.c` | 3-byte addressing (up to 16 MB), selectable JEDEC ID, reads 1-1-1/1-1-2/1-1-4/1-2-2/1-4-4, page program, 4K/32K/64K/chip erase, status registers with QE; BootROM boots `SF_BOOT` images from it; same folder backing store |
+| SPI-NOR | `spinor.c` | 3-byte addressing (up to 16 MB), selectable JEDEC ID, reads 1-1-1/1-1-2/1-1-4/1-2-2/1-4-4, page program, 4K/32K/64K/chip erase, status registers with QE; BootROM boots `SF_BOOT` images from it; same folder backing store; with `nor-nand=on` next to a SPI-NAND |
 | Ethernet | `mtk_eth.c` | frame engine: QDMA TX (Linux), PDMA RX, PDMA v2 (U-Boot); TSO + checksum offload; LynxI SGMII PCS ×2; any combination of switch / PHYs on the two GMACs |
 | Switch | `mtk_eth.c` | MT7531: paged MDIO access, internal PHY indirect access, MTK special tag (DSA), learning FDB, port matrix, link IRQ → EINT 38. Airoha AN8855: 32-bit register bus over MDIO page 4, internal PHYs at MDIO 1..5, its registers translated into the MT7531 model (CPU port 5). MT7988 built-in switch: the MT7531 model memory mapped at 0x15020000, SoC GbE PHYs (MT7988 IDs, eFuse calibration) |
-| PHYs | `mtk_eth.c` | MT7531 GPHY ×5; RTL8221B-VB-CG (C45, temperature sensor); Motorcomm YT8821 (extended registers, UTP/SerDes spaces, 2.5G status); MaxLinear GPY211C (C45, firmware version, mailbox, temperature sensor); MT7981 built-in GbE PHY (calibration handshake); a PHY on MT7531 port 5; optional hardware reset GPIOs |
+| PHYs | `mtk_eth.c` | MT7531 GPHY ×5; RTL8221B-VB-CG (C45, temperature sensor); Motorcomm YT8821 (extended registers, UTP/SerDes spaces, 2.5G status); MaxLinear GPY211C (C45, firmware version, mailbox, temperature sensor); Airoha EN8811H (buckpbus window on MDIO page 4, MCU firmware download, 2.5G status, LED registers); MT7981 built-in GbE PHY (calibration handshake); a PHY on MT7531 port 5; optional hardware reset GPIOs |
 | GPIO / EINT | `mtk_pinctrl.c` | buttons (reset/WPS, `reset-hold-ms` for timed presses), LED log, pad levels to board devices |
-| LEDs | `filogic_leds.c`, `ws2812b.c` | front panel LEDs from the preset: GPIO, PHY LED registers (RTL8221B, GPY211, MediaTek GbE / 2.5G PHYs, also of switch ports), WS2812B on SPI, PWM channels; blinking detection; `led-state` |
+| LEDs | `filogic_leds.c`, `ws2812b.c`, `hc595.c` | front panel LEDs from the preset: GPIO, PHY LED registers (RTL8221B, GPY211, EN8811H, MediaTek GbE / 2.5G PHYs, also of switch ports), WS2812B on SPI, 74HC595 shift registers on SPI (latched on CS), PWM channels; blinking detection; `led-state` |
 | USB | QEMU xHCI + MTK IPPC | USB 2.0 / 3.0 connector |
 | Wi-Fi | `mtk_wmac.c` | WFDMA rings + emulated WM/WA firmware command interface: firmware loads, both bands come up, hostapd runs, nothing is on the air (scans are empty) |
 | PCIe (MT7987, MT7988) | `mtk_pcie.c` | MediaTek Gen3 host: link, CFGNUM configuration TLPs, INTx, MSI capture, with QEMU's PCIe root port |
@@ -314,13 +361,14 @@ Everything the router writes (settings, sysupgrade, U-Boot env) is written
 back into these files. Dumps from a real router (`cat /dev/mtdN >
 name.mtdN.label.bin`) can be used directly. With `flash=nor` the folder is
 the SPI-NOR contents (e.g. BL2, u-boot-env, Factory, bdinfo, FIP,
-firmware). Files smaller than the flash (a 128 MB dump started with
+firmware); with `nor-nand=on` the NAND files are in its
+subfolder `nand`. Files smaller than the flash (a 128 MB dump started with
 `nand=256`, say) are completed on the first start: the last file grows
 with erased bytes (`0xff`) to the flash size, so what the router writes
 there is kept.
 
-- [`tools/prepare-nand.sh`](tools/prepare-nand.sh) `[--stock DIR [--nor] | --local DIR] [--flash-mb N] [--no-bdinfo] PROFILE [VERSION] [OUTDIR]` — builds a NAND folder for an OpenWrt device profile: downloads the official OpenWrt U-Boot images (`PROFILE-ubootmod-*` or `PROFILE-*`, sha256 verified), or uses own builds (`--local`), or keeps a vendor BL2/FIP (`--stock`) with the OpenWrt `sysupgrade.bin` in the vendor layout; `--no-bdinfo` for boards without a bdinfo partition, `--nor` for SPI-NOR boards (vendor BL2/FIP + the OpenWrt `sysupgrade.bin` in the `firmware` partition), `--soc mt7986` for MT7986 boards (partition files `mt7986.mtdN.*`, minimal Wi-Fi EEPROM in an empty Factory), `--ubi-fip` for "spim-nand-ubi" BL2s (BL2 at 0, UBI from 0x200000 with the FIP as volume `fip`), `--ubi-factory SIZE` (Factory as UBI volume `factory`, Asus BT8), `--emmc [--emmc-layout L]` (eMMC image, see [MT7988](#mt7988-filogic-880--860)). Factory/bdinfo come from `factory/`.
-- [`tools/mknand.py`](tools/mknand.py) — create / edit images: `create` (BL2, FIP, Factory, bdinfo, UBI from `.itb` or a `sysupgrade.bin`), `write --part fip`, `read`, `split`, `join`, `--flash-mb 256`, `--no-bdinfo`, `nor` (SPI-NOR folder).
+- [`tools/prepare-nand.sh`](tools/prepare-nand.sh) `[--stock DIR [--nor] | --local DIR] [--flash-mb N] [--no-bdinfo] PROFILE [VERSION] [OUTDIR]` — builds a NAND folder for an OpenWrt device profile: downloads the official OpenWrt U-Boot images (`PROFILE-ubootmod-*` or `PROFILE-*`, sha256 verified), or uses own builds (`--local`), or keeps a vendor BL2/FIP (`--stock`) with the OpenWrt `sysupgrade.bin` in the vendor layout; `--no-bdinfo` for boards without a bdinfo partition, `--nor` for SPI-NOR boards (vendor BL2/FIP + the OpenWrt `sysupgrade.bin` in the `firmware` partition), `--soc mt7986` for MT7986 boards (partition files `mt7986.mtdN.*`, minimal Wi-Fi EEPROM in an empty Factory), `--ubi-fip` for "spim-nand-ubi" BL2s (BL2 at 0, UBI from 0x200000 with the FIP as volume `fip`), `--ubi-factory SIZE` (Factory as UBI volume `factory`, Asus BT8), `--emmc [--emmc-layout L]` (eMMC image, see [MT7988](#mt7988-filogic-880--860)), `--nor-nand rutc50|openwrt-one` (SPI-NOR + SPI-NAND folder, see [above](#spi-nor--spi-nand-teltonika-rutc50-openwrt-one)). Factory/bdinfo come from `factory/`.
+- [`tools/mknand.py`](tools/mknand.py) — create / edit images: `create` (BL2, FIP, Factory, bdinfo, UBI from `.itb` or a `sysupgrade.bin`), `write --part fip`, `read`, `split`, `join`, `--flash-mb 256`, `--no-bdinfo`, `nor` (SPI-NOR folder: `--parts` layout, `--raw` whole-chip image, `--mac-part`, `--env` U-Boot environment; with `--nand-parts`, `--nand-file`, `--nand-sysupgrade` also the `nand` subfolder).
 - [`tools/kernel-dts.sh`](tools/kernel-dts.sh) — the kernel's MediaTek DTS with the DTS parts of OpenWrt's patches (`work/kdts`), for boards whose DTS is in the kernel tree (BPi-R4); [`tools/dts-leds.py`](tools/dts-leds.py) reads them there.
 - [`tools/mkemmc.py`](tools/mkemmc.py) — eMMC image (`flash=emmc`): BL2 in boot0, GPT user area with u-boot-env, factory, fip, kernel, rootfs (GL-MT6000 layout, `--layout wh3000-pro`, or `--layout bpi-r4` with `--fit` / `--recovery` (FIT into production / recovery)), OpenWrt `squashfs-factory.bin` in kernel + rootfs or `--sysupgrade` (sysupgrade tar), `--boot-env` (OpenWrt U-Boot environment that boots the `kernel` partition).
 
@@ -398,6 +446,8 @@ build-windows.sh          Windows package (cross) → README.build.windows.md
 qemu-patches/             patches on top of QEMU v10.1.0
 tools/                    prepare-nand.sh, mknand.py, host-bridge.sh,
                           gen_dramc_table.py (DRAMC status defaults)
+tools/uboot-rutc50/       U-Boot of the Teltonika RUTC50 preset (sources,
+                          build.sh, the built FIP)
 windows/                  launcher, preset editor, terminal (C#),
                           README.txt for the package
 languages/                launcher texts (en.ini, ru.ini)
@@ -449,8 +499,10 @@ TR3000 (no switch, one LAN on the built-in PHY), Netis NX31 (flash layout
 without bdinfo) and the MT7986 boards Redmi AX6000 (DDR4, WAN on a switch
 port), Netcore N60 (DDR3, RTL8221B), N60 Pro (GPY211 on GMAC1 and on
 switch port 5), GL.iNet GL-MT6000 (eMMC), Huasifei WH3000 Pro eMMC (vendor
-eMMC layout) and the MT7987 Bananapi BPi-R4
-Lite (NAND on SPI2, FIP in UBI, internal 2.5G PHY). Flash folders are built for these tests only, never
+eMMC layout), the MT7987 Bananapi BPi-R4
+Lite (NAND on SPI2, FIP in UBI, internal 2.5G PHY), the Teltonika RUTC50
+(SPI-NOR boot + SPI-NAND, own U-Boot) and the OpenWrt One (SPI-NAND boot
+next to a SPI-NOR, EN8811H). Flash folders are built for these tests only, never
 packaged.
 To release, change [`VERSION`](VERSION) and push to `main`: when the tag
 `v<VERSION>` does not exist yet, CI builds with PGO, tests, creates the tag

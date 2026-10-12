@@ -49,6 +49,14 @@
 #                     (*fip*.bin) and, if there, Factory and boot1 dumps
 #     --emmc-layout L eMMC GPT layout of tools/mkemmc.py (default
 #                     gl-mt6000; wh3000-pro: Huasifei WH3000 Pro eMMC)
+#     --nor-nand B    SPI-NOR + SPI-NAND board (machine option nor-nand=on):
+#                     OUTDIR (default nor-NAME) gets the NOR partition files,
+#                     OUTDIR/nand the NAND ones.  B = rutc50: Teltonika
+#                     layout, OpenWrt MT7981 RFB SPI-NOR BL2 + the U-Boot of
+#                     tools/uboot-rutc50 (boots UBI in rutos-a), MAC in
+#                     "config", the sysupgrade.bin as UBI in rutos-a;
+#                     openwrt-one: the OpenWrt nor-factory.bin and
+#                     snand-factory.bin images (NAND boot; recovery in NOR)
 #     --uboot PROF    eMMC board without an OpenWrt U-Boot build: take
 #                     preloader.bin + bl31-uboot.fip of the OpenWrt profile
 #                     PROF (same SoC, eMMC, DRAM type) and write an
@@ -70,6 +78,7 @@ EMMC=
 UBIFIP=
 ELAYOUT=gl-mt6000
 UBOOT=
+NORNAND=
 while [ $# -gt 0 ]; do
     case $1 in
     --stock) STOCK=$2; shift 2 ;;
@@ -82,6 +91,7 @@ while [ $# -gt 0 ]; do
     --emmc) EMMC=1; shift ;;
     --emmc-layout) ELAYOUT=$2; shift 2 ;;
     --uboot) UBOOT=$2; shift 2 ;;
+    --nor-nand) NORNAND=$2; shift 2 ;;
     --ubi-fip) LAYOUT="--parts BL2:0x200000,ubi:-"; UBIFIP=--fip-in-ubi; shift ;;
     --ubi-factory) UBIFAC="--factory-volume $2"; shift 2 ;;
     --parts) LAYOUT="--parts $2"; shift 2 ;;
@@ -92,7 +102,7 @@ done
 P=${1:?usage: tools/prepare-nand.sh [--stock DIR] [--flash-mb N] PROFILE [VERSION] [OUTDIR]}
 V=${2:-snapshot}
 NAME=${P#*_}; NAME=${NAME%-v1}
-OUT=${3:-$([ -n "$NOR" ] && echo nor || { [ -n "$EMMC" ] && echo emmc; } || echo nand)-$NAME}
+OUT=${3:-$([ -n "$NOR$NORNAND" ] && echo nor || { [ -n "$EMMC" ] && echo emmc; } || echo nand)-$NAME}
 if [ "$V" = snapshot ]; then
     URL=https://downloads.openwrt.org/snapshots/targets/mediatek/filogic
     BASE=openwrt-mediatek-filogic-$P
@@ -208,6 +218,30 @@ else
         done
         [ "$2" = optional ] || { echo "no $b-{${1// /,}} in $URL (wrong profile, or no OpenWrt U-Boot build for it)" >&2; exit 1; }
     }
+fi
+if [ "$NORNAND" = rutc50 ]; then
+    BL2=$(pick "nor-preloader.bin" "" mediatek_mt7981-rfb)
+    FIP=tools/uboot-rutc50/teltonika_rutc50-nor-bl31-uboot.fip
+    SYS=$(pick "squashfs-sysupgrade.bin")
+    [ -n "$BL2" ] && [ -n "$SYS" ] || exit 1
+    echo "$P: $(basename "$BL2"), $(basename "$FIP"), $(basename "$SYS")"
+    # Teltonika MAC prefix 00:1e:42 + random
+    MAC=00:1e:42:$(od -A n -t x1 -N 3 /dev/urandom | sed 's/^ //; s/ /:/g')
+    "${MK[@]}" nor -o "$OUT/" --bl2 "$BL2" --fip "$FIP" ${FAC:+--factory "$FAC"} \
+        --parts BL2:0x40000,u-boot-env:0x10000,Factory:0xa0000,config:0x10000,FIP:0x100000,bootconfig-a:0x10000,bootconfig-b:0x10000,event-log:0x90000,recovery:- \
+        --mac-part config --mac "$MAC" --nand-mb 512 \
+        --nand-parts rutos-a:0x10000000,rutos-b:- --nand-sysupgrade "$SYS"
+    exit 0
+fi
+if [ "$NORNAND" = openwrt-one ]; then
+    NORIMG=$(pick "nor-factory.bin"); NANDIMG=$(pick "snand-factory.bin")
+    [ -n "$NORIMG" ] && [ -n "$NANDIMG" ] || exit 1
+    echo "$P: $(basename "$NORIMG"), $(basename "$NANDIMG")"
+    "${MK[@]}" nor -o "$OUT/" --raw "$NORIMG" \
+        --parts bl2-nor:0x40000,factory:0xc0000,fip-nor:0x80000,recovery:- \
+        --nand-mb 256 --nand-parts bl2:0x100000,ubi:- \
+        --nand-file "@0=$NANDIMG"
+    exit 0
 fi
 if [ -n "$EMMC" ]; then
     # boards with several boot media name the eMMC images emmc-*

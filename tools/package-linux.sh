@@ -73,6 +73,9 @@ cp emulator.sh VERSION LICENSE README.md README.ru.md \
    README.build.linux.md README.build.linux.ru.md "$PKG/"
 cp -r presets "$PKG/"
 cp tools/prepare-nand.sh tools/mknand.py tools/mkemmc.py tools/host-bridge.sh "$PKG/tools/"
+# the RUTC50 bootloader (prepare-nand.sh --nor-nand rutc50)
+mkdir -p "$PKG/tools/uboot-rutc50"
+cp tools/uboot-rutc50/*.fip "$PKG/tools/uboot-rutc50/"
 cp tests/quick.py "$PKG/tests/"
 cp usb/README.txt "$PKG/usb/"
 

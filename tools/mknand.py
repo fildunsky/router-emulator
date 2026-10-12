@@ -47,6 +47,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zlib
 
 PAGE = 2048
 OOB = 64
@@ -298,6 +299,113 @@ def strip_fwtool(data):
     return data
 
 
+def uboot_env(lines, size):
+    """U-Boot environment of a redundant-env build (CRC32, flags, data)."""
+    data = b"\0".join(l.encode() for l in lines) + b"\0\0"
+    if len(data) > size - 5:
+        sys.exit("U-Boot environment larger than %#x bytes" % size)
+    data = data.ljust(size - 5, b"\0")
+    return zlib.crc32(data).to_bytes(4, "little") + b"\1" + data
+
+
+def nor_nand(args, env):
+    """'nand' subfolder: the SPI-NAND next to the NOR (machine option
+    nor-nand=on), one file per partition of --nand-parts.  --nand-file puts
+    files at partition (or flash) offsets; --nand-sysupgrade builds a UBI image of the
+    sysupgrade tar's kernel and root (volumes kernel, rootfs, rootfs_data;
+    with --env-ubi also ubootenv / ubootenv2 holding the environment)."""
+    total = args.nand_mb << 20
+    parts, off = [], 0
+    for item in args.nand_parts.split(","):
+        label, size = item.split(":")
+        size = total - off if size == "-" else int(size, 0)
+        parts.append((label, size))
+        off += size
+    if off > total:
+        sys.exit("NAND partitions exceed the flash size")
+    starts, off = {}, 0
+    for label, size in parts:
+        starts[label] = off
+        off += size
+    place = []                  # (flash offset, data)
+
+    def put(spec, data):
+        # LABEL[@OFF] or @OFF (from the start of the flash)
+        label, _, at = spec.partition("@")
+        if label and label not in starts:
+            sys.exit(f"no NAND partition {label}")
+        place.append((starts.get(label, 0) + (int(at, 0) if at else 0), data))
+
+    for spec in args.nand_file or []:
+        where, _, fn = spec.partition("=")
+        put(where, open(fn, "rb").read())
+    if args.nand_sysupgrade:
+        put(args.nand_ubi_at or parts[0][0],
+            sysupgrade_ubi(args.nand_sysupgrade,
+                           env if args.env_ubi else None, args.env_size))
+    for at, blob in place:
+        if at + len(blob) > total:
+            sys.exit(f"{len(blob)} bytes at {at:#x} exceed the NAND size")
+    out = os.path.join(args.output, "nand")
+    os.makedirs(out, exist_ok=True)
+    for f in dir_files(out):
+        os.unlink(f)
+    for i, (label, size) in enumerate(parts):
+        start = starts[label]
+        data = bytearray(b"\xff" * size)
+        for at, blob in place:
+            lo, hi = max(at, start), min(at + len(blob), start + size)
+            if lo < hi:
+                data[lo - start:hi - start] = blob[lo - at:hi - at]
+        fn = os.path.join(out, f"{PREFIX}.mtd{i}.{label}.bin")
+        open(fn, "wb").write(bytes(data))
+        print(f"  {fn}  (NAND 0x{start:08x}, 0x{size:x} bytes)")
+
+
+def sysupgrade_ubi(path, env, env_size):
+    """UBI image (128 KiB PEBs) of an OpenWrt sysupgrade tar (kernel + root):
+    kernel, rootfs, rootfs_data (autoresize) and, with env, the redundant
+    U-Boot environment volumes ubootenv / ubootenv2."""
+    import tarfile
+    with tempfile.TemporaryDirectory() as tmp:
+        with tarfile.open(path) as t:
+            for m in t.getmembers():
+                base = os.path.basename(m.name)
+                if base in ("kernel", "root") and m.isfile():
+                    with open(os.path.join(tmp, base), "wb") as f:
+                        f.write(t.extractfile(m).read())
+        vols = []
+        for name, fn in (("kernel", "kernel"), ("rootfs", "root")):
+            if not os.path.exists(os.path.join(tmp, fn)):
+                sys.exit(f"{path}: no '{fn}' in sysupgrade tar")
+            vols.append(f"[{name}]\nmode=ubi\nvol_type=dynamic\n"
+                        f"vol_name={name}\nimage={os.path.join(tmp, fn)}\n")
+        if env:
+            for i, name in enumerate(("ubootenv", "ubootenv2")):
+                fn = os.path.join(tmp, name)
+                e = bytearray(uboot_env(env, env_size))
+                e[4] = 1 - i            # flags: the first copy is newer
+                e[:4] = zlib.crc32(bytes(e[5:])).to_bytes(4, "little")
+                open(fn, "wb").write(bytes(e))
+                vols.append(f"[{name}]\nmode=ubi\nvol_type=dynamic\n"
+                            f"vol_name={name}\nimage={fn}\nvol_size=0x20000\n")
+        vols.append("[rootfs_data]\nmode=ubi\nvol_type=dynamic\n"
+                    "vol_name=rootfs_data\nvol_size=1MiB\nvol_flags=autoresize\n")
+        ini = os.path.join(tmp, "ubinize.cfg")
+        with open(ini, "w") as f:
+            for i, v in enumerate(vols):
+                f.write(v + f"vol_id={i}\n\n")
+        out = os.path.join(tmp, "ubi.img")
+        ubinize = shutil.which("ubinize") or shutil.which(
+            "ubinize", path="/usr/sbin:/sbin:/usr/local/sbin")
+        if not ubinize:
+            sys.exit("ubinize not found (apt install mtd-utils)")
+        subprocess.run([ubinize, "-o", out, "-p", str(BLOCK), "-m", str(PAGE),
+                        "-s", str(PAGE), ini], check=True,
+                       stdout=subprocess.DEVNULL)
+        return open(out, "rb").read()
+
+
 def cmd_nor(args):
     """Folder of NOR partition files: BL2, u-boot-env, Factory, bdinfo, FIP,
     firmware (OpenWrt sysupgrade.bin = FIT kernel + squashfs + jffs2 data)."""
@@ -312,13 +420,20 @@ def cmd_nor(args):
         sys.exit("NOR partitions exceed the flash size")
     files = {"BL2": args.bl2, "FIP": args.fip, "Factory": args.factory,
              "bdinfo": args.bdinfo}
+    if not args.raw and not (args.bl2 and args.fip):
+        sys.exit("nor: --bl2 and --fip, or --raw")
+    raw = open(args.raw, "rb").read() if args.raw else None
+    env = [l.rstrip("\n") for l in open(args.env) if l.strip()
+           and not l.startswith("#")] if args.env else None
     os.makedirs(args.output, exist_ok=True)
     for f in dir_files(args.output):
         os.unlink(f)
     for i, (label, poff, size) in enumerate(parts):
         data = bytearray(b"\xff" * size)
         src = files.get(label)
-        if label == "firmware" and args.sysupgrade:
+        if args.raw:
+            data[:] = raw[poff:poff + size].ljust(size, b"\xff")
+        elif label == "firmware" and args.sysupgrade:
             img = strip_fwtool(open(args.sysupgrade, "rb").read())
             if len(img) > size:
                 sys.exit(f"sysupgrade image ({len(img)} bytes) larger than "
@@ -327,14 +442,19 @@ def cmd_nor(args):
         elif src:
             blob = open(src, "rb").read()[:size]   # e.g. a NAND-size Factory
             data[:len(blob)] = blob
-        elif label == "bdinfo":
+        elif label == "bdinfo" or label == args.mac_part:
             mac = args.mac or "80:af:ca:%02x:%02x:%02x" % tuple(
                 random.randrange(256) for _ in range(3))
-            data[0xde00:0xde06] = bytes(int(x, 16) for x in mac.split(":"))
+            at = 0xde00 if label == "bdinfo" else 0
+            data[at:at + 6] = bytes(int(x, 16) for x in mac.split(":"))
             print(f"base MAC: {mac}")
+        elif label == "u-boot-env" and env and not args.env_ubi:
+            data[:args.env_size] = uboot_env(env, args.env_size)
         fn = os.path.join(args.output, f"{PREFIX}.mtd{i}.{label}.bin")
         open(fn, "wb").write(bytes(data))
         print(f"  {fn}  (0x{poff:07x}, 0x{size:x} bytes)")
+    if args.nand_file or args.nand_sysupgrade:
+        nor_nand(args, env)
     print(f"wrote {args.output}")
 
 
@@ -510,12 +630,40 @@ def main():
     n.add_argument("--size-mb", type=int, default=16)
     n.add_argument("--parts", default=NOR_PARTS,
                    help="label:size,... ('-' = rest of the flash), default: %(default)s")
-    n.add_argument("--bl2", required=True)
-    n.add_argument("--fip", required=True)
+    n.add_argument("--bl2")
+    n.add_argument("--fip")
+    n.add_argument("--raw", metavar="IMAGE",
+                   help="image of the whole NOR (e.g. OpenWrt One "
+                        "nor-factory.bin), split into the partitions")
     n.add_argument("--factory")
     n.add_argument("--bdinfo")
     n.add_argument("--mac", help="base MAC for a generated bdinfo (0xde00)")
     n.add_argument("--sysupgrade", help="OpenWrt sysupgrade.bin for 'firmware'")
+    n.add_argument("--mac-part", metavar="LABEL",
+                   help="partition holding the base MAC at offset 0 (binary, "
+                        "e.g. Teltonika 'config'; generated like bdinfo's)")
+    n.add_argument("--env", metavar="FILE",
+                   help="U-Boot environment (one name=value per line) for "
+                        "'u-boot-env'")
+    n.add_argument("--env-size", type=parse_int, default=0x4000,
+                   help="CONFIG_ENV_SIZE of the U-Boot (default 0x4000)")
+    n.add_argument("--env-ubi", action="store_true",
+                   help="the environment is in UBI volumes ubootenv / "
+                        "ubootenv2 of --nand-sysupgrade (U-Boot "
+                        "CONFIG_ENV_IS_IN_UBI), not in 'u-boot-env'")
+    n.add_argument("--nand-mb", type=int, default=512,
+                   help="SPI-NAND next to the NOR (machine option "
+                        "nor-nand=on), subfolder 'nand': size")
+    n.add_argument("--nand-parts", default="ubi:-",
+                   help="NAND layout, label:size,... ('-' = rest)")
+    n.add_argument("--nand-file", action="append", metavar="[LABEL]@OFF=FILE",
+                   help="FILE at offset OFF of the NAND partition LABEL "
+                        "(no LABEL: of the flash; may span partitions)")
+    n.add_argument("--nand-sysupgrade", metavar="FILE",
+                   help="OpenWrt sysupgrade.bin (tar): UBI image of it")
+    n.add_argument("--nand-ubi-at", metavar="LABEL[@OFF]",
+                   help="where that UBI image goes (default: start of the "
+                        "first NAND partition)")
     n.set_defaults(func=cmd_nor)
     a = sub.add_parser("addoob", help="data-only dump -> raw image")
     a.add_argument("-i", "--input", required=True)

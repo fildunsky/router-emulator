@@ -1,0 +1,696 @@
+From d6e4f03bb198df9be3dba81506c39632b261a409 Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Mon, 12 Oct 2026 17:18:00 -0400
+Subject: [PATCH 27/27] hw/arm/filogic: 74HC595 LEDs, SPI-NOR + SPI-NAND
+ boards, Airoha EN8811H
+
+- hc595.c: 74HC595 shift register chain on a SPI bus (Linux
+  gpio-74x164): one byte per register per message, latched on CS
+  deassert.  LED panel source hc595:BUS:N (output N), e.g. the
+  Teltonika RUTC50 mobile / SIM / signal LEDs on SPI1.
+- nor-nand=on: a board with a SPI-NOR and a SPI-NAND (Teltonika RUTC50:
+  NOR boot, system in UBI on the NAND; OpenWrt One: NAND boot, recovery
+  in the NOR).  nand-dir holds the NOR partition files, its folder
+  "nand" the NAND ones; flash=nor or nand selects the boot flash.
+- mtk-eth: Airoha EN8811H 2.5G PHY (gmac0/gmac1=en8811h): the c22
+  page 4 buckpbus window, MCU ready after the firmware download, link
+  partner 2.5G, the speed register and its three LEDs.
+
+Signed-off-by: Dmitry Mostovoy <stavultras@gmail.com>
+---
+ hw/arm/filogic/filogic.h        |   4 +
+ hw/arm/filogic/filogic_leds.c   |  44 ++++++---
+ hw/arm/filogic/filogic_router.c |  58 +++++++++---
+ hw/arm/filogic/hc595.c          | 124 +++++++++++++++++++++++++
+ hw/arm/filogic/meson.build      |   1 +
+ hw/arm/filogic/mtk_eth.c        | 155 +++++++++++++++++++++++++++++++-
+ 6 files changed, 358 insertions(+), 28 deletions(-)
+ create mode 100644 hw/arm/filogic/hc595.c
+
+diff --git a/hw/arm/filogic/filogic.h b/hw/arm/filogic/filogic.h
+index 2744b1a..b6cf44e 100644
+--- a/hw/arm/filogic/filogic.h
++++ b/hw/arm/filogic/filogic.h
+@@ -116,6 +116,10 @@ uint32_t mtk_sysctl_peek(DeviceState *dev, hwaddr a);
+ bool ws2812b_get(DeviceState *dev, int idx, uint8_t rgb[3], uint8_t lit[3],
+                  uint32_t *changes);
+ 
++/* 74HC595 shift register chain on a SPI bus (gpio-74x164 outputs) */
++#define TYPE_HC595_SPI "hc595-spi"
++int hc595_get(DeviceState *dev, int pin, uint32_t *changes);
++
+ /* hook so the sysctl block can power on secondary cores */
+ void filogic_cpu_power_on(int cpu, uint64_t entry);
+ 
+diff --git a/hw/arm/filogic/filogic_leds.c b/hw/arm/filogic/filogic_leds.c
+index 95982d9..ed5b5d7 100644
+--- a/hw/arm/filogic/filogic_leds.c
++++ b/hw/arm/filogic/filogic_leds.c
+@@ -8,6 +8,7 @@
+  *                         ADDR, as its LED registers program it
+  *          swphy:PORT:N   LED pin N of the switch's PHY of port PORT
+  *          ws2812:BUS:N   LED N of a WS2812B chain on SPI bus BUS
++ *          hc595:BUS:N    output N of a 74HC595 chain on SPI bus BUS
+  *          pwm:N          PWM channel N (lit while enabled with a duty)
+  *
+  * Several colours of one lamp (bi-colour status LEDs) are joined with "+".
+@@ -33,7 +34,7 @@
+ #define TICK_MS     50
+ #define WINDOW      4           /* ticks: 200 ms decide "blinking" */
+ 
+-enum { SRC_GPIO, SRC_PHY, SRC_SWPHY, SRC_WS2812, SRC_PWM };
++enum { SRC_GPIO, SRC_PHY, SRC_SWPHY, SRC_WS2812, SRC_HC595, SRC_PWM };
+ 
+ typedef struct LedChan {
+     char *color;
+@@ -58,7 +59,8 @@ struct RouterLeds {
+     int n;
+     int tick;
+     bool log;
+-    DeviceState *ws[3];
++    DeviceState *ws[3];         /* per SPI bus: WS2812B chain */
++    DeviceState *hc[3];         /* or 74HC595 chain */
+     QEMUTimer *timer;
+ };
+ 
+@@ -92,8 +94,9 @@ static bool parse_chan(LedChan *c, const char *text, int nspi, Error **errp)
+         c->src = strcmp(f[0], "phy") ? SRC_SWPHY : SRC_PHY;
+         c->a = atoi(f[1]);
+         c->b = atoi(f[2]);
+-    } else if (!strcmp(f[0], "ws2812") && nf == 3) {
+-        c->src = SRC_WS2812;
++    } else if ((!strcmp(f[0], "ws2812") || !strcmp(f[0], "hc595")) &&
++               nf == 3) {
++        c->src = strcmp(f[0], "ws2812") ? SRC_HC595 : SRC_WS2812;
+         c->a = atoi(f[1]);
+         c->b = atoi(f[2]);
+         if (c->a < 0 || c->a >= nspi) {
+@@ -110,7 +113,7 @@ static bool parse_chan(LedChan *c, const char *text, int nspi, Error **errp)
+     return true;
+ bad:
+     error_setg(errp, "\"%s\": expected <colour> gpio:N[:low] | phy:ADDR:N | "
+-               "swphy:PORT:N | ws2812:BUS:N | pwm:N", text);
++               "swphy:PORT:N | ws2812:BUS:N | hc595:BUS:N | pwm:N", text);
+     return false;
+ }
+ 
+@@ -196,6 +199,14 @@ static void sample(RouterLeds *r, LedChan *c)
+                      rgb[0], rgb[1], rgb[2]);
+         }
+         break;
++    case SRC_HC595:
++        v = r->hc[c->a] ? hc595_get(r->hc[c->a], c->b, &count) : -1;
++        if (window(r, c, count) >= 3 && v >= 0) {
++            pstrcpy(c->state, sizeof(c->state), "b");
++        } else {
++            pstrcpy(c->state, sizeof(c->state), v == 1 ? "1" : "0");
++        }
++        break;
+     case SRC_PWM: {
+         /* enable bits at the base, PWMTHRES (duty) in the channel block */
+         hwaddr ch = r->hw.pwm_base + r->hw.pwm_chan_base +
+@@ -256,17 +267,28 @@ RouterLeds *router_leds_new(char **defs, int ndefs, const RouterLedsHw *hw,
+             error_propagate_prepend(errp, err, "led%d: ", i + 1);
+             return NULL;
+         }
+-        /* a WS2812B chain listens on its SPI bus */
++        /* a WS2812B or 74HC595 chain listens on its SPI bus */
+         for (int k = 0; k < r->led[r->n].nch; k++) {
+             LedChan *c = &r->led[r->n].ch[k];
+-            if (c->src == SRC_WS2812 && !r->ws[c->a]) {
++            DeviceState **own, **other;
++            if (c->src != SRC_WS2812 && c->src != SRC_HC595) {
++                continue;
++            }
++            own = c->src == SRC_WS2812 ? &r->ws[c->a] : &r->hc[c->a];
++            other = c->src == SRC_WS2812 ? &r->hc[c->a] : &r->ws[c->a];
++            if (*other) {
++                error_setg(errp, "led%d: SPI%d has a WS2812B chain and a "
++                           "74HC595", i + 1, c->a);
++                return NULL;
++            }
++            if (!*own) {
+                 DeviceState *spi = hw->spi[c->a];
+-                r->ws[c->a] = qdev_new(TYPE_WS2812B_SPI);
+-                qdev_realize_and_unref(r->ws[c->a],
+-                                       qdev_get_child_bus(spi, "spi"),
++                *own = qdev_new(c->src == SRC_WS2812 ? TYPE_WS2812B_SPI
++                                                     : TYPE_HC595_SPI);
++                qdev_realize_and_unref(*own, qdev_get_child_bus(spi, "spi"),
+                                        &error_fatal);
+                 qdev_connect_gpio_out_named(spi, "cs", 0,
+-                    qdev_get_gpio_in_named(r->ws[c->a], SSI_GPIO_CS, 0));
++                    qdev_get_gpio_in_named(*own, SSI_GPIO_CS, 0));
+             }
+         }
+         r->n++;
+diff --git a/hw/arm/filogic/filogic_router.c b/hw/arm/filogic/filogic_router.c
+index 56ac0b4..0b98b2e 100644
+--- a/hw/arm/filogic/filogic_router.c
++++ b/hw/arm/filogic/filogic_router.c
+@@ -50,14 +50,14 @@
+ 
+ /* what is attached to a GMAC */
+ enum { GMAC_NONE, GMAC_RTL8221B, GMAC_GPHY, GMAC_MT7531, GMAC_YT8821,
+-       GMAC_GPY211, GMAC_I2P5GE, GMAC_AN8855, GMAC_MT7988SW };
++       GMAC_GPY211, GMAC_I2P5GE, GMAC_AN8855, GMAC_MT7988SW, GMAC_EN8811H };
+ 
+ static const char *const gmac_names[] = {
+     [GMAC_NONE] = "none", [GMAC_RTL8221B] = "rtl8221b",
+     [GMAC_GPHY] = "gphy", [GMAC_MT7531] = "mt7531",
+     [GMAC_YT8821] = "yt8821", [GMAC_GPY211] = "gpy211",
+     [GMAC_I2P5GE] = "i2p5ge", [GMAC_AN8855] = "an8855",
+-    [GMAC_MT7988SW] = "mt7988-switch",
++    [GMAC_MT7988SW] = "mt7988-switch", [GMAC_EN8811H] = "en8811h",
+ };
+ 
+ /* a switch (MT7531 or Airoha AN8855) on GMAC0 */
+@@ -81,6 +81,8 @@ static uint32_t gmac_phy_type(int gmac)
+         return 4;
+     case GMAC_I2P5GE:
+         return 5;
++    case GMAC_EN8811H:
++        return 6;
+     default:
+         return 0;
+     }
+@@ -89,7 +91,7 @@ static uint32_t gmac_phy_type(int gmac)
+ static bool gmac_ext_phy(int gmac)
+ {
+     return gmac == GMAC_RTL8221B || gmac == GMAC_YT8821 ||
+-           gmac == GMAC_GPY211;
++           gmac == GMAC_GPY211 || gmac == GMAC_EN8811H;
+ }
+ 
+ /* what differs between the SoCs */
+@@ -267,6 +269,7 @@ struct RouterState {
+     uint32_t nand_spi;          /* SPI controller of the SPI-NAND (0) */
+     int32_t switch_irq_pin;     /* EINT of the MT7531 interrupt, -1 = SoC's */
+     bool flash_nor;             /* boot flash: SPI-NOR on SPI2 */
++    bool nor_nand;              /* SPI-NOR and SPI-NAND (nand-dir/nand) */
+     bool flash_emmc;            /* boot flash: eMMC on MSDC0 */
+     uint32_t emmc_boot_mb;      /* size of each eMMC boot partition */
+     BlockBackend *emmc;         /* eMMC image: boot0, boot1, user area */
+@@ -294,6 +297,16 @@ static void router_set_reset_ah(Object *obj, bool v, Error **errp)
+     ROUTER_MACHINE(obj)->reset_active_high = v;
+ }
+ 
++static bool router_get_nor_nand(Object *obj, Error **errp)
++{
++    return ROUTER_MACHINE(obj)->nor_nand;
++}
++
++static void router_set_nor_nand(Object *obj, bool v, Error **errp)
++{
++    ROUTER_MACHINE(obj)->nor_nand = v;
++}
++
+ static bool router_get_wps_ah(Object *obj, Error **errp)
+ {
+     return ROUTER_MACHINE(obj)->wps_active_high;
+@@ -449,7 +462,7 @@ static void flash_read(RouterState *b, uint64_t off, void *buf, size_t len)
+         if (blk_pread(b->emmc, off, len, buf, 0) < 0) {
+             memset(buf, 0xff, len);
+         }
+-    } else if (b->nor) {
++    } else if (b->flash_nor) {
+         spinor_read(b->nor, off, buf, len);
+     } else {
+         spinand_read_logical(b->nand, off, buf, len);
+@@ -477,7 +490,7 @@ static bool brom_load_bl2(RouterState *b, uint64_t *entry)
+             found = ldl_le_p(gfh) == GFH_MAGIC && !memcmp(gfh + 8, "FILE_INFO", 9);
+         }
+         gfh_off -= 0x200;
+-    } else if (b->nor) {
++    } else if (b->flash_nor) {
+         /* SPI-NOR: "SF_BOOT" header, GFH in the first sectors */
+         if (memcmp(hdr, "SF_BOOT", 8) != 0) {
+             error_report("BROM: no SPI-NOR boot header (\"SF_BOOT\") at NOR "
+@@ -530,7 +543,7 @@ static bool brom_load_bl2(RouterState *b, uint64_t *entry)
+     *entry = load + jump;
+     info_report("BROM: %s boot, BL2 at 0x%x -> 0x%x (%u bytes), "
+                 "jump to 0x%" PRIx64,
+-                b->emmc ? "eMMC" : b->nor ? "SPI-NOR" : "SPI-NAND", gfh_off,
++                b->emmc ? "eMMC" : b->flash_nor ? "SPI-NOR" : "SPI-NAND", gfh_off,
+                 load, total, *entry);
+     return true;
+ }
+@@ -1007,7 +1020,7 @@ static void router_init(MachineState *machine)
+         goto flash_done;
+     }
+     dinfo = drive_get(IF_MTD, 0, 0);
+-    if (b->flash_nor) {
++    if (b->flash_nor || b->nor_nand) {
+         /*
+          * SPI-NOR boot flash: MT7981 boards have it on SPI2 CS0 (spi0 is
+          * unused then), MT7986 boards on SPI0 CS0
+@@ -1026,7 +1039,7 @@ static void router_init(MachineState *machine)
+         }
+         if (b->nand_dir) {
+             qdev_prop_set_string(dev, "dir", b->nand_dir);
+-        } else if (dinfo) {
++        } else if (dinfo && b->flash_nor) {
+             qdev_prop_set_drive_err(dev, "drive", blk_by_legacy_dinfo(dinfo),
+                                     &error_fatal);
+         } else {
+@@ -1040,7 +1053,14 @@ static void router_init(MachineState *machine)
+         qdev_connect_gpio_out_named(spi[b->soc->nor_spi], "cs", 0,
+                                     qdev_get_gpio_in_named(dev, SSI_GPIO_CS, 0));
+         b->nor = MTK_SPINOR(dev);
+-        goto flash_done;
++        if (!b->nor_nand) {
++            goto flash_done;
++        }
++        if (b->nand_spi == b->soc->nor_spi) {
++            error_report("nor-nand: the SPI-NOR is on SPI%d, set nand-spi",
++                         b->nand_spi);
++            exit(1);
++        }
+     }
+ 
+     dev = qdev_new(TYPE_MTK_SPINAND);
+@@ -1059,9 +1079,13 @@ static void router_init(MachineState *machine)
+     if (b->nand_uid) {
+         qdev_prop_set_string(dev, "uid", b->nand_uid);
+     }
+-    if (b->nand_dir) {
++    if (b->nand_dir && b->nor_nand) {
++        /* the SPI-NAND next to a SPI-NOR */
++        g_autofree char *d = g_build_filename(b->nand_dir, "nand", NULL);
++        qdev_prop_set_string(dev, "dir", d);
++    } else if (b->nand_dir) {
+         qdev_prop_set_string(dev, "dir", b->nand_dir);
+-    } else if (dinfo) {
++    } else if (dinfo && !b->nor_nand) {
+         qdev_prop_set_drive_err(dev, "drive", blk_by_legacy_dinfo(dinfo),
+                                 &error_fatal);
+     } else {
+@@ -1492,7 +1516,7 @@ static void router_class_init(ObjectClass *oc, const void *data)
+         object_class_property_set_description(oc, name,
+             "front panel LED: \"<name>: <colour> <source>[ + <colour> "
+             "<source>...]\", source gpio:N[:low], phy:ADDR:N, "
+-            "ws2812:BUS:N or pwm:N");
++            "swphy:PORT:N, ws2812:BUS:N, hc595:BUS:N or pwm:N");
+     }
+     object_class_property_add_str(oc, "led-state", router_get_led_state,
+                                   NULL);
+@@ -1539,11 +1563,11 @@ static void router_class_init(ObjectClass *oc, const void *data)
+                                    router_get_gmac0, router_set_gmac0);
+     object_class_property_set_description(oc, "gmac0",
+         "GMAC0 (mac@0, SGMII0): mt7531 or an8855 (Airoha AN8855, MDIO 1) "
+-        "switch, rtl8221b, yt8821 or gpy211 (2.5G PHY), none");
++        "switch, rtl8221b, yt8821, gpy211 or en8811h (2.5G PHY), none");
+     object_class_property_add_enum(oc, "gmac1", "Mt7981Gmac", &gmac_lookup,
+                                    router_get_gmac1, router_set_gmac1);
+     object_class_property_set_description(oc, "gmac1",
+-        "GMAC1 (mac@1): rtl8221b, yt8821 or gpy211 (2.5G PHY), gphy (MT7981 "
++        "GMAC1 (mac@1): rtl8221b, yt8821, gpy211 or en8811h (2.5G PHY), gphy (MT7981 "
+         "built-in GbE PHY), none");
+     object_class_property_add_enum(oc, "port5", "Mt7981Gmac", &gmac_lookup,
+                                    router_get_port5, router_set_port5);
+@@ -1635,6 +1659,12 @@ static void router_class_init(ObjectClass *oc, const void *data)
+         "GPIO/EINT the MT7531 interrupt is wired to (default: 38 on MT7981, "
+         "66 on MT7986, 41 on MT7987 boards)");
+     ADD_U32("wps-gpio", wps_gpio, "GPIO of the WPS (or mesh) button");
++    object_class_property_add_bool(oc, "nor-nand", router_get_nor_nand,
++                                   router_set_nor_nand);
++    object_class_property_set_description(oc, "nor-nand",
++        "SPI-NOR and SPI-NAND (e.g. Teltonika RUTC50, OpenWrt One): "
++        "nand-dir holds the NOR partition files, its folder \"nand\" the "
++        "NAND ones; flash=nor or nand selects the boot flash");
+     object_class_property_add_bool(oc, "reset-active-high", router_get_reset_ah,
+                                    router_set_reset_ah);
+     object_class_property_set_description(oc, "reset-active-high",
+diff --git a/hw/arm/filogic/hc595.c b/hw/arm/filogic/hc595.c
+new file mode 100644
+index 0000000..7b57546
+--- /dev/null
++++ b/hw/arm/filogic/hc595.c
+@@ -0,0 +1,124 @@
++/*
++ * 74HC595 shift registers (a chain of up to 4) on a SPI bus, as driven by
++ * Linux's gpio-74x164 (e.g. the Teltonika RUTC50 mobile / SIM / signal
++ * LEDs): every update is one SPI message of one byte per register, the
++ * last register's byte first; deasserting CS (RCLK) latches the outputs.
++ * Output pin N is bit N % 8 of the byte for register N / 8, i.e. byte
++ * (bytes in the frame - 1 - N / 8) of the frame.  Only the latched outputs
++ * are kept, for the LED panel.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/module.h"
++#include "hw/ssi/ssi.h"
++#include "filogic.h"
++
++#define HC_MAX_REGS     4
++
++OBJECT_DECLARE_SIMPLE_TYPE(Hc595State, HC595_SPI)
++
++struct Hc595State {
++    SSIPeripheral parent_obj;
++    uint8_t shift[HC_MAX_REGS];     /* bytes of the frame being sent */
++    int nshift;
++    uint8_t out[HC_MAX_REGS];       /* latched outputs, in frame order */
++    int nout;
++    uint32_t changes[HC_MAX_REGS * 8];  /* on <-> off (LED panel: blinking) */
++};
++
++/* output pin N: level (-1: never latched) and the count of level changes */
++int hc595_get(DeviceState *dev, int pin, uint32_t *changes)
++{
++    Hc595State *s = HC595_SPI(dev);
++    int byte = s->nout - 1 - pin / 8;
++
++    if (pin < 0 || pin >= HC_MAX_REGS * 8) {
++        return -1;
++    }
++    *changes = s->changes[pin];
++    if (byte < 0) {
++        return -1;
++    }
++    return (s->out[byte] >> (pin % 8)) & 1;
++}
++
++static uint32_t hc595_transfer(SSIPeripheral *dev, uint32_t val)
++{
++    Hc595State *s = HC595_SPI(dev);
++
++    /* a longer frame: the first bytes have left the chain */
++    if (s->nshift == HC_MAX_REGS) {
++        memmove(s->shift, s->shift + 1, HC_MAX_REGS - 1);
++        s->nshift--;
++    }
++    s->shift[s->nshift++] = val;
++    return 0;
++}
++
++static void hc595_latch(Hc595State *s)
++{
++    for (int pin = 0; pin < s->nshift * 8; pin++) {
++        int ob = s->nout - 1 - pin / 8, nb = s->nshift - 1 - pin / 8;
++        int was = ob >= 0 ? (s->out[ob] >> (pin % 8)) & 1 : 0;
++
++        if (((s->shift[nb] >> (pin % 8)) & 1) != was) {
++            s->changes[pin]++;
++        }
++    }
++    memcpy(s->out, s->shift, s->nshift);
++    s->nout = s->nshift;
++}
++
++/* level: the CS line (active low) */
++static int hc595_set_cs(SSIPeripheral *dev, bool level)
++{
++    Hc595State *s = HC595_SPI(dev);
++
++    if (level && s->nshift) {
++        hc595_latch(s);         /* RCLK rising edge */
++    }
++    s->nshift = 0;
++    return 0;
++}
++
++static void hc595_realize(SSIPeripheral *dev, Error **errp)
++{
++}
++
++static void hc595_reset(DeviceState *dev)
++{
++    Hc595State *s = HC595_SPI(dev);
++
++    s->nshift = s->nout = 0;
++    memset(s->out, 0, sizeof(s->out));
++    memset(s->changes, 0, sizeof(s->changes));
++}
++
++static void hc595_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    SSIPeripheralClass *k = SSI_PERIPHERAL_CLASS(klass);
++
++    k->realize = hc595_realize;
++    k->transfer = hc595_transfer;
++    k->set_cs = hc595_set_cs;
++    k->cs_polarity = SSI_CS_LOW;
++    device_class_set_legacy_reset(dc, hc595_reset);
++    dc->desc = "74HC595 shift register chain (SPI)";
++}
++
++static const TypeInfo hc595_info = {
++    .name = TYPE_HC595_SPI,
++    .parent = TYPE_SSI_PERIPHERAL,
++    .instance_size = sizeof(Hc595State),
++    .class_init = hc595_class_init,
++};
++
++static void hc595_register_types(void)
++{
++    type_register_static(&hc595_info);
++}
++
++type_init(hc595_register_types)
+diff --git a/hw/arm/filogic/meson.build b/hw/arm/filogic/meson.build
+index bdea364..5e8f532 100644
+--- a/hw/arm/filogic/meson.build
++++ b/hw/arm/filogic/meson.build
+@@ -13,4 +13,5 @@ arm_common_ss.add(when: 'CONFIG_MTK_FILOGIC', if_true: files(
+   'mt7992_wifi.c',
+   'filogic_leds.c',
+   'ws2812b.c',
++  'hc595.c',
+ ))
+diff --git a/hw/arm/filogic/mtk_eth.c b/hw/arm/filogic/mtk_eth.c
+index 3e0f55e..884e8ef 100644
+--- a/hw/arm/filogic/mtk_eth.c
++++ b/hw/arm/filogic/mtk_eth.c
+@@ -6,8 +6,8 @@
+  *   - MediaTek MT7531 switch on MDIO (5 GPHYs, CPU port 6, special tag)
+  *   - optional MT7531 switch on GMAC0 (SGMII0)
+  *   - optional directly attached PHYs on GMAC0/GMAC1: Realtek
+- *     RTL8221B(-VB-CG) 2.5G, Motorcomm YT8821 2.5G, MaxLinear GPY211C 2.5G
+- *     or the MT7981 built-in GbE PHY
++ *     RTL8221B(-VB-CG) 2.5G, Motorcomm YT8821 2.5G, MaxLinear GPY211C 2.5G,
++ *     Airoha EN8811H 2.5G or the MT7981 built-in GbE PHY
+  *   - optional 2.5G PHY on MT7531 port 5 (SGMII), e.g. MT7986 boards
+  *
+  * Each external port is a QEMU NIC, so it can be connected to a tap/bridge,
+@@ -96,11 +96,13 @@ enum {
+     PHY_GPY211,         /* MaxLinear GPY211C 2.5G */
+     PHY_I2P5GE,         /* MT7987 internal 2.5G PHY */
+     PHY_AN8855,         /* Airoha AN8855 internal gigabit PHY */
++    PHY_EN8811H,        /* Airoha EN8811H 2.5G */
+ };
+ 
+ /* eth model PHY type numbers (properties) -> PHY_* */
+ static const int phy_types[] = {
+     PHY_NONE, PHY_RTL8221B, PHY_MT7981, PHY_YT8821, PHY_GPY211, PHY_I2P5GE,
++    PHY_EN8811H,
+ };
+ 
+ static int phy_type(uint32_t n)
+@@ -114,6 +116,28 @@ static int phy_type(uint32_t n)
+ #define GPY_VSPEC1_MBOX_CMD 0x07    /* VEND1 mailbox command: [15] ready */
+ #define GPY_VSPEC1_TEMP_STA 0x0e    /* VEND1 temperature sensor */
+ 
++/*
++ * EN8811H: page 4 of the c22 registers is a window to the 32-bit "buckpbus"
++ * (MCU memory and SoC registers): mode, write address, write data, read
++ * address, read data (high / low halves).  Linux's air_en8811h writes the
++ * MCU firmware through it (address-increment mode, not kept here), then
++ * waits for the MCU (VEND1 0x8009 = 2).
++ */
++#define AIR_PAGE_BPBUS  4
++#define AIR_BP_MODE     0x10        /* [15] address increment */
++#define AIR_BP_WR_AH    0x11
++#define AIR_BP_WR_AL    0x12
++#define AIR_BP_WR_DH    0x13
++#define AIR_BP_WR_DL    0x14
++#define AIR_BP_RD_AH    0x15
++#define AIR_BP_RD_AL    0x16
++#define AIR_BP_RD_DH    0x17
++#define AIR_BP_RD_DL    0x18
++#define EN_FW_STATUS    0x8009      /* VEND1: 2 = MCU ready */
++#define EN_2P5G_LPA     0x3b30      /* pbus: [0] partner 2.5GBASE-T */
++#define EN_FW_VERSION   0x3b3c      /* pbus: MD32 firmware version */
++#define AIR_AUX_STATUS  0x1d        /* c22: [4:2] speed, 0xc = 2500 */
++
+ /* YT8821 extended registers (reg 0x1e = address, 0x1f = data) */
+ #define YT_EXT          (0x200 << 16)
+ #define YT_SPACE_SEL    0xa000      /* bit 1: fiber/SerDes space */
+@@ -129,6 +153,9 @@ typedef struct EthPhy {
+     bool link;
+     bool irq_pending;
+     bool in_reset;      /* hardware reset pin asserted: PHY is silent */
++    GHashTable *pbus;   /* EN8811H buckpbus words */
++    uint32_t bp_waddr, bp_raddr;
++    uint16_t bp_mode, bp_whi;
+     uint32_t cal_cycles; /* MT7531: analog calibration cycles started */
+ } EthPhy;
+ 
+@@ -274,6 +301,17 @@ static void phy_init(EthPhy *p, int type, bool link)
+         ht_set(p->mmd, (7 << 16) | 0x00, 0x3000);   /* AN enabled */
+         ht_set(p->mmd, (7 << 16) | 0x20, 0x0080);   /* adv 2.5G */
+         ht_set(p->mmd, (30 << 16) | 0x08, 0x1000);  /* SGMII AN enabled */
++    } else if (type == PHY_EN8811H) {
++        p->c22[MII_PHYID1] = 0x03a2;
++        p->c22[MII_PHYID2] = 0xa411;
++        ht_set(p->mmd, (7 << 16) | 0x00, 0x3000);   /* AN enabled */
++        ht_set(p->mmd, (7 << 16) | 0x20, 0x0080);   /* adv 2.5G */
++        if (!p->pbus) {
++            p->pbus = g_hash_table_new(g_direct_hash, g_direct_equal);
++        }
++        g_hash_table_remove_all(p->pbus);
++        p->bp_waddr = p->bp_raddr = 0;
++        p->bp_mode = p->bp_whi = 0;
+     } else if (type == PHY_RTL8221B) {
+         p->c22[MII_PHYID1] = 0x001c;
+         p->c22[MII_PHYID2] = 0xc849;
+@@ -354,8 +392,88 @@ static bool rtl_vend2_live(EthPhy *p, uint32_t addr, uint16_t *v)
+     return false;
+ }
+ 
++static uint16_t phy_c45_read(EthPhy *p, int dev, int reg);
++static void phy_c45_write(EthPhy *p, int dev, int reg, uint16_t val);
++
++static uint32_t en_pbus_read(EthPhy *p, uint32_t a)
++{
++    switch (a) {
++    case EN_FW_VERSION:
++        return 0x24011202;
++    case EN_2P5G_LPA:
++        return p->link;
++    }
++    return ht_get(p->pbus, a, 0);
++}
++
++/* EN8811H c22 registers of the buckpbus page (true: handled) */
++static bool en_bpbus(EthPhy *p, int reg, bool write, uint16_t *val)
++{
++    if (p->type != PHY_EN8811H || p->page != AIR_PAGE_BPBUS ||
++        reg < AIR_BP_MODE || reg > AIR_BP_RD_DL) {
++        return false;
++    }
++    if (!write) {
++        switch (reg) {
++        case AIR_BP_RD_DH:
++            *val = en_pbus_read(p, p->bp_raddr) >> 16;
++            break;
++        case AIR_BP_RD_DL:
++            *val = en_pbus_read(p, p->bp_raddr);
++            break;
++        case AIR_BP_MODE:
++            *val = p->bp_mode;
++            break;
++        default:
++            *val = 0;
++        }
++        return true;
++    }
++    switch (reg) {
++    case AIR_BP_MODE:
++        p->bp_mode = *val;
++        break;
++    case AIR_BP_WR_AH:
++        p->bp_waddr = (p->bp_waddr & 0xffff) | (uint32_t)*val << 16;
++        break;
++    case AIR_BP_WR_AL:
++        p->bp_waddr = (p->bp_waddr & 0xffff0000) | *val;
++        break;
++    case AIR_BP_WR_DH:
++        p->bp_whi = *val;
++        break;
++    case AIR_BP_WR_DL:
++        /* the firmware download (address increment) is not kept */
++        if (p->bp_mode & BIT(15)) {
++            p->bp_waddr += 4;
++        } else {
++            ht_set(p->pbus, p->bp_waddr, (uint32_t)p->bp_whi << 16 | *val);
++        }
++        break;
++    case AIR_BP_RD_AH:
++        p->bp_raddr = (p->bp_raddr & 0xffff) | (uint32_t)*val << 16;
++        break;
++    case AIR_BP_RD_AL:
++        p->bp_raddr = (p->bp_raddr & 0xffff0000) | *val;
++        break;
++    }
++    return true;
++}
++
+ static uint16_t phy_c22_read(EthPhy *p, int reg)
+ {
++    uint16_t bp;
++
++    if (en_bpbus(p, reg, false, &bp)) {
++        return bp;
++    }
++    if (p->type == PHY_EN8811H && !p->page && reg == AIR_AUX_STATUS) {
++        return p->link ? 0x000c : 0;    /* 2500M */
++    }
++    if (p->type == PHY_EN8811H && reg == MII_MDDAADR &&
++        (p->mmd_ctrl & 0xc000)) {
++        return phy_c45_read(p, p->mmd_ctrl & 0x1f, p->mmd_addr);
++    }
+     if (p->type == PHY_YT8821) {
+         switch (reg) {
+         case 0x11:      /* specific status: link, 2500M, full duplex */
+@@ -435,6 +553,14 @@ static uint16_t phy_c22_read(EthPhy *p, int reg)
+ 
+ static void phy_c22_write(EthPhy *p, int reg, uint16_t val)
+ {
++    if (en_bpbus(p, reg, true, &val)) {
++        return;
++    }
++    if (p->type == PHY_EN8811H && reg == MII_MDDAADR &&
++        (p->mmd_ctrl & 0xc000)) {
++        phy_c45_write(p, p->mmd_ctrl & 0x1f, p->mmd_addr, val);
++        return;
++    }
+     if (p->type == PHY_YT8821) {
+         if (reg == 0x1e) {
+             p->page = val;      /* extended register address */
+@@ -497,8 +623,11 @@ static uint16_t phy_c45_read(EthPhy *p, int dev, int reg)
+         }
+         return ht_get(p->mmd, (30 << 16) | reg, 0);
+     }
++    if (p->type == PHY_EN8811H && dev == 30 && reg == EN_FW_STATUS) {
++        return 0x02;                /* MCU ready */
++    }
+     if (p->type == PHY_RTL8221B || p->type == PHY_GPY211 ||
+-        p->type == PHY_I2P5GE) {
++        p->type == PHY_I2P5GE || p->type == PHY_EN8811H) {
+         switch (dev) {
+         case 1:     /* PMA/PMD */
+             switch (reg) {
+@@ -1075,6 +1204,26 @@ int mtk_eth_phy_led(DeviceState *dev, int addr, int idx, bool sw,
+             return 1 | 2 | 4;       /* force blink: blinks without traffic */
+         }
+         return on | ((on && (act & ~BIT(9) & 0x3ff)) ? 2 : 0);
++    case PHY_EN8811H:
++        /*
++         * air_en8811h: VEND2 0x24 + 2n LEDn_ON: [15] enable, [6] force on,
++         * link speeds [0] 1000 [1] 100 [2] 10 [8] 2500; 0x25 + 2n
++         * LEDn_BLINK: [9] force blink, other bits blink on traffic
++         */
++        if (idx > 2) {
++            return -1;
++        }
++        ctl = ht_get(p->mmd, (31 << 16) | (0x24 + 2 * idx), 0);
++        act = ht_get(p->mmd, (31 << 16) | (0x25 + 2 * idx), 0);
++        if (!(ctl & BIT(15))) {
++            return 0;
++        }
++        on = (ctl & BIT(6)) ||
++             (p->link && (ctl & (BIT(0) | BIT(1) | BIT(2) | BIT(8))));
++        if (act & BIT(9)) {
++            return 1 | 2 | 4;
++        }
++        return on | ((on && (act & ~BIT(9) & 0xfff)) ? 2 : 0);
+     default:
+         /* no LED registers modelled: lit while the link is up */
+         return p->link | (p->link ? 2 : 0);
+-- 
+2.47.3
+

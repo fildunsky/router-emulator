@@ -62,14 +62,15 @@ aarch64: пакет работает и с 32-битным userland (`uname -m` 
 
 | Параметр | Значения | Смысл |
 |---|---|---|
-| `gmac0` | `mt7531` · `an8855` · `mt7988-switch` · `rtl8221b` · `yt8821` · `gpy211` · `none` | что подключено к GMAC0 (mac@0, SGMII0); `an8855` — коммутатор Airoha AN8855 на MDIO 1 (CPU-порт 5, например Routerich BE7200); `mt7988-switch` — встроенный 4-портовый коммутатор MT7988 |
+| `gmac0` | `mt7531` · `an8855` · `mt7988-switch` · `rtl8221b` · `yt8821` · `gpy211` · `en8811h` · `none` | что подключено к GMAC0 (mac@0, SGMII0); `an8855` — коммутатор Airoha AN8855 на MDIO 1 (CPU-порт 5, например Routerich BE7200); `mt7988-switch` — встроенный 4-портовый коммутатор MT7988; `en8811h` — 2.5G PHY Airoha EN8811H (OpenWrt One) |
 | `ports` | например `wan:lan1:lan2:lan3:lan4` | id netdev портов 0..4 MT7531 и порта 5 при `port5=` (`-` — не используется) |
 | `port5`, `port5-phy-addr`, `port5-reset-gpio` | `rtl8221b` · `yt8821` · `gpy211` · `none`; адрес MDIO (5); GPIO | 2.5G PHY на порту 5 MT7531 (SGMII), например Netcore N60 Pro; его netdev — шестой элемент `ports` |
 | `gmac0-port`, `gmac1-port` | id netdev | порт PHY, подключённого прямо к GMAC |
-| `gmac1` | `rtl8221b` · `yt8821` · `gpy211` · `gphy` · `i2p5ge` · `none` | GMAC1 (mac@1); `gphy` — встроенный 1G PHY MT7981; `i2p5ge` — внутренний 2.5G PHY MT7987 / MT7988; `gpy211` — MaxLinear GPY211C |
+| `gmac1` | `rtl8221b` · `yt8821` · `gpy211` · `en8811h` · `gphy` · `i2p5ge` · `none` | GMAC1 (mac@1); `gphy` — встроенный 1G PHY MT7981; `i2p5ge` — внутренний 2.5G PHY MT7987 / MT7988; `gpy211` — MaxLinear GPY211C |
 | `gmac0-reset-gpio`, `gmac1-reset-gpio` | GPIO, `-1` (по умолчанию) | линия аппаратного сброса 2.5G PHY; по умолчанию не подключена (отсутствие линии безвредно, неверная могла бы держать PHY в сбросе) |
 | `gmac0-phy-addr`, `gmac1-phy-addr` | адрес MDIO | адрес этого PHY (по умолчанию 1 на gmac0, 6 на gmac1) |
 | `flash` | `nand` · `nor` · `emmc` | загрузочный флеш: SPI-NAND на SPI0 (по умолчанию), SPI-NOR на SPI2 (MT7986: SPI0) или eMMC (см. ниже) |
+| `nor-nand` | `on` | SPI-NOR **и** SPI-NAND (Teltonika RUTC50, OpenWrt One): в папке флеша файлы разделов NOR, в её подпапке `nand` — файлы NAND; `flash=nor` / `flash=nand` выбирает загрузочный флеш (см. [SPI-NOR + SPI-NAND](#spi-nor--spi-nand-teltonika-rutc50-openwrt-one)) |
 | `nand` | `128` · `256` · `512` | SPI-NAND W25N01GV / W25N02KV / W25N04KV |
 | `nand-spi` | `0` (по умолчанию) · `1` · `2` | контроллер SPI, на котором SPI-NAND (BPI-R4 Lite: 2) |
 | `switch-irq-gpio` | GPIO | EINT прерывания MT7531 (по умолчанию 38 / 66 / 41 для MT7981 / MT7986 / MT7987) |
@@ -96,8 +97,10 @@ PHY с адресом MDIO ADDR, как его запрограммировал�
 GPY211; например, лампа WAN у WR3000P в актуальном OpenWrt), `swphy:PORT:N`
 (вывод LED N у PHY порта PORT встроенного коммутатора MT7988, например лампы
 портов BPi-R4), `ws2812:BUS:N`
-(цепочка RGB WS2812B на шине SPI BUS, цвет `rgb`: Redmi AX6000) и `pwm:N`
-(канал PWM, pwm-leds: BPi-R4 Lite). QEMU опрашивает их каждые 50 мс;
+(цепочка RGB WS2812B на шине SPI BUS, цвет `rgb`: Redmi AX6000), `hc595:BUS:N`
+(выход N цепочки сдвиговых регистров 74HC595 на шине SPI BUS, драйвер Linux
+gpio-74x164: светодиоды мобильной сети, SIM и сигнала Teltonika RUTC50) и
+`pwm:N` (канал PWM, pwm-leds: BPi-R4 Lite, OpenWrt One). QEMU опрашивает их каждые 50 мс;
 `qom-get /machine led-state` выдаёт по каждой лампе (`;`) и цвету (`,`)
 `0`, `1`, `b` (мигает) или `#rrggbb` / `b#rrggbb`. Windows-лаунчер
 показывает их рядом лампочек над консолью; с `-g` (`gpio-log=on`) QEMU
@@ -121,7 +124,9 @@ device tree OpenWrt (`--write --all`).
 только для сборки пакета (`openwrt=` профиль OpenWrt, `openwrt-local=`
 своя сборка, `openwrt-stock=` дампы стокового загрузчика) и параметры
 машины. Их используют оба лаунчера; в Windows-лаунчере есть редактор
-(Ethernet, подписи портов коммутатора, тип/размер RAM, NAND, USB, GPIO
+(Ethernet, подписи портов коммутатора, тип/размер RAM, загрузочный флеш и
+второй флеш (SPI-NOR + SPI-NAND, `nor-nand`), USB, светодиоды (GPIO, PHY,
+WS2812B, 74HC595, PWM), GPIO
 кнопок с галкой «active high» — снята = active low, это умолчание и так
 у большинства роутеров; при сохранении из редактора комментарии `;`
 пропадают).
@@ -156,6 +161,8 @@ device tree OpenWrt (`--write --all`).
 | Asus ZenWiFi BT8 (MT7988D, Filogic 860) | 2.5G WAN внутренний PHY + 2×1G LAN встроенный коммутатор (lan3 на GMAC2 и Wi-Fi MT7996 не эмулируются) | DDR4 1 ГБ | 128 МБ, FIP и Factory в UBI | 3.0 | OpenWrt (ubootmod) |
 | TP-Link TL-7DR7230 v1 (MT7988D, Filogic 860) | 2.5G WAN внутренний PHY + 4×1G LAN встроенный коммутатор | DDR4 1 ГБ | 128 МБ, разметка TP-Link | – | OpenWrt **snapshot** (без LuCI) |
 | Bananapi BPi-R4 (MT7988A, Filogic 880) | WAN + 3×1G LAN встроенный коммутатор (SFP+ не эмулируются) | DDR4 2 ГБ (на плате 4 ГБ) | **eMMC** (разметка `bpi-r4`) | 3.0 | OpenWrt |
+| Teltonika RUTC50 | 1G WAN встроенный PHY + 4×1G LAN MT7531 (мобильный модем не эмулируется); светодиоды на **74HC595** | DDR3 256 МБ | **SPI-NOR 16 МБ (загрузка) + SPI-NAND 512 МБ** (rutos-a / rutos-b) | 3.0 | BL2 OpenWrt RFB + свой U-Boot ([`tools/uboot-rutc50`](tools/uboot-rutc50)) |
+| OpenWrt One | 2.5G WAN **Airoha EN8811H** + 1G LAN встроенный PHY | DDR4 1 ГБ | **SPI-NAND 256 МБ (загрузка) + SPI-NOR 16 МБ** (recovery) | 2.0 | OpenWrt |
 
 У плат Netis нет раздела bdinfo (FIP с 0x380000, ubi с 0x580000; MAC — в
 Factory): в пресетах стоит `openwrt-no-bdinfo=1`. У плат на MT7986 та же
@@ -270,6 +277,46 @@ recovery, production; FIT sysupgrade пишется в `production`). TP-Link
 TL-7DR7230 v1 есть только в снапшоте OpenWrt: в пресете
 `openwrt-version=snapshot` (в снапшот-образах нет LuCI, SSH работает).
 
+## SPI-NOR + SPI-NAND (Teltonika RUTC50, OpenWrt One)
+
+С `nor-nand=on` у платы оба флеша: SPI-NOR на SPI2 и SPI-NAND на SPI0
+(`nand-spi`). В папке флеша лежат файлы разделов NOR, в её подпапке `nand`
+— файлы NAND (те же имена `*mtdN*`, у каждого флеша свои); `flash=nor` или
+`flash=nand` задаёт, с какого флеша грузится BootROM, — это переключатель
+загрузки OpenWrt One.
+
+```
+nor-rutc50/mt7981.mtd0.BL2.bin … mt7981.mtd8.recovery.bin    SPI-NOR 16 МБ
+nor-rutc50/nand/mt7981.mtd0.rutos-a.bin, mt7981.mtd1.rutos-b.bin   SPI-NAND 512 МБ
+```
+
+- **Teltonika RUTC50** грузится с NOR (BL2, u-boot-env, factory, config с
+  MAC-адресами, FIP, bootconfig-a/b, event-log, recovery); система — UBI
+  (kernel, rootfs, rootfs_data) в разделе NAND `rutos-a`. Своего
+  загрузчика у OpenWrt для неё нет, а сборки U-Boot OpenWrt для SPI-NOR
+  MT7981 не умеют читать UBI (RFB) или грузят только NOR (OpenWrt One),
+  поэтому пресет использует BL2 OpenWrt MT7981 RFB для SPI-NOR и U-Boot,
+  собранный [`tools/uboot-rutc50/build.sh`](tools/uboot-rutc50/build.sh)
+  (исходники и патчи U-Boot OpenWrt, конфигурация RFB SPI-NOR с UBI,
+  разметка флеша RUTC50; готовый FIP лежит в той же папке). Его окружение
+  грузит `rutos-a` с `ubi.mtd=rutos-a`, как и загрузчик Teltonika, поэтому
+  скрипты sysupgrade и bootcount OpenWrt работают. Светодиоды мобильной
+  сети, SIM и сигнала висят на 74HC595 на SPI1 (`hc595:1:N`).
+- **OpenWrt One** — официальные `snand-factory.bin` (BL2 + UBI с FIP,
+  ubootenv, recovery, production) и `nor-factory.bin` (BL2 recovery,
+  Factory с EEPROM Wi-Fi, FIP и система recovery). Пресет грузится с NAND;
+  `-o flash=nor` — переключатель в положении NOR (U-Boot и система
+  recovery). 2.5G PHY порта WAN — Airoha EN8811H (`gmac0=en8811h`): Linux
+  загружает прошивку его MCU по MDIO, после чего линк поднимается на
+  2,5 Гбит/с.
+
+```bash
+tools/prepare-nand.sh --nor-nand rutc50 teltonika_rutc50 25.12.5
+./emulator.sh -P teltonika-rutc50
+tools/prepare-nand.sh --nor-nand openwrt-one openwrt_one 25.12.5
+./emulator.sh -P openwrt-one            # -o flash=nor: recovery с NOR
+```
+
 ## Что эмулируется
 
 Все модели устройств — в `hw/arm/filogic/` дерева QEMU
@@ -287,12 +334,12 @@ TL-7DR7230 v1 есть только в снапшоте OpenWrt: в пресет
 | SPI (IPM) | `mtk_spim.c` | FIFO + DMA, полудуплексный режим spi-mem (TF-A/U-Boot/Linux) |
 | SPI-NAND | `spinand.c` | W25N01GV (2048+64) / W25N02KV (2048+128) / W25N04KV (512 МБ, 2048+128, две плоскости), on-die ECC, ONFI parameter page, страница уникального ID; хранилище — папка с дампами разделов (см. ниже) или один raw-образ с OOB |
 | eMMC | `mtk_msdc.c` + eMMC из QEMU | контроллер MSDC: команды, авто CMD23/CMD12, PIO через FIFO (TF-A, U-Boot), DMA по дескрипторам GPD/BD (Linux); карта с boot0/boot1 и пользовательской областью; BootROM загружает образы `EMMC_BOOT` из boot0 |
-| SPI-NOR | `spinor.c` | 3-байтовая адресация (до 16 МБ), задаваемый JEDEC ID, чтение 1-1-1/1-1-2/1-1-4/1-2-2/1-4-4, запись страниц, стирание 4K/32K/64K/всего чипа, регистры статуса с QE; BootROM загружает с него образы `SF_BOOT`; хранилище — такая же папка |
+| SPI-NOR | `spinor.c` | 3-байтовая адресация (до 16 МБ), задаваемый JEDEC ID, чтение 1-1-1/1-1-2/1-1-4/1-2-2/1-4-4, запись страниц, стирание 4K/32K/64K/всего чипа, регистры статуса с QE; BootROM загружает с него образы `SF_BOOT`; хранилище — такая же папка; с `nor-nand=on` — вместе с SPI-NAND |
 | Ethernet | `mtk_eth.c` | frame engine: QDMA TX (Linux), PDMA RX, PDMA v2 (U-Boot); TSO и offload контрольных сумм; 2× LynxI SGMII PCS; любая комбинация коммутатора и PHY на двух GMAC |
 | Коммутатор | `mtk_eth.c` | MT7531: страничный доступ по MDIO, косвенный доступ к PHY, special tag MTK (DSA), FDB с обучением, port matrix, IRQ линка → EINT 38. Airoha AN8855: 32-битная шина регистров через страницу 4 MDIO, внутренние PHY на MDIO 1..5, регистры транслируются в модель MT7531 (CPU-порт 5). Встроенный коммутатор MT7988: модель MT7531 по MMIO 0x15020000, GbE PHY SoC (ID MT7988, калибровка из eFuse) |
-| PHY | `mtk_eth.c` | 5× GPHY MT7531; RTL8221B-VB-CG (C45, термодатчик); Motorcomm YT8821 (расширенные регистры, пространства UTP/SerDes, статус 2.5G); MaxLinear GPY211C (C45, версия прошивки, mailbox, термодатчик); встроенный GbE PHY MT7981 (с калибровкой); PHY на порту 5 MT7531; необязательные GPIO аппаратного сброса |
+| PHY | `mtk_eth.c` | 5× GPHY MT7531; RTL8221B-VB-CG (C45, термодатчик); Motorcomm YT8821 (расширенные регистры, пространства UTP/SerDes, статус 2.5G); MaxLinear GPY211C (C45, версия прошивки, mailbox, термодатчик); Airoha EN8811H (окно buckpbus на странице 4 MDIO, загрузка прошивки MCU, статус 2.5G, регистры LED); встроенный GbE PHY MT7981 (с калибровкой); PHY на порту 5 MT7531; необязательные GPIO аппаратного сброса |
 | GPIO / EINT | `mtk_pinctrl.c` | кнопки (reset/WPS, `reset-hold-ms` для нажатия на время), лог светодиодов, уровни выводов для других устройств |
-| Светодиоды | `filogic_leds.c`, `ws2812b.c` | светодиоды передней панели из пресета: GPIO, регистры LED у PHY (RTL8221B, GPY211, GbE / 2.5G PHY MediaTek, в том числе портов коммутатора), WS2812B на SPI, каналы PWM; распознавание мигания; `led-state` |
+| Светодиоды | `filogic_leds.c`, `ws2812b.c`, `hc595.c` | светодиоды передней панели из пресета: GPIO, регистры LED у PHY (RTL8221B, GPY211, EN8811H, GbE / 2.5G PHY MediaTek, в том числе портов коммутатора), WS2812B на SPI, сдвиговые регистры 74HC595 на SPI (защёлкиваются по CS), каналы PWM; распознавание мигания; `led-state` |
 | USB | xHCI из QEMU + IPPC MTK | разъём USB 2.0 / 3.0 |
 | Wi-Fi | `mtk_wmac.c` | кольца WFDMA + эмуляция командного интерфейса прошивок WM/WA: прошивка грузится, оба диапазона поднимаются, hostapd работает, в эфире ничего нет (сканирование пустое) |
 | PCIe (MT7987, MT7988) | `mtk_pcie.c` | хост MediaTek Gen3: линк, TLP конфигурации через CFGNUM, INTx, приём MSI; корневой порт из QEMU |
@@ -316,13 +363,14 @@ mtd1, … в полный образ, например `mt7981.mtd0.BL2.bin`,
 записывается обратно в эти файлы. Дампы с настоящего роутера
 (`cat /dev/mtdN > имя.mtdN.метка.bin`) подходят напрямую. При `flash=nor`
 папка — это содержимое SPI-NOR (например, BL2, u-boot-env, Factory,
-bdinfo, FIP, firmware). Если файлы меньше флеша (например, дамп 128 МБ
+bdinfo, FIP, firmware); с `nor-nand=on` файлы NAND лежат в её подпапке
+`nand`. Если файлы меньше флеша (например, дамп 128 МБ
 запущен с `nand=256`), при первом запуске последний файл дополняется
 стёртыми байтами (`0xff`) до размера флеша, чтобы то, что роутер туда
 запишет, сохранялось.
 
-- [`tools/prepare-nand.sh`](tools/prepare-nand.sh) `[--stock ПАПКА [--nor] | --local ПАПКА] [--flash-mb N] [--no-bdinfo] ПРОФИЛЬ [ВЕРСИЯ] [ПАПКА_NAND]` — собирает папку NAND для профиля устройства OpenWrt: скачивает официальные образы с U-Boot OpenWrt (`ПРОФИЛЬ-ubootmod-*` или `ПРОФИЛЬ-*`, с проверкой sha256), или берёт свои сборки (`--local`), или оставляет стоковые BL2/FIP (`--stock`) с OpenWrt `sysupgrade.bin` в стоковой разметке; `--no-bdinfo` — для плат без раздела bdinfo, `--nor` — для плат с SPI-NOR (стоковые BL2/FIP + OpenWrt `sysupgrade.bin` в разделе `firmware`), `--soc mt7986` — для плат на MT7986 (файлы разделов `mt7986.mtdN.*`, минимальный EEPROM Wi-Fi в пустом Factory), `--ubi-fip` — для BL2 «spim-nand-ubi» (BL2 с 0, UBI с 0x200000, FIP — том `fip`), `--ubi-factory РАЗМЕР` (Factory как UBI-том `factory`, Asus BT8), `--emmc [--emmc-layout L]` (образ eMMC, см. [MT7988](#mt7988-filogic-880--860)). Factory/bdinfo берутся из `factory/`.
-- [`tools/mknand.py`](tools/mknand.py) — создание и правка образов: `create` (BL2, FIP, Factory, bdinfo, UBI из `.itb` или `sysupgrade.bin`), `write --part fip`, `read`, `split`, `join`, `--flash-mb 256`, `--no-bdinfo`, `nor` (папка SPI-NOR).
+- [`tools/prepare-nand.sh`](tools/prepare-nand.sh) `[--stock ПАПКА [--nor] | --local ПАПКА] [--flash-mb N] [--no-bdinfo] ПРОФИЛЬ [ВЕРСИЯ] [ПАПКА_NAND]` — собирает папку NAND для профиля устройства OpenWrt: скачивает официальные образы с U-Boot OpenWrt (`ПРОФИЛЬ-ubootmod-*` или `ПРОФИЛЬ-*`, с проверкой sha256), или берёт свои сборки (`--local`), или оставляет стоковые BL2/FIP (`--stock`) с OpenWrt `sysupgrade.bin` в стоковой разметке; `--no-bdinfo` — для плат без раздела bdinfo, `--nor` — для плат с SPI-NOR (стоковые BL2/FIP + OpenWrt `sysupgrade.bin` в разделе `firmware`), `--soc mt7986` — для плат на MT7986 (файлы разделов `mt7986.mtdN.*`, минимальный EEPROM Wi-Fi в пустом Factory), `--ubi-fip` — для BL2 «spim-nand-ubi» (BL2 с 0, UBI с 0x200000, FIP — том `fip`), `--ubi-factory РАЗМЕР` (Factory как UBI-том `factory`, Asus BT8), `--emmc [--emmc-layout L]` (образ eMMC, см. [MT7988](#mt7988-filogic-880--860)), `--nor-nand rutc50|openwrt-one` (папка SPI-NOR + SPI-NAND, см. [выше](#spi-nor--spi-nand-teltonika-rutc50-openwrt-one)). Factory/bdinfo берутся из `factory/`.
+- [`tools/mknand.py`](tools/mknand.py) — создание и правка образов: `create` (BL2, FIP, Factory, bdinfo, UBI из `.itb` или `sysupgrade.bin`), `write --part fip`, `read`, `split`, `join`, `--flash-mb 256`, `--no-bdinfo`, `nor` (папка SPI-NOR: разметка `--parts`, образ всего чипа `--raw`, `--mac-part`, окружение U-Boot `--env`; с `--nand-parts`, `--nand-file`, `--nand-sysupgrade` — ещё и подпапка `nand`).
 - [`tools/kernel-dts.sh`](tools/kernel-dts.sh) — DTS MediaTek из ядра с DTS-частями патчей OpenWrt (`work/kdts`) для плат, чей DTS лежит в дереве ядра (BPi-R4); оттуда их читает [`tools/dts-leds.py`](tools/dts-leds.py).
 - [`tools/mkemmc.py`](tools/mkemmc.py) — образ eMMC (`flash=emmc`): BL2 в boot0, GPT с разделами u-boot-env, factory, fip, kernel, rootfs (разметка GL-MT6000, `--layout wh3000-pro` или `--layout bpi-r4` с `--fit` / `--recovery` — FIT в production / recovery), OpenWrt `squashfs-factory.bin` в kernel + rootfs или `--sysupgrade` (tar sysupgrade), `--boot-env` (окружение U-Boot OpenWrt, загружающее раздел `kernel`).
 
@@ -402,6 +450,8 @@ build-windows.sh          пакет для Windows (кросс)   → README.bu
 qemu-patches/             патчи поверх QEMU v10.1.0
 tools/                    prepare-nand.sh, mknand.py, host-bridge.sh,
                           gen_dramc_table.py (статусы DRAMC по умолчанию)
+tools/uboot-rutc50/       U-Boot пресета Teltonika RUTC50 (исходники,
+                          build.sh, собранный FIP)
 windows/                  лаунчер, редактор пресетов, терминал (C#),
                           README.txt для пакета
 languages/                тексты лаунчера (en.ini, ru.ini)
@@ -453,8 +503,10 @@ TR3000 (без коммутатора, один LAN на встроенном PH
 флеша без bdinfo) и платы на MT7986: Redmi AX6000 (DDR4, WAN на порту
 коммутатора), Netcore N60 (DDR3, RTL8221B), N60 Pro (GPY211 на GMAC1 и на
 порту 5 коммутатора), GL.iNet GL-MT6000 (eMMC), Huasifei WH3000 Pro eMMC
-(разметка eMMC производителя) и Bananapi BPi-R4 Lite на
-MT7987 (NAND на SPI2, FIP в UBI, внутренний 2.5G PHY). Папки флеша собираются только для этих тестов и в пакеты
+(разметка eMMC производителя), Bananapi BPi-R4 Lite на
+MT7987 (NAND на SPI2, FIP в UBI, внутренний 2.5G PHY), Teltonika RUTC50
+(загрузка с SPI-NOR + SPI-NAND, свой U-Boot) и OpenWrt One (загрузка с
+SPI-NAND рядом с SPI-NOR, EN8811H). Папки флеша собираются только для этих тестов и в пакеты
 не попадают. Чтобы выпустить релиз, измените [`VERSION`](VERSION) и отправьте
 в `main`: если тега `v<VERSION>` ещё нет, CI соберёт с PGO, проверит,
 создаст тег и релиз на GitHub с `...-linux-x86_64.tar.gz`,

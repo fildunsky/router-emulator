@@ -1,0 +1,5 @@
+bootdelay=0
+loadaddr=0x46000000
+bootargs=console=ttyS0,115200n8 ubi.mtd=rutos-a
+boot_rutos_a=ubi part rutos-a && ubi read $loadaddr kernel && bootm $loadaddr
+bootcmd=run boot_rutos_a

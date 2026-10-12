@@ -16,6 +16,7 @@ A preset LED line:  ledN=<name>: <colour> <source> [+ <colour> <source>...]
            phy:ADDR:N       LED pin N of the Ethernet PHY at MDIO address ADDR
            swphy:PORT:N     LED pin N of the switch's PHY of port PORT
            ws2812:BUS:N     LED N of a WS2812B chain on SPI bus BUS (colour "rgb")
+           hc595:BUS:N      output N of a 74HC595 (gpio-74x164) on SPI bus BUS
            pwm:N            PWM channel N (pwm-leds)
 Several colours of one lamp (a bi-colour status LED) are joined with "+":
 LEDs with the same function and different colours, and the LEDs the
@@ -43,6 +44,8 @@ NAMES = {
     "sfp": "SFP", "system": "Status", "run": "Status", "sys": "Status",
     "wifi": "Wi-Fi", "wifi2": "Wi-Fi 2.4G", "wifi5": "Wi-Fi 5G", "wifi2g": "Wi-Fi 2.4G",
     "wifi5g": "Wi-Fi 5G", "wlan2g": "Wi-Fi 2.4G", "wlan5g": "Wi-Fi 5G", "internet": "Internet", "alarm": "Alarm", "signal": "Signal", "mobile": "Mobile",
+    "wan-eth": "WAN Ethernet", "wan-wifi": "WAN Wi-Fi", "wan-sim1": "SIM 1",
+    "wan-sim2": "SIM 2", "3G": "3G", "4G": "4G", "5G": "5G", "rssi": "Signal",
 }
 
 
@@ -332,10 +335,14 @@ def find_leds(dts):
                     if not g or not enabled(c):
                         continue
                     ctl = g[0].lstrip("&")
-                    if ctl != "pio":
-                        skipped.append("%s (GPIO of %s)" % (c.name, ctl))
-                        continue
                     flags = num(g[2]) if len(g) > 2 else 0
+                    if ctl != "pio":
+                        src = shift_register(dts, ctl, num(g[1]), flags)
+                        if not src:
+                            skipped.append("%s (GPIO of %s)" % (c.name, ctl))
+                            continue
+                        leds.append(Led(c, function_of(c), color_of(c), src))
+                        continue
                     src = "gpio:%d%s" % (num(g[1]), ":low" if flags & 1 else "")
                     leds.append(Led(c, function_of(c), color_of(c), src))
             elif compat == "pwm-leds":
@@ -373,6 +380,18 @@ def find_leds(dts):
                     led.port = port
                     leds.append(led)
     return leds, skipped
+
+
+def shift_register(dts, label, pin, flags):
+    """hc595:BUS:N for a GPIO of a 74HC595 / 74HC164 (gpio-74x164) on a
+    SPI bus, None for other GPIO controllers or an active-low LED"""
+    n = dts.labels.get(label) or dts.orphans.get(label)
+    compat = (n.str("compatible") or "") if n is not None else ""
+    if not re.search(r'74hc595|74hc164|74lvc594', compat) or flags & 1 \
+            or n.parent is None:
+        return None
+    bus = re.search(r'spi(\d)', " ".join([n.parent.name] + n.parent.labels))
+    return "hc595:%s:%d" % (bus.group(1), pin) if bus else None
 
 
 def in_switch(n):
