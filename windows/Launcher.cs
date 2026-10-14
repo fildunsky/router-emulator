@@ -19,6 +19,7 @@ using System.IO;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
@@ -250,6 +251,9 @@ namespace RouterEmulator
             relang.Add(() => { if (board.Items.Count == 0) boardDesc.Text = NoPresetsText(); });
 
             FillNetworks();
+            // only on a choice of the user, not when the saved one is restored
+            wan.SelectionChangeCommitted += delegate { WarnBridgeAdmin(wan); };
+            lan.SelectionChangeCommitted += delegate { WarnBridgeAdmin(lan); };
             board.SelectedIndexChanged += delegate { OnBoardChanged(); };
             FillPresets(Get("preset"));
             if (Get("nand") != "") nand.Text = Get("nand");
@@ -396,6 +400,90 @@ namespace RouterEmulator
                 || File.Exists(Path.Combine(sys, "wpcap.dll"));
         }
 
+        static bool IsAdmin()
+        {
+            using (var id = WindowsIdentity.GetCurrent())
+                return new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator);
+        }
+
+        // wpcap.dll of Npcap (System32\Npcap; System32 in WinPcap mode)
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr LoadLibraryEx(string path, IntPtr file, uint flags);
+        [DllImport("wpcap.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        static extern IntPtr pcap_create(string source, StringBuilder errbuf);
+        [DllImport("wpcap.dll", CallingConvention = CallingConvention.Cdecl)]
+        static extern int pcap_activate(IntPtr p);
+        [DllImport("wpcap.dll", CallingConvention = CallingConvention.Cdecl)]
+        static extern IntPtr pcap_geterr(IntPtr p);
+        [DllImport("wpcap.dll", CallingConvention = CallingConvention.Cdecl)]
+        static extern void pcap_close(IntPtr p);
+
+        // Open the adapter like QEMU's -netdev pcap does: null when it
+        // works, else Npcap's error (e.g. Npcap installed with "Restrict
+        // Npcap driver's access to Administrators only": its registry
+        // value AdminOnly is not always there, so try it instead)
+        static string PcapOpenError(string device)
+        {
+            try {
+                string sys = Environment.GetFolderPath(Environment.SpecialFolder.System);
+                foreach (var dll in new[] { Path.Combine(sys, "Npcap", "wpcap.dll"), Path.Combine(sys, "wpcap.dll") })
+                    if (File.Exists(dll) && LoadLibraryEx(dll, IntPtr.Zero, 0x8) != IntPtr.Zero)  // LOAD_WITH_ALTERED_SEARCH_PATH
+                        break;
+                var err = new StringBuilder(512);
+                IntPtr p = pcap_create(device, err);
+                if (p == IntPtr.Zero) return err.ToString();
+                try {
+                    int r = pcap_activate(p);        // < 0: error, > 0: warning
+                    if (r >= 0) return null;
+                    string msg = Marshal.PtrToStringAnsi(pcap_geterr(p));
+                    return string.IsNullOrEmpty(msg) ? "pcap_activate: " + r : msg;
+                } finally {
+                    pcap_close(p);
+                }
+            } catch (Exception) {
+                return null;        // no usable wpcap.dll: let QEMU report it
+            }
+        }
+
+        // a bridged port (Npcap) that this non-elevated launcher cannot
+        // open: offer a restart as administrator.
+        // false: the launcher restarts as administrator (stop here)
+        bool CheckBridgeAdmin(params NetChoice[] ports)
+        {
+            if (IsAdmin()) return true;
+            foreach (var c in ports) {
+                if (c == null || c.Kind != "pcap") continue;
+                string err = PcapOpenError(c.Device);
+                if (err == null) continue;
+                var r = MessageBox.Show(this, L.F("warn.bridge_admin", "The emulator is not running as administrator "
+                    + "and Npcap could not open the network adapter:\n{0}\n\nAdministrator rights usually help "
+                    + "(e.g. Npcap installed with \"Restrict Npcap driver's access to Administrators only\").\n\n"
+                    + "Restart the emulator as administrator?", err.Trim()), Text,
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                return r != DialogResult.Yes || !RestartAsAdmin();
+            }
+            return true;
+        }
+
+        // the settings (with the bridged port) go to the new instance
+        bool RestartAsAdmin()
+        {
+            SaveCfg();
+            try {
+                Process.Start(new ProcessStartInfo(Application.ExecutablePath) {
+                    UseShellExecute = true, Verb = "runas", WorkingDirectory = root });
+            } catch (System.ComponentModel.Win32Exception) {
+                return false;       // UAC prompt declined
+            }
+            Close();
+            return true;
+        }
+
+        void WarnBridgeAdmin(ComboBox box)
+        {
+            CheckBridgeAdmin(box.SelectedItem as NetChoice);
+        }
+
         void FillNetworks()
         {
             var adapters = new List<NetChoice>();
@@ -480,6 +568,7 @@ namespace RouterEmulator
                     + "server will answer clients of that network. Continue?"), Text,
                     MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                 return;
+            if (!CheckBridgeAdmin(w, l.Device == w.Device ? null : l)) return;
             // QEMU cannot start when a port of the "This PC only" forwards is
             // taken (e.g. by another emulator): say which, before starting it
             if (l.Kind == "host") {
