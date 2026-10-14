@@ -399,7 +399,9 @@ network would expose the router's DHCP/RA there).
 
 Windows: `emulator.exe` — board preset (with editor: New / Edit / Save /
 Save as / Delete), NAND folder, WAN/LAN (NAT, "this PC only" port forwards
-to LuCI/SSH, or bridge to an adapter via Npcap), USB folder, log folder,
+to LuCI/SSH, or bridge to an adapter via Npcap; when Npcap does not let a
+non-administrator open the adapter, it offers to restart as administrator),
+USB folder, log folder,
 Reset/WPS buttons, "Power + Reset: 10 s" (TFTP recovery), power off on
 `poweroff`, built-in terminal (VT100, PuTTY-like 80×24 default with cell
 snapping, select = copy, right click = paste, Ctrl+Shift+R fits the router

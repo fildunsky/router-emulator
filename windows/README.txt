@@ -107,6 +107,10 @@ a VirtualBox bridged adapter. Use a wired adapter - Wi-Fi adapters usually
 cannot send frames with foreign MAC addresses.
 WARNING: bridging the LAN port to your network puts the router's DHCP server and
 IPv6 RA on that network.
+If Npcap does not let emulator.exe open the adapter (e.g. Npcap installed with
+"Restrict Npcap driver's access to Administrators only"), emulator.exe says so
+when you choose the adapter or power the router on, and offers to restart
+itself as administrator.
 
 Flash (NAND / NOR) folders
 --------------------------
