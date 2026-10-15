@@ -2,6 +2,12 @@
 
 [English](README.md) · **Русский** · Сборка: [Linux](README.build.linux.ru.md) · [Windows](README.build.windows.ru.md)
 
+**Скачать:** [Router Emulator на Google Диске](https://drive.google.com/drive/folders/173WnINcit9_lMt86FjfKkGMqnZrCZ-Am): пакеты последнего
+релиза и `Router-Emulator-<версия>-dumps.zip` — готовые папки флеша для
+всех пресетов, кроме Keenetic KN-1012 и Routerich AX3000 v1 (им нужны
+дампы собственного роутера, такие папки не собираются). Архив с дампами
+распакуйте поверх пакета.
+
 QEMU-машина `mt7981-router`, эмулирующая плату роутера на MT7981B на
 уровне железа. Железо платы (PHY/коммутатор Ethernet, флеш, тип и размер
 RAM, USB) настраивается, поэтому одна машина покрывает много устройств;

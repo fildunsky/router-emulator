@@ -2,6 +2,12 @@
 
 **English** · [Русский](README.ru.md) · Build: [Linux](README.build.linux.md) · [Windows](README.build.windows.md)
 
+**Download:** [Router Emulator on Google Drive](https://drive.google.com/drive/folders/173WnINcit9_lMt86FjfKkGMqnZrCZ-Am): the packages of the
+latest release and `Router-Emulator-<version>-dumps.zip`, ready flash
+folders for all presets except Keenetic KN-1012 and Routerich AX3000 v1
+(they need dumps of your own router, which are not built). Unpack the
+dumps archive over a package.
+
 A QEMU machine, `mt7981-router`, that emulates an MT7981B router board at
 the hardware level. The board hardware (Ethernet PHYs/switch, flash, RAM
 type and size, USB) is configurable, so one machine covers many devices;
