@@ -61,7 +61,8 @@ namespace RouterEmulator
         // machine options of the MT7621 machine (the editor writes the
         // Filogic ones, e.g. gmac0/nand, for every preset)
         static readonly string[] Mt7621Keys = { "ports", "ddr", "usb-port", "reset-gpio", "wps-gpio",
-            "reset-active-high", "wps-active-high", "pcie0", "pcie1", "pcie2" };   // + led1..ledN
+            "reset-active-high", "wps-active-high", "pcie0", "pcie1", "pcie2", "flash", "nand-id",
+            "dcache" };   // + led1..ledN
 
         // LAN1 "This PC only": router LAN address and port forwards
         // "pcport:routerport,..." from 127.0.0.1 to the router
@@ -208,6 +209,9 @@ namespace RouterEmulator
 
         TextBox name, desc, nandDir;
         ComboBox soc, gmac0, gmac1, gmac0Port, gmac1Port, port5, port5Port, nandSize, flash2, ddr, ram, usbPort, pcieWifi;
+        // MT7621 boards: Wi-Fi cards in the three PCIe slots, data cache model
+        ComboBox[] pcieSlot = new ComboBox[3];
+        CheckBox dcache;
         ComboBox[] swPort = new ComboBox[5];
         NumericUpDown gmac0Rst, gmac1Rst, port5Rst, port5Addr, resetGpio, wpsGpio;
         CheckBox resetHigh, wpsHigh;
@@ -223,7 +227,8 @@ namespace RouterEmulator
             "gmac1-port", "gmac1-reset-gpio", "nand", "ddr", "ram", "usb-port", "reset-gpio",
             "wps-gpio", "reset-active-high", "wps-active-high", "lan-ip", "lan-forwards", "nand-dir",
             "flash", "nor", "nor-id", "poweroff", "efuse", "efuse-uid", "nand-uid", "soc", "port5",
-            "port5-phy-addr", "port5-reset-gpio", "pcie-wifi", "nor-nand" };
+            "port5-phy-addr", "port5-reset-gpio", "pcie-wifi", "nor-nand", "nand-id", "pcie0", "pcie1",
+            "pcie2", "dcache" };
 
         public PresetForm(string presetDir, string root, Preset p)
         {
@@ -257,6 +262,7 @@ namespace RouterEmulator
                 new Choice("mt7531", L.T("ed.mt7531", "MT7531 switch (5 x 1G ports)")),
                 new Choice("an8855", L.T("ed.an8855", "Airoha AN8855 switch (5 x 1G ports)")),
                 new Choice("mt7988-switch", L.T("ed.mt7988sw", "MT7988 built-in switch (4 x 1G ports)")),
+                new Choice("mt7530", L.T("ed.mt7530", "MT7621 built-in MT7530 switch (5 x 1G ports)")),
                 new Choice("rtl8221b", L.T("ed.rtl8221b", "RTL8221B 2.5G PHY (Realtek)")),
                 new Choice("yt8821", L.T("ed.yt8821", "YT8821 2.5G PHY (Motorcomm)")),
                 new Choice("gpy211", L.T("ed.gpy211", "GPY211 2.5G PHY (MaxLinear)")),
@@ -318,7 +324,10 @@ namespace RouterEmulator
                 new Choice("nor:16:204018", "SPI-NOR 16 " + mb + " (XMC XM25QH128C)"),
                 new Choice("nor:16:c84018", "SPI-NOR 16 " + mb + " (GigaDevice GD25Q128)"),
                 new Choice("nor:64:ef4020", "SPI-NOR 64 " + mb + " (Winbond W25Q512JV)"),
-                new Choice("emmc:0", L.T("ed.emmc", "eMMC (image *.img in the flash folder)")));
+                new Choice("emmc:0", L.T("ed.emmc", "eMMC (image *.img in the flash folder)")),
+                // value "pnand:<MB>:<READ ID>": MT7621 NFI parallel NAND
+                new Choice("pnand:128:c2f18095", L.F("ed.pnand", "Parallel NAND {0} (MT7621, {1})", "128 " + mb, "Macronix MX30LF1G18AC")),
+                new Choice("pnand:128:ecf1009540", L.F("ed.pnand", "Parallel NAND {0} (MT7621, {1})", "128 " + mb, "Samsung K9F1G08U0D")));
             // a SPI-NAND next to a SPI-NOR boot flash or the other way round
             // (nor-nand=on, e.g. Teltonika RUTC50, OpenWrt One)
             flash2 = Combo(mem, L.T("ed.flash2", "Second flash:"), ref gy,
@@ -373,6 +382,24 @@ namespace RouterEmulator
                 new Choice("stop", L.T("ed.poweroff_stop", "Turn the emulator off")),
                 new Choice("reboot", L.T("ed.poweroff_reboot", "Reboot (like a real board)")));
             poweroff.Left = 140;
+            // MT7621 boards: PCIe Wi-Fi cards and the data cache model
+            var mips = Page(tabs, "MT7621");
+            int my = 22;
+            for (int i = 0; i < 3; i++)
+                pcieSlot[i] = Combo(mips, L.F("ed.pcie_slot", "PCIe slot {0}:", i), ref my,
+                    new Choice("none", L.T("ed.none", "None")),
+                    new Choice("mt7603e", "MediaTek MT7603E (2.4 GHz)"),
+                    new Choice("mt7612e", "MediaTek MT7612E (5 GHz)"));
+            mips.Controls.Add(new Label { Left = 140, Top = my - 6, Width = 460, Height = 32, ForeColor = Color.DimGray,
+                Text = L.T("ed.pcie_slot_hint", "Radio silent: the driver, firmware and hostapd run, nothing is on the air. "
+                     + "The card's EEPROM comes from the factory partition (or its eFuse).") });
+            my += 34;
+            dcache = new CheckBox { Left = 140, Top = my, Width = 460,
+                Text = L.T("ed.dcache", "Model the CPU data cache for uncached stores") };
+            mips.Controls.Add(dcache);
+            mips.Controls.Add(new Label { Left = 158, Top = my + 24, Width = 440, Height = 48, ForeColor = Color.DimGray,
+                Text = L.T("ed.dcache_hint", "Needed by bootloaders that rely on the write-back cache (Breed); "
+                     + "only active until the operating system starts, so it costs no speed there.") });
             // chip identity: eFuse dump / per-chip block, SPI-NAND unique ID
             var idg = Page(tabs, L.T("ed.tab_identity", "Chip identity"));
             idg.Controls.Add(new Label { Left = 10, Top = 3, Width = 590, Height = 16, ForeColor = Color.DimGray,
@@ -476,8 +503,10 @@ namespace RouterEmulator
             nandSize.SelectedIndexChanged += delegate { UpdateEnabled(); };
             flash2.SelectedIndexChanged += delegate { UpdateDesc(); };
             autoDesc.CheckedChanged += delegate { desc.ReadOnly = autoDesc.Checked; UpdateDesc(); };
-            foreach (Control c in new Control[] { soc, gmac0, gmac1, gmac0Port, gmac1Port, port5, port5Port, ddr, ram, nandSize, flash2, usbPort, pcieWifi })
+            foreach (Control c in new Control[] { soc, gmac0, gmac1, gmac0Port, gmac1Port, port5, port5Port, ddr, ram, nandSize, flash2, usbPort, pcieWifi,
+                                                   pcieSlot[0], pcieSlot[1], pcieSlot[2] })
                 c.TextChanged += delegate { UpdateDesc(); };
+            soc.SelectedIndexChanged += delegate { SocChanged(); };
             foreach (var c in swPort) c.TextChanged += delegate { UpdateDesc(); };
 
             Fill(p ?? Default());
@@ -582,7 +611,7 @@ namespace RouterEmulator
             name.Text = p.Name;
             desc.Text = p.Description;
             SelectValue(soc, p.Soc);
-            SelectValue(gmac0, p.Get("gmac0", "mt7531"));
+            SelectValue(gmac0, p.Soc == "mt7621" ? "mt7530" : p.Get("gmac0", "mt7531"));
             SelectValue(gmac1, p.Get("gmac1", "rtl8221b"));
             string[] ports = p.Get("ports", "lan1:lan2:lan3:lan4").Split(':');
             for (int i = 0; i < 5; i++) swPort[i].Text = i < ports.Length ? ports[i] : "-";
@@ -596,9 +625,12 @@ namespace RouterEmulator
             gmac1Rst.Value = Clamp(gmac1Rst, Int(p.Get("gmac1-reset-gpio"), -1));
             SelectValue(ddr, p.Get("ddr", "ddr4"));
             SelectValue(ram, p.Get("ram", "512"));
-            SelectValue(nandSize, p.Get("flash", "nand") == "nor"
+            // the boot flash; MT7621 machines default to SPI-NOR
+            string bootFlash = p.Get("flash", p.Soc == "mt7621" ? "nor" : "nand");
+            SelectValue(nandSize, bootFlash == "nor"
                 ? "nor:" + p.Get("nor", "16") + ":" + p.Get("nor-id", "ef4018").ToLowerInvariant()
-                : p.Get("flash", "nand") == "emmc" ? "emmc:0"
+                : bootFlash == "emmc" ? "emmc:0"
+                : p.Soc == "mt7621" ? "pnand:128:" + p.Get("nand-id", "ecf1009540").ToLowerInvariant()
                 : "nand:" + p.Get("nand", "128"));
             // the second flash: the type the boot flash is not
             SelectValue(flash2, !IsOn(p.Get("nor-nand")) ? "none"
@@ -606,8 +638,10 @@ namespace RouterEmulator
                 : "nor:" + p.Get("nor", "16") + ":" + p.Get("nor-id", "ef4018").ToLowerInvariant());
             SelectValue(usbPort, p.Get("usb-port", "2"));
             SelectValue(pcieWifi, p.Get("pcie-wifi", "none"));
+            for (int i = 0; i < 3; i++) SelectValue(pcieSlot[i], p.Get("pcie" + i, "none"));
+            dcache.Checked = IsOn(p.Get("dcache", "on"));
             resetGpio.Value = Clamp(resetGpio, Int(p.Get("reset-gpio"), 1));
-            wpsGpio.Value = Clamp(wpsGpio, Int(p.Get("wps-gpio"), 0));
+            wpsGpio.Value = Clamp(wpsGpio, Int(p.Get("wps-gpio"), 0));   // MT7621: 0 = none
             resetHigh.Checked = IsOn(p.Get("reset-active-high"));
             wpsHigh.Checked = IsOn(p.Get("wps-active-high"));
             nandDir.Text = p.Get("nand-dir", "nand");
@@ -634,15 +668,40 @@ namespace RouterEmulator
             gmac1Rst.Enabled = ExtPhy(Val(gmac1));
             pcieWifi.Enabled = HasPcie(Val(soc));         // MT7987 / MT7988 machines have the slot
             flash2.Enabled = !Val(nandSize).StartsWith("emmc");
+            // MT7621: the MT7530 on GMAC0 only, one boot flash, PCIe slots
+            bool m = Val(soc) == "mt7621";
+            if (m) {
+                gmac0.Enabled = gmac1.Enabled = port5.Enabled = flash2.Enabled = false;
+                port5Port.Enabled = port5Addr.Enabled = port5Rst.Enabled = false;
+                gmac0Port.Enabled = gmac0Rst.Enabled = gmac1Port.Enabled = gmac1Rst.Enabled = false;
+            } else {
+                gmac0.Enabled = gmac1.Enabled = true;
+            }
+            foreach (var c in pcieSlot) c.Enabled = m;
+            dcache.Enabled = m;
             UpdateDesc();
         }
 
+        // another SoC: choices that only exist on one side are replaced
+        void SocChanged()
+        {
+            if (gmac0.SelectedItem == null || nandSize.SelectedItem == null) return;
+            bool m = Val(soc) == "mt7621";
+            if (m && Val(gmac0) != "mt7530") SelectValue(gmac0, "mt7530");
+            if (!m && Val(gmac0) == "mt7530") SelectValue(gmac0, "mt7531");
+            string f = Val(nandSize);
+            if (m && (f.StartsWith("nand") || f.StartsWith("emmc"))) SelectValue(nandSize, "nor:16:ef4018");
+            if (!m && f.StartsWith("pnand")) SelectValue(nandSize, "nand:128");
+            UpdateEnabled();
+        }
+
         // a switch on GMAC0
-        static bool IsSwitch(string v) { return v == "mt7531" || v == "an8855" || v == "mt7988-switch"; }
+        static bool IsSwitch(string v) { return v == "mt7531" || v == "an8855" || v == "mt7988-switch" || v == "mt7530"; }
 
         static string SwitchName(string v)
         {
-            return v == "an8855" ? "AN8855" : v == "mt7988-switch" ? "built-in switch" : "MT7531";
+            return v == "an8855" ? "AN8855" : v == "mt7988-switch" ? "built-in switch"
+                 : v == "mt7530" ? "MT7530" : "MT7531";
         }
 
         // SoCs with a PCIe slot / the internal 2.5G PHY
@@ -665,7 +724,8 @@ namespace RouterEmulator
         string Summary()
         {
             var parts = new List<string>();
-            if (Val(soc) != "mt7981") parts.Add(Val(soc).ToUpperInvariant());
+            bool m = Val(soc) == "mt7621";
+            if (Val(soc) != "mt7981") parts.Add(m ? "MT7621A" : Val(soc).ToUpperInvariant());
             int swn = 0; bool swWan = false;
             if (IsSwitch(Val(gmac0))) {
                 foreach (var c in swPort) {
@@ -674,11 +734,11 @@ namespace RouterEmulator
                     if (t == "wan") swWan = true; else swn++;
                 }
             }
-            if (ExtPhy(Val(gmac0))) parts.Add("2.5G " + gmac0Port.Text.Trim().ToUpperInvariant() + " " + PhyName(Val(gmac0)) + " on GMAC0");
-            if (Phy25(Val(gmac1))) parts.Add("2.5G " + gmac1Port.Text.Trim().ToUpperInvariant() + " " + PhyName(Val(gmac1)));
+            if (!m && ExtPhy(Val(gmac0))) parts.Add("2.5G " + gmac0Port.Text.Trim().ToUpperInvariant() + " " + PhyName(Val(gmac0)) + " on GMAC0");
+            if (!m && Phy25(Val(gmac1))) parts.Add("2.5G " + gmac1Port.Text.Trim().ToUpperInvariant() + " " + PhyName(Val(gmac1)));
             if (Val(gmac0) == "mt7531" && ExtPhy(Val(port5)))
                 parts.Add("2.5G " + port5Port.Text.Trim().ToUpperInvariant() + " " + PhyName(Val(port5)) + " on switch port 5");
-            if (Val(gmac1) == "gphy") parts.Add("1G " + gmac1Port.Text.Trim().ToUpperInvariant() + " built-in PHY");
+            if (!m && Val(gmac1) == "gphy") parts.Add("1G " + gmac1Port.Text.Trim().ToUpperInvariant() + " built-in PHY");
             if (IsSwitch(Val(gmac0))) {
                 string sn = SwitchName(Val(gmac0));
                 if (swWan) parts.Add((swn + 1) + "x1G " + sn + " (WAN = port " + WanPort() + ")");
@@ -689,10 +749,18 @@ namespace RouterEmulator
             var fl = Val(nandSize).Split(':');
             var f2 = Val(flash2).Split(':');
             parts.Add(fl[0] == "emmc" ? "eMMC" : (fl[0] == "nor" ? "SPI-NOR " : f2[0] == "nor" ? "SPI-NAND " : "NAND ")
-                + fl[1] + " MB" + (fl[0] != "emmc" && f2[0] != "none" && f2[0] != fl[0]
+                + fl[1] + " MB" + (fl[0] != "emmc" && fl[0] != "pnand" && f2[0] != "none" && f2[0] != fl[0]
                 ? " + " + (f2[0] == "nor" ? "SPI-NOR " : "SPI-NAND ") + f2[1] + " MB" : ""));
             parts.Add(Val(usbPort) == "none" ? "no USB" : "USB " + Val(usbPort) + ".0");
             if (HasPcie(Val(soc)) && Val(pcieWifi) == "mt7992") parts.Add("Wi-Fi 7 MT7992 on PCIe");
+            if (Val(soc) == "mt7621") {
+                var cards = new List<string>();
+                foreach (var c in pcieSlot) {
+                    if (Val(c) == "mt7603e") cards.Add("MT7603E 2.4 GHz");
+                    if (Val(c) == "mt7612e") cards.Add("MT7612E 5 GHz");
+                }
+                if (cards.Count > 0) parts.Add("Wi-Fi " + string.Join(" + ", cards.ToArray()) + " on PCIe (radio silent)");
+            }
             return string.Join(", ", parts.ToArray());
         }
 
@@ -724,7 +792,8 @@ namespace RouterEmulator
             p.Set("name", name.Text.Trim());
             p.Set("description", desc.Text.Trim());
             if (Val(soc) != "mt7981") p.Set("soc", Val(soc));
-            p.Set("gmac0", Val(gmac0));
+            bool m = Val(soc) == "mt7621";
+            if (!m) p.Set("gmac0", Val(gmac0));
             if (IsSwitch(Val(gmac0))) {
                 var ports = new List<string>();
                 foreach (var c in swPort) ports.Add(c.Text.Trim().Length > 0 ? c.Text.Trim() : "-");
@@ -741,8 +810,8 @@ namespace RouterEmulator
                 p.Set("gmac0-port", gmac0Port.Text.Trim());
                 if (gmac0Rst.Value >= 0) p.Set("gmac0-reset-gpio", gmac0Rst.Value.ToString());
             }
-            p.Set("gmac1", Val(gmac1));
-            if (Val(gmac1) != "none") {
+            if (!m) p.Set("gmac1", Val(gmac1));
+            if (!m && Val(gmac1) != "none") {
                 p.Set("gmac1-port", gmac1Port.Text.Trim());
                 if (ExtPhy(Val(gmac1)) && gmac1Rst.Value >= 0)
                     p.Set("gmac1-reset-gpio", gmac1Rst.Value.ToString());
@@ -750,15 +819,21 @@ namespace RouterEmulator
             var flash = Val(nandSize).Split(':');
             if (flash[0] == "nor") {
                 p.Set("flash", "nor");
-                p.Set("nor", flash[1]);
-                p.Set("nor-id", flash[2]);
+                if (!m) {       // the MT7621 machine has one SPI-NOR model
+                    p.Set("nor", flash[1]);
+                    p.Set("nor-id", flash[2]);
+                }
             } else if (flash[0] == "emmc") {
                 p.Set("flash", "emmc");
+            } else if (flash[0] == "pnand") {
+                p.Set("flash", "nand");
+                p.Set("nand-id", flash[2]);
             } else {
                 p.Set("nand", flash[1]);
+                if (Val(soc) == "mt7621") p.Set("flash", "nand");   // not the default there
             }
             var second = Val(flash2).Split(':');
-            if (flash[0] != "emmc" && second[0] != "none" && second[0] != flash[0]) {
+            if (!m && flash[0] != "emmc" && second[0] != "none" && second[0] != flash[0]) {
                 p.Set("nor-nand", "on");
                 if (second[0] == "nor") {
                     p.Set("nor", second[1]);
@@ -772,15 +847,22 @@ namespace RouterEmulator
             p.Set("usb-port", Val(usbPort));
             if (HasPcie(Val(soc)) && Val(pcieWifi) != "none") p.Set("pcie-wifi", Val(pcieWifi));
             p.Set("reset-gpio", resetGpio.Value.ToString());
-            p.Set("wps-gpio", wpsGpio.Value.ToString());
+            if (!m || wpsGpio.Value > 0) p.Set("wps-gpio", wpsGpio.Value.ToString());
+            if (m) {
+                for (int i = 0; i < 3; i++)
+                    if (Val(pcieSlot[i]) != "none") p.Set("pcie" + i, Val(pcieSlot[i]));
+                if (!dcache.Checked) p.Set("dcache", "off");
+            }
             if (resetHigh.Checked) p.Set("reset-active-high", "on");
             if (wpsHigh.Checked) p.Set("wps-active-high", "on");
             p.Set("lan-ip", lanIp.Text.Trim());
             p.Set("lan-forwards", lanFwd.Text.Trim().Replace(" ", ""));
-            p.Set("poweroff", Val(poweroff));
-            if (efuseFile.Text.Trim().Length > 0) p.Set("efuse", efuseFile.Text.Trim());
-            if (efuseUid.Text.Trim().Length > 0) p.Set("efuse-uid", efuseUid.Text.Trim().ToLowerInvariant());
-            if (nandUid.Text.Trim().Length > 0) p.Set("nand-uid", nandUid.Text.Trim().ToLowerInvariant());
+            if (!m) {           // Filogic machines only
+                p.Set("poweroff", Val(poweroff));
+                if (efuseFile.Text.Trim().Length > 0) p.Set("efuse", efuseFile.Text.Trim());
+                if (efuseUid.Text.Trim().Length > 0) p.Set("efuse-uid", efuseUid.Text.Trim().ToLowerInvariant());
+                if (nandUid.Text.Trim().Length > 0) p.Set("nand-uid", nandUid.Text.Trim().ToLowerInvariant());
+            }
             p.Set("nand-dir", nandDir.Text.Trim());
             // keep keys this editor does not know (openwrt=..., new options)
             if (preset != null) {
@@ -817,6 +899,12 @@ namespace RouterEmulator
                 err = L.T("ed.no_gphy", "Only the MT7981 has a built-in 1G PHY: choose another GMAC1 PHY.");
             if (err == null && !HasPcie(p.Soc) && (p.Get("gmac0") == "i2p5ge" || p.Get("gmac1") == "i2p5ge"))
                 err = L.T("ed.no_i2p5ge", "Only the MT7987 and MT7988 have an internal 2.5G PHY.");
+            if (err == null && p.Soc == "mt7621" && (Val(nandSize).StartsWith("nand") || Val(nandSize).StartsWith("emmc")))
+                err = L.T("ed.mt7621_flash", "The MT7621 boots from a SPI-NOR or a parallel NAND.");
+            if (err == null && p.Soc != "mt7621" && Val(gmac0) == "mt7530")
+                err = L.T("ed.mt7530_only", "The MT7530 switch is the MT7621's: choose another GMAC0 device.");
+            if (err == null && p.Soc != "mt7621" && Val(nandSize).StartsWith("pnand"))
+                err = L.T("ed.pnand_mt7621", "A parallel NAND is only on the MT7621 (Filogic SoCs use SPI-NAND).");
             if (err == null && p.Soc != "mt7988" && p.Get("gmac0") == "mt7988-switch")
                 err = L.T("ed.no_mt7988sw", "Only the MT7988 has the built-in switch.");
             if (err == null && Val(flash2) != "none" && !Val(nandSize).StartsWith("emmc") &&

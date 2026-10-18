@@ -2,11 +2,13 @@
 
 **English** · [Русский](README.ru.md) · Build: [Linux](README.build.linux.md) · [Windows](README.build.windows.md)
 
-**Download:** [Router Emulator on Google Drive](https://drive.google.com/drive/folders/173WnINcit9_lMt86FjfKkGMqnZrCZ-Am): the packages of the
-latest release and `Router-Emulator-<version>-dumps.zip`, ready flash
-folders for all presets except Keenetic KN-1012 and Routerich AX3000 v1
-(they need dumps of your own router, which are not built). Unpack the
-dumps archive over a package.
+**Download:** [Router Emulator on Google Drive](https://drive.google.com/drive/folders/173WnINcit9_lMt86FjfKkGMqnZrCZ-Am)
+or [on Yandex Disk](https://yadi.sk/d/Re-w1Nm1DBFhOw): the packages of the
+latest release and ready flash folders, one archive per folder
+(`Router-Emulator-<folder>.zip`, e.g. `Router-Emulator-nand-wr3000p.zip`),
+for all presets except Keenetic KN-1012 and Routerich AX3000 v1 (they need
+dumps of your own router, which are not built). Take the folders of the
+boards you need and unpack them over a package.
 
 A QEMU machine, `mt7981-router`, that emulates an MT7981B router board at
 the hardware level. The board hardware (Ethernet PHYs/switch, flash, RAM
@@ -168,6 +170,8 @@ routers use; saving from the editor drops `;` comments).
 | Teltonika RUTC50 | 1G WAN built-in PHY + 4×1G LAN MT7531 (the mobile modem is not emulated); LEDs on a **74HC595** | DDR3 256 MB | **SPI-NOR 16 MB boot + SPI-NAND 512 MB** (rutos-a / rutos-b) | 3.0 | OpenWrt RFB BL2 + own U-Boot ([`tools/uboot-rutc50`](tools/uboot-rutc50)) |
 | OpenWrt One | 2.5G WAN **Airoha EN8811H** + 1G LAN built-in PHY | DDR4 1 GB | **SPI-NAND 256 MB boot + SPI-NOR 16 MB** recovery | 2.0 | OpenWrt |
 | Zbtlink ZBT-WG3526 (16M) (**MT7621A**, MIPS) | 5×1G MT7530 (WAN = port 4); Wi-Fi MT7603E + MT7612E on PCIe (radio silent) | DDR3 512 MB (448 MB usable) | **SPI-NOR 16 MB** | 3.0 | OpenWrt |
+| Xiaomi Mi Router 3G (stock U-Boot) (**MT7621A**, MIPS) | 1G WAN + 2×1G LAN MT7530; Wi-Fi MT7603E + MT7612E on PCIe (radio silent) | DDR3 256 MB | **parallel NAND 128 MB** (Xiaomi layout) | 3.0 | stock Xiaomi U-Boot 1.1.3 + OpenWrt |
+| Xiaomi Mi Router 3G (Breed) (**MT7621A**, MIPS) | as above | DDR3 256 MB | **parallel NAND 128 MB** (Xiaomi layout) | 3.0 | Breed 1.2 + OpenWrt |
 
 Netis boards have no bdinfo partition (FIP at 0x380000, ubi at 0x580000;
 MACs in Factory): presets set `openwrt-no-bdinfo=1`. The MT7986 boards use
@@ -332,7 +336,8 @@ MediaTek MT7621A boards run on a second QEMU binary,
 boot chain is the real one: the CPU starts in the SPI-NOR mapped at
 `0x1fc00000`; U-Boot's TPL locks the L2 cache and loads the SPL into it,
 the SPL runs MediaTek's DDR init blob in the Frame Engine SRAM, then U-Boot
-and OpenWrt. Emulated: MIPS 1004Kc (one core for now: chip ID MT7621S),
+and OpenWrt; NAND boards boot through the NAND BootROM (stage1 with the DDR
+init into the locked L2, then the bootloader). Emulated: MIPS 1004Kc (one core for now: chip ID MT7621S),
 CM/GIC/CPC, DRAM 128/256/512 MB (above 448 MB at `0x20000000`, as on the
 SoC), SPI controller + SPI-NOR, UART, Frame Engine (QDMA/PDMA, NETSYS v1)
 with the MT7530 switch (MCM), xHCI (USB 3.0 + 2.0), GPIO with buttons and
@@ -340,11 +345,14 @@ LEDs, the PCIe host (three root ports, `pcie0..2=CARD`) with "radio
 silent" Wi-Fi cards for the unmodified mt76 drivers: `mt7603e` (MT7603E,
 2.4 GHz) and `mt7612e` (MT7612E, 5 GHz) load their firmware, hostapd
 runs, nothing goes on the air; a card without an EEPROM in flash gets a
-minimal one from its eFuse with the MAC 80:af:ca:11:22:35 + slot. The
-parallel NAND (NFI + ECC, `flash=nand`) and the NAND BootROM are there
-too, but no NAND board boots yet (the Xiaomi Mi Router 3G's stock
-bootloader fails its DDR calibration on the model). Not yet: SD card, the
-second core.
+minimal one from its eFuse with the MAC 80:af:ca:11:22:35 + slot; the
+parallel NAND (NFI + ECC, PIO, `flash=nand`, `nand-id=`); the DRAMC's
+software test engine, so a vendor stage1 that calibrates the DDR itself
+(stock Xiaomi U-Boot) finds its pass windows; the write-back L1 data cache
+as far as uncached stores go (`dcache=on`, the default: Breed overruns an
+uncached memset into a malloc header and relies on the dirty cached copy;
+on from reset until the OS runs user code, so OpenWrt runs at full
+speed). Not yet: SD card, the second core.
 
 ```bash
 tools/prepare-nand.sh --soc mt7621 zbtlink_zbt-wg3526-16m 25.12.5   # nor-zbt-wg3526-16m
@@ -356,6 +364,30 @@ The flash folder holds `mt7621.mtd0.u-boot.bin` (the OpenWrt U-Boot build
 `factory` (MAC 80:af:ca:11:22:33 at 0xe000: LAN …:33, WAN …:34) and
 `firmware` (the sysupgrade.bin). The OpenWrt image has no
 `kmod-usb-storage`: for a USB stick install it (`apk add kmod-usb-storage`).
+
+**Xiaomi Mi Router 3G** (two presets, one per bootloader): OpenWrt has no
+bootloader of its own for it, so the flash folder is built from a dump of
+the router's `Bootloader` partition (stock U-Boot or Breed) and, if there,
+its `factory` (the Wi-Fi calibration; the MACs are replaced by
+80:af:ca:11:22:33 and up: WAN …:33, LAN …:34, Wi-Fi …:35 / …:36):
+
+```bash
+# DIR: *mtd0*.bin or *Bootloader*.bin (+ *factory*.bin)
+tools/prepare-nand.sh --soc mt7621 --stock DIR xiaomi_mi-router-3g 25.12.5 nand-mi-router-3g-uboot
+./emulator.sh -P xiaomi-mi-router-3g-uboot     # or -breed
+```
+
+The folder (`tools/mknand.py mt7621-nand`) holds the stock partitions,
+OpenWrt's `kernel1.bin` in `kernel` (0x600000, "System 2") and
+`rootfs0.bin` in `ubi`; `kernel_stock` (System 1, the stock firmware's
+kernel) stays erased, so the stock U-Boot falls back to System 2 as on a
+router with OpenWrt; Breed boots that kernel too. `mt7621.mtd10.bbt.bin`
+is the MediaTek U-Boot's factory bad block table in the last 4 blocks,
+outside every partition (on the router it is written at the first boot,
+so partition dumps lack it): all blocks good, signed `mtknand` in the
+spare, which lives in `mt7621.mtd10.bbt.bin.oob` (any dump `X` may have an
+`X.oob`, 64 bytes a page). Without it the stock U-Boot scans the used
+flash for bad block marks, takes data for marks and skips the kernel.
 
 ## What is emulated
 

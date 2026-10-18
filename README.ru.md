@@ -2,11 +2,13 @@
 
 [English](README.md) · **Русский** · Сборка: [Linux](README.build.linux.ru.md) · [Windows](README.build.windows.ru.md)
 
-**Скачать:** [Router Emulator на Google Диске](https://drive.google.com/drive/folders/173WnINcit9_lMt86FjfKkGMqnZrCZ-Am): пакеты последнего
-релиза и `Router-Emulator-<версия>-dumps.zip` — готовые папки флеша для
-всех пресетов, кроме Keenetic KN-1012 и Routerich AX3000 v1 (им нужны
-дампы собственного роутера, такие папки не собираются). Архив с дампами
-распакуйте поверх пакета.
+**Скачать:** [Router Emulator на Google Диске](https://drive.google.com/drive/folders/173WnINcit9_lMt86FjfKkGMqnZrCZ-Am)
+или [на Яндекс.Диске](https://yadi.sk/d/Re-w1Nm1DBFhOw): пакеты последнего
+релиза и готовые папки флеша, по архиву на папку
+(`Router-Emulator-<папка>.zip`, например `Router-Emulator-nand-wr3000p.zip`),
+для всех пресетов, кроме Keenetic KN-1012 и Routerich AX3000 v1 (им нужны
+дампы собственного роутера, такие папки не собираются). Возьмите папки
+нужных плат и распакуйте их поверх пакета.
 
 QEMU-машина `mt7981-router`, эмулирующая плату роутера на MT7981B на
 уровне железа. Железо платы (PHY/коммутатор Ethernet, флеш, тип и размер
@@ -172,6 +174,8 @@ WS2812B, 74HC595, PWM), GPIO
 | Teltonika RUTC50 | 1G WAN встроенный PHY + 4×1G LAN MT7531 (мобильный модем не эмулируется); светодиоды на **74HC595** | DDR3 256 МБ | **SPI-NOR 16 МБ (загрузка) + SPI-NAND 512 МБ** (rutos-a / rutos-b) | 3.0 | BL2 OpenWrt RFB + свой U-Boot ([`tools/uboot-rutc50`](tools/uboot-rutc50)) |
 | OpenWrt One | 2.5G WAN **Airoha EN8811H** + 1G LAN встроенный PHY | DDR4 1 ГБ | **SPI-NAND 256 МБ (загрузка) + SPI-NOR 16 МБ** (recovery) | 2.0 | OpenWrt |
 | Zbtlink ZBT-WG3526 (16M) (**MT7621A**, MIPS) | 5×1G MT7530 (WAN = порт 4); Wi-Fi MT7603E + MT7612E на PCIe («радиомолчащие») | DDR3 512 МБ (доступно 448 МБ) | **SPI-NOR 16 МБ** | 3.0 | OpenWrt |
+| Xiaomi Mi Router 3G (стоковый U-Boot) (**MT7621A**, MIPS) | 1G WAN + 2×1G LAN MT7530; Wi-Fi MT7603E + MT7612E на PCIe («радиомолчащие») | DDR3 256 МБ | **параллельный NAND 128 МБ** (разметка Xiaomi) | 3.0 | стоковый U-Boot 1.1.3 Xiaomi + OpenWrt |
+| Xiaomi Mi Router 3G (Breed) (**MT7621A**, MIPS) | так же | DDR3 256 МБ | **параллельный NAND 128 МБ** (разметка Xiaomi) | 3.0 | Breed 1.2 + OpenWrt |
 
 У плат Netis нет раздела bdinfo (FIP с 0x380000, ubi с 0x580000; MAC — в
 Factory): в пресетах стоит `openwrt-no-bdinfo=1`. У плат на MT7986 та же
@@ -334,7 +338,8 @@ tools/prepare-nand.sh --nor-nand openwrt-one openwrt_one 25.12.5
 Цепочка загрузки настоящая: CPU стартует из SPI-NOR, отображённого на
 `0x1fc00000`; TPL из U-Boot блокирует L2-кэш и загружает в него SPL, SPL
 запускает blob инициализации DDR от MediaTek в SRAM Frame Engine, дальше
-U-Boot и OpenWrt. Эмулируется: MIPS 1004Kc (пока одно ядро: chip ID
+U-Boot и OpenWrt; NAND-платы грузятся через BootROM для NAND (stage1 с
+инициализацией DDR — в заблокированный L2, затем загрузчик). Эмулируется: MIPS 1004Kc (пока одно ядро: chip ID
 MT7621S), CM/GIC/CPC, DRAM 128/256/512 МБ (выше 448 МБ — по
 `0x20000000`, как у SoC), SPI-контроллер + SPI-NOR, UART, Frame Engine
 (QDMA/PDMA, NETSYS v1) с коммутатором MT7530 (MCM), xHCI (USB 3.0 + 2.0),
@@ -343,10 +348,14 @@ GPIO с кнопками и светодиодами, PCIe-хост (три ко
 драйверов mt76: `mt7603e` (MT7603E, 2,4 ГГц) и `mt7612e` (MT7612E, 5 ГГц)
 загружают прошивку, hostapd работает, в эфир ничего не уходит; карта без
 EEPROM во флеше получает минимальный из eFuse с MAC 80:af:ca:11:22:35 +
-номер слота. Параллельный NAND (NFI + ECC, `flash=nand`) и BootROM для
-NAND тоже есть, но NAND-платы пока не загружаются (стоковый загрузчик Xiaomi
-Mi Router 3G не проходит на модели калибровку DDR). Пока нет: SD-карты,
-второго ядра.
+номер слота; параллельный NAND (NFI + ECC, PIO, `flash=nand`,
+`nand-id=`); программный тестовый движок DRAMC, так что вендорский stage1,
+который сам калибрует DDR (стоковый U-Boot Xiaomi), находит окна; кэш
+данных L1 с обратной записью — в части некэшируемых записей (`dcache=on`,
+по умолчанию: Breed выходит некэшируемым memset за конец буфера в заголовок
+malloc и полагается на грязную копию в кэше; включён от сброса до первого
+пользовательского кода ОС, так что OpenWrt работает на полной скорости).
+Пока нет: SD-карты, второго ядра.
 
 ```bash
 tools/prepare-nand.sh --soc mt7621 zbtlink_zbt-wg3526-16m 25.12.5   # nor-zbt-wg3526-16m
@@ -358,6 +367,30 @@ tools/prepare-nand.sh --soc mt7621 zbtlink_zbt-wg3526-16m 25.12.5   # nor-zbt-wg
 `factory` (MAC 80:af:ca:11:22:33 по 0xe000: LAN …:33, WAN …:34) и
 `firmware` (sysupgrade.bin). В образе OpenWrt нет `kmod-usb-storage`: для
 USB-флешки его нужно поставить (`apk add kmod-usb-storage`).
+
+**Xiaomi Mi Router 3G** (два пресета, по загрузчику на каждый): своего
+загрузчика у OpenWrt для него нет, поэтому папка флеша собирается из дампа
+раздела `Bootloader` роутера (стоковый U-Boot или Breed) и, если есть, его
+`factory` (калибровка Wi-Fi; MAC заменяются на 80:af:ca:11:22:33 и далее:
+WAN …:33, LAN …:34, Wi-Fi …:35 / …:36):
+
+```bash
+# DIR: *mtd0*.bin или *Bootloader*.bin (+ *factory*.bin)
+tools/prepare-nand.sh --soc mt7621 --stock DIR xiaomi_mi-router-3g 25.12.5 nand-mi-router-3g-uboot
+./emulator.sh -P xiaomi-mi-router-3g-uboot     # или -breed
+```
+
+В папке (`tools/mknand.py mt7621-nand`) — стоковые разделы, `kernel1.bin`
+OpenWrt в `kernel` (0x600000, «System 2») и `rootfs0.bin` в `ubi`;
+`kernel_stock` (System 1, ядро стоковой прошивки) остаётся стёртым, и
+стоковый U-Boot переходит на System 2, как на роутере с OpenWrt; Breed
+грузит это же ядро. `mt7621.mtd10.bbt.bin` — фабричная таблица сбойных
+блоков U-Boot MediaTek в последних 4 блоках, вне всех разделов (на роутере
+она пишется при первой загрузке, поэтому в дампах разделов её нет): все
+блоки хорошие, подпись `mtknand` в spare, который лежит в
+`mt7621.mtd10.bbt.bin.oob` (у любого дампа `X` может быть `X.oob`, 64 байта
+на страницу). Без неё стоковый U-Boot сканирует занятую флешку на метки
+сбойных блоков, принимает данные за метки и пропускает ядро.
 
 ## Что эмулируется
 

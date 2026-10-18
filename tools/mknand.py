@@ -37,6 +37,9 @@ Examples:
   mknand.py --prefix mt7986 --no-bdinfo create -o nand/ --wifi-eeprom 7986 ...
                     (MT7986 board without a Factory dump: minimal Wi-Fi
                      EEPROM, OpenWrt has no default one for the MT7986)
+  mknand.py mt7621-nand -o nand-mi-router-3g/ --bootloader uboot.bin \
+      --factory factory.bin --kernel kernel1.bin --ubi rootfs0.bin
+                    (MT7621 parallel NAND, Xiaomi layout; see below)
   mknand.py strip  -i nand.bin -o nand-nooob.bin      (remove OOB)
   mknand.py addoob -i dump-nooob.bin -o nand.bin      (add empty OOB)
 """
@@ -462,6 +465,78 @@ def cmd_nor(args):
     print(f"wrote {args.output}")
 
 
+# Xiaomi MT7621 boards with a 128 MiB parallel NAND (Mi Router 3G, ...):
+# stock layout as in OpenWrt's mt7621_xiaomi_nand_128m.dtsi
+XIAOMI_PARTS = ("Bootloader:0x80000,Config:0x40000,Bdata:0x40000,"
+                "factory:0x40000,crash:0x40000,crash_syslog:0x40000,"
+                "reserved0:0x40000,kernel_stock:0x400000,kernel:0x400000,"
+                "ubi:0x7580000")
+BBT_BLOCKS = 4
+
+
+def cmd_mt7621_nand(args):
+    """MT7621 parallel NAND folder (machine option flash=nand): one data
+    file per partition, the bootloader in the first, the OpenWrt kernel
+    (kernel1.bin) and UBI (rootfs0.bin) in "kernel" / "ubi", everything
+    else erased.  The last BBT_BLOCKS blocks (outside all partitions) get
+    the factory bad block table of the MediaTek U-Boot: on the chip it is
+    written at the first boot, when the flash is still virgin; here every
+    block is good.  Its signature ("mtknand" at spare bytes 1..7 of the
+    first page of each copy) is in the spare, i.e. in the .oob file next
+    to the data file.  factory: MAC at 0xe000 (WAN), +1 at 0xe006 (GMAC);
+    the Wi-Fi EEPROMs at 0 and 0x8000 (if present) get +2 and +3."""
+    total = args.size_mb << 20
+    parts, off = [], 0
+    for item in args.parts.split(","):
+        label, size = item.split(":")
+        size = total - BBT_BLOCKS * BLOCK - off if size == "-" else int(size, 0)
+        parts.append((label, off, size))
+        off += size
+    if off > total - BBT_BLOCKS * BLOCK:
+        sys.exit("partitions overlap the factory BBT in the last blocks")
+    mac = int(args.mac.replace(":", ""), 16)
+    files = {parts[0][0]: args.bootloader, "factory": args.factory,
+             "kernel": args.kernel, "ubi": args.ubi}
+    os.makedirs(args.output, exist_ok=True)
+    for f in dir_files(args.output):
+        os.unlink(f)
+    for f in os.listdir(args.output):
+        if f.endswith(".oob"):
+            os.unlink(os.path.join(args.output, f))
+
+    def put(i, label, poff, data):
+        fn = os.path.join(args.output, f"{PREFIX}.mtd{i}.{label}.bin")
+        open(fn, "wb").write(bytes(data))
+        print(f"  {fn}  (0x{poff:07x}, 0x{len(data):x} bytes)")
+        return fn
+
+    for i, (label, poff, size) in enumerate(parts):
+        data = bytearray(b"\xff" * size)
+        if files.get(label):
+            blob = open(files[label], "rb").read()
+            if len(blob) > size:
+                sys.exit(f"{files[label]} ({len(blob)} bytes) larger than "
+                         f"{label} ({size})")
+            data[:len(blob)] = blob
+        if label == "factory":
+            for at, d in ((0xe000, 0), (0xe006, 1), (0x4, 2), (0x8004, 3)):
+                if at < 0xe000 and data[at - 4:at - 2] == b"\xff\xff":
+                    continue        # no Wi-Fi EEPROM there
+                data[at:at + 6] = ((mac + d) & 0xffffffffffff).to_bytes(6, "big")
+            print(f"base MAC: {args.mac}")
+        put(i, label, poff, data)
+    # factory BBT: 2 bits a block (0 = good), one copy per block
+    nblocks = total // BLOCK
+    data = bytearray(b"\xff" * BBT_BLOCKS * BLOCK)
+    oob = bytearray(b"\xff" * BBT_BLOCKS * PPB * OOB)
+    for b in range(BBT_BLOCKS):
+        data[b * BLOCK:b * BLOCK + nblocks // 4] = bytes(nblocks // 4)
+        oob[b * PPB * OOB + 1:b * PPB * OOB + 8] = b"mtknand"
+    fn = put(len(parts), "bbt", total - BBT_BLOCKS * BLOCK, data)
+    open(fn + ".oob", "wb").write(bytes(oob))
+    print(f"wrote {args.output}")
+
+
 def wifi_eeprom(chip, mac):
     """Minimal MediaTek Wi-Fi EEPROM (mt7915 driver layout): chip ID, MAC,
     band 0 = 2.4 GHz, band 1 = 5 GHz, 4 paths and streams each; no
@@ -672,6 +747,21 @@ def main():
                    help="where that UBI image goes (default: start of the "
                         "first NAND partition)")
     n.set_defaults(func=cmd_nor)
+    x = sub.add_parser("mt7621-nand",
+                       help="MT7621 parallel NAND folder (Xiaomi layout)")
+    x.add_argument("-o", "--output", required=True, help="output directory")
+    x.add_argument("--size-mb", type=int, default=128)
+    x.add_argument("--parts", default=XIAOMI_PARTS,
+                   help="label:size,... ('-' = up to the factory BBT), "
+                        "default: %(default)s")
+    x.add_argument("--bootloader", required=True,
+                   help="first partition: stock U-Boot or Breed image")
+    x.add_argument("--factory", help="factory dump (Wi-Fi EEPROMs), MACs "
+                                     "are replaced")
+    x.add_argument("--mac", default="80:af:ca:11:22:33", help="base MAC")
+    x.add_argument("--kernel", help="OpenWrt kernel1.bin for 'kernel'")
+    x.add_argument("--ubi", help="OpenWrt rootfs0.bin (UBI image) for 'ubi'")
+    x.set_defaults(func=cmd_mt7621_nand)
     a = sub.add_parser("addoob", help="data-only dump -> raw image")
     a.add_argument("-i", "--input", required=True)
     a.add_argument("-o", "--output", required=True)

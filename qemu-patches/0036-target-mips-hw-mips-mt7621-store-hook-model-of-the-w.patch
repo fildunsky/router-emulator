@@ -1,0 +1,327 @@
+From eec3a504819f6acbc7c7f6622866988f9192b0d1 Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Sun, 18 Oct 2026 17:01:49 -0400
+Subject: [PATCH 36/36] target/mips, hw/mips/mt7621: store hook, model of the
+ write-back L1 D-cache
+
+A board hook after every store (translated in when set).  MT7621 uses it
+to model the L1 data cache as far as uncached stores go: a kseg1 store
+into a line that is dirty in the cache (written by a kseg0 store, not
+written back / invalidated / evicted since) is undone, as the line's
+later write-back does on the chip.  Breed runs an uncached memset past
+its malloc()ed FIFO buffers into the next chunk header and relies on it.
+On from reset to the first user-mode store (machine option dcache=).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012GbUcwR34gg9RgGTEtNN6J
+---
+ hw/mips/mt7621.c                        | 143 ++++++++++++++++++++++++
+ target/mips/cpu.h                       |   7 ++
+ target/mips/tcg/system/special_helper.c |   7 ++
+ target/mips/tcg/system_helper.h.inc     |   1 +
+ target/mips/tcg/translate.c             |   6 +
+ target/mips/tcg/translate.h             |   1 +
+ 6 files changed, 165 insertions(+)
+
+diff --git a/hw/mips/mt7621.c b/hw/mips/mt7621.c
+index 350fd25..86afcd2 100644
+--- a/hw/mips/mt7621.c
++++ b/hw/mips/mt7621.c
+@@ -43,6 +43,7 @@
+ #include "system/reset.h"
+ #include "system/runstate.h"
+ #include "exec/cputlb.h"
++#include "exec/tb-flush.h"
+ #include "target/mips/cpu.h"
+ 
+ #define MT7621_LOWMEM_MAX       0x1c000000ULL   /* DRAM below the I/O space */
+@@ -208,6 +209,29 @@ static const TypeInfo mt7621_spi_type = {
+     .class_init = mt7621_spi_class_init,
+ };
+ 
++/*
++ * L1 data cache (32 KiB, 4-way, 32-byte lines, write-back), modelled only
++ * as far as an uncached (kseg1) store to a line that is dirty in it goes:
++ * on the chip the store reaches the DRAM, but cached reads still see the
++ * line and its write-back later overwrites the store.  Here the line is
++ * written back at once, i.e. such a store is undone.  A cached (kseg0)
++ * store makes a line dirty; a writeback / invalidate CACHE op on it, or
++ * eviction (LRU among the dirty lines of its set), makes it clean.  Breed
++ * runs an uncached memset past the end of a malloc()ed buffer into the
++ * next chunk header and relies on this.  Only the bootloaders need it
++ * (Linux keeps its buffers coherent), and it costs a call per store, so it
++ * is on from reset to the first store in user mode.
++ */
++#define DC_SETS 256
++#define DC_WAYS 4
++#define DC_LINE 32
++
++typedef struct DCacheLine {
++    uint32_t tag;               /* line address | 1, 0: no dirty line */
++    uint32_t age;
++    uint8_t data[DC_LINE];
++} DCacheLine;
++
+ typedef struct MT7621Board {
+     MachineState *machine;
+     MIPSCPSState cps;
+@@ -219,6 +243,9 @@ typedef struct MT7621Board {
+     MemoryRegion l2_ovl;
+     uint32_t l2_page[L2_OVL_PAGES];     /* DRAM page of each overlay page */
+     int l2_npages;
++    bool dcache_model;          /* dcache=on: model of the L1 D-cache */
++    DCacheLine dcache[DC_SETS][DC_WAYS];        /* dirty L1 data lines */
++    uint32_t dc_clock;
+     MemoryRegion dram_alias[16];
+     MemoryRegion lowmem;
+     MemoryRegion highmem;
+@@ -437,11 +464,99 @@ static void l2_lock(MT7621Board *b, hwaddr pa)
+     l2_flush_tlbs();
+ }
+ 
++/* host pointer to a DRAM line that the data cache model covers, or NULL */
++static uint8_t *dc_ram(MT7621Board *b, uint32_t pa)
++{
++    if (pa >= MIN(b->machine->ram_size, MT7621_LOWMEM_MAX) ||
++        (b->l2_npages && l2_find(b, pa >> 12) >= 0)) {
++        return NULL;
++    }
++    return (uint8_t *)memory_region_get_ram_ptr(b->machine->ram) + pa;
++}
++
++static DCacheLine *dc_find(MT7621Board *b, target_ulong addr)
++{
++    DCacheLine *set = b->dcache[(addr / DC_LINE) % DC_SETS];
++    uint32_t tag = (addr & 0x1fffffe0) | 1;
++
++    for (int w = 0; w < DC_WAYS; w++) {
++        if (set[w].tag == tag) {
++            return &set[w];
++        }
++    }
++    return NULL;
++}
++
++static void mt7621_store_hook(CPUMIPSState *env, target_ulong addr)
++{
++    MT7621Board *b = the_board;
++    uint32_t seg = addr & 0xe0000000, pa = addr & 0x1fffffe0;
++    DCacheLine *l, *set;
++    CPUState *cs;
++    uint8_t *ram;
++
++    if ((env->hflags & MIPS_HFLAG_KSU) == MIPS_HFLAG_UM) {
++        CPU_FOREACH(cs) {       /* an OS runs: the model is off */
++            cpu_env(cs)->store_hook = NULL;
++        }
++        tb_flush(env_cpu(env));
++        return;
++    }
++    if ((seg != 0x80000000 && seg != 0xa0000000) || !(ram = dc_ram(b, pa))) {
++        return;
++    }
++    l = dc_find(b, addr);
++    if (seg == 0xa0000000) {
++        if (l) {                /* uncached store into a dirty line */
++            cpu_physical_memory_write(pa, l->data, DC_LINE);
++        }
++        return;
++    }
++    if (!l) {
++        set = b->dcache[(addr / DC_LINE) % DC_SETS];
++        l = &set[0];
++        for (int w = 1; w < DC_WAYS; w++) {
++            if (!set[w].tag || (l->tag && set[w].age < l->age)) {
++                l = &set[w];
++            }
++        }
++        l->tag = pa | 1;
++    }
++    l->age = ++b->dc_clock;
++    memcpy(l->data, ram, DC_LINE);
++}
++
++/* CACHE op on the primary data cache: the line(s) concerned are clean */
++static void dc_cache_op(MT7621Board *b, target_ulong addr, uint32_t op)
++{
++    DCacheLine *l;
++
++    switch (op) {
++    case 0:                     /* Index Writeback Invalidate */
++    case 2:                     /* Index Store Tag */
++        b->dcache[(addr / DC_LINE) % DC_SETS][(addr >> 13) % DC_WAYS].tag = 0;
++        break;
++    case 4:                     /* Hit Invalidate */
++    case 5:                     /* Hit Writeback Invalidate */
++    case 6:                     /* Hit Writeback */
++        l = dc_find(b, addr);
++        if (l) {
++            l->tag = 0;
++        }
++        break;
++    }
++}
++
+ static void mt7621_cache_hook(CPUMIPSState *env, target_ulong addr,
+                               uint32_t op)
+ {
+     MT7621Board *b = the_board;
+ 
++    if ((op & 3) == 1) {        /* primary data cache */
++        dc_cache_op(b, addr, op >> 2);
++        return;
++    }
++
+     if (op == 0x0b) {           /* Index Store Tag, secondary cache */
+         uint32_t tag = env->CP0_TagLo;
+ 
+@@ -581,6 +696,15 @@ static void mt7621_reset(void *opaque)
+ 
+     palmbus_reset(b);
+     b->l2_npages = 0;
++    memset(b->dcache, 0, sizeof(b->dcache));
++    if (b->dcache_model) {
++        CPUState *cs;
++
++        CPU_FOREACH(cs) {
++            cpu_env(cs)->store_hook = mt7621_store_hook;
++        }
++        tb_flush(first_cpu);
++    }
+     /*
+      * GIC: local interrupts (compare, timer, ...) masked after reset, as
+      * on the hardware; QEMU's GIC enables the compare one (mapped to pin
+@@ -843,6 +967,9 @@ static void mt7621_init(MachineState *machine)
+     CPU_FOREACH(cs) {
+         cpu_env(cs)->cache_hook = mt7621_cache_hook;
+         cpu_env(cs)->kseg0_remap = mt7621_kseg0_remap;
++        if (b->dcache_model) {
++            cpu_env(cs)->store_hook = mt7621_store_hook;
++        }
+     }
+     memory_region_init_ram(&b->l2_ovl, NULL, "mt7621.l2-locked",
+                            L2_OVL_PAGES * 4096, &error_fatal);
+@@ -924,6 +1051,16 @@ static void mt7621_set_flash(Object *obj, const char *v, Error **errp)
+     }
+ }
+ 
++static bool mt7621_get_dcache(Object *obj, Error **errp)
++{
++    return MT7621_MACHINE(obj)->b.dcache_model;
++}
++
++static void mt7621_set_dcache(Object *obj, bool v, Error **errp)
++{
++    MT7621_MACHINE(obj)->b.dcache_model = v;
++}
++
+ static char *mt7621_get_nand_id(Object *obj, Error **errp)
+ {
+     return g_strdup(MT7621_MACHINE(obj)->b.nand_id);
+@@ -1113,6 +1250,7 @@ static void mt7621_instance_init(Object *obj)
+     MT7621_MACHINE(obj)->b.wps_gpio = 95;     /* none: an unused pin */
+     MT7621_MACHINE(obj)->b.ddr = 3;
+     MT7621_MACHINE(obj)->b.usb = 3;
++    MT7621_MACHINE(obj)->b.dcache_model = true;
+ }
+ 
+ static void mt7621_machine_class_init(ObjectClass *oc, const void *data)
+@@ -1136,6 +1274,11 @@ static void mt7621_machine_class_init(ObjectClass *oc, const void *data)
+     object_class_property_set_description(oc, "flash",
+         "Boot flash: nor (SPI-NOR, default) or nand (parallel NAND on the "
+         "NFI, 128 MB)");
++    object_class_property_add_bool(oc, "dcache", mt7621_get_dcache,
++                                   mt7621_set_dcache);
++    object_class_property_set_description(oc, "dcache",
++        "Model the write-back L1 data cache against uncached stores "
++        "(default on; Breed needs it)");
+     object_class_property_add_str(oc, "nand-id", mt7621_get_nand_id,
+                                   mt7621_set_nand_id);
+     object_class_property_set_description(oc, "nand-id",
+diff --git a/target/mips/cpu.h b/target/mips/cpu.h
+index 89734e5..94cd6a4 100644
+--- a/target/mips/cpu.h
++++ b/target/mips/cpu.h
+@@ -1191,6 +1191,13 @@ typedef struct CPUArchState {
+      * (page granular; the board flushes the TLBs when it changes).
+      */
+     hwaddr (*kseg0_remap)(struct CPUArchState *env, hwaddr pa);
++    /*
++     * Board hook called after every store (address of the access), e.g. to
++     * model a write-back data cache against uncached (kseg1) stores.
++     * Stores translated while it was set call it; when the board clears
++     * it, it flushes the translations.
++     */
++    void (*store_hook)(struct CPUArchState *env, target_ulong addr);
+ 
+     /* Loongson IOCSR memory */
+     struct {
+diff --git a/target/mips/tcg/system/special_helper.c b/target/mips/tcg/system/special_helper.c
+index c13b1d7..0f6415d 100644
+--- a/target/mips/tcg/system/special_helper.c
++++ b/target/mips/tcg/system/special_helper.c
+@@ -139,6 +139,13 @@ void helper_deret(CPUMIPSState *env)
+     debug_post_eret(env);
+ }
+ 
++void helper_store_hook(CPUMIPSState *env, target_ulong addr)
++{
++    if (env->store_hook) {      /* the board may turn it off any time */
++        env->store_hook(env, addr);
++    }
++}
++
+ void helper_cache(CPUMIPSState *env, target_ulong addr, uint32_t op)
+ {
+     static const char *const type_name[] = {
+diff --git a/target/mips/tcg/system_helper.h.inc b/target/mips/tcg/system_helper.h.inc
+index eaac5e2..4e9e29a 100644
+--- a/target/mips/tcg/system_helper.h.inc
++++ b/target/mips/tcg/system_helper.h.inc
+@@ -175,6 +175,7 @@ DEF_HELPER_1(eret, void, env)
+ DEF_HELPER_1(eretnc, void, env)
+ DEF_HELPER_1(deret, void, env)
+ DEF_HELPER_3(cache, void, env, tl, i32)
++DEF_HELPER_2(store_hook, void, env, tl)
+ 
+ #ifdef TARGET_MIPS64
+ /* Longson CSR */
+diff --git a/target/mips/tcg/translate.c b/target/mips/tcg/translate.c
+index 03068ab..b4950c5 100644
+--- a/target/mips/tcg/translate.c
++++ b/target/mips/tcg/translate.c
+@@ -2232,6 +2232,11 @@ static void gen_st(DisasContext *ctx, uint32_t opc, int rt,
+         gen_helper_0e2i(swr, t1, t0, mem_idx);
+         break;
+     }
++#ifndef CONFIG_USER_ONLY
++    if (ctx->store_hook) {
++        gen_helper_store_hook(tcg_env, t0);
++    }
++#endif
+ }
+ 
+ 
+@@ -15088,6 +15093,7 @@ static void mips_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+     ctx->CP0_LLAddr_shift = env->CP0_LLAddr_shift;
+     ctx->cmgcr = (env->CP0_Config3 >> CP0C3_CMGCR) & 1;
+     ctx->cache_hook = env->cache_hook != NULL;
++    ctx->store_hook = env->store_hook != NULL;
+     /* Restore delay slot state from the tb context.  */
+     ctx->hflags = (uint32_t)ctx->base.tb->flags; /* FIXME: maybe use 64 bits? */
+     ctx->ulri = (env->CP0_Config3 >> CP0C3_ULRI) & 1;
+diff --git a/target/mips/tcg/translate.h b/target/mips/tcg/translate.h
+index f21ba07..60591fd 100644
+--- a/target/mips/tcg/translate.h
++++ b/target/mips/tcg/translate.h
+@@ -47,6 +47,7 @@ typedef struct DisasContext {
+     bool vp;
+     bool cmgcr;
+     bool cache_hook;
++    bool store_hook;
+     bool mrp;
+     bool nan2008;
+     bool abs2008;
+-- 
+2.47.3
+

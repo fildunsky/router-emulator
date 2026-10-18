@@ -1,0 +1,95 @@
+From 1d9e08cfc31d94f9013723279fddfa2139a6bc9a Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Sun, 18 Oct 2026 17:01:49 -0400
+Subject: [PATCH 35/36] hw/mips/mt7621_nand: optional per-dump spare files
+ (X.oob)
+
+A dump X can come with X.oob (64 bytes a page) holding its spare area;
+it is loaded and written back like the data.  The stock Xiaomi U-Boot
+keeps its factory BBT in the last blocks, signed in the spare
+("mtknand"), outside every mtd partition.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012GbUcwR34gg9RgGTEtNN6J
+---
+ hw/mips/mt7621_nand.c | 31 ++++++++++++++++++++++++++++---
+ 1 file changed, 28 insertions(+), 3 deletions(-)
+
+diff --git a/hw/mips/mt7621_nand.c b/hw/mips/mt7621_nand.c
+index 3b75826..3c95921 100644
+--- a/hw/mips/mt7621_nand.c
++++ b/hw/mips/mt7621_nand.c
+@@ -7,7 +7,9 @@
+  * 512 data bytes and 16 spare bytes (8 FDM + ECC parity), i.e. raw column
+  * c is data[(c / 528) * 512 + c % 528] for c % 528 < 512, else spare.  The
+  * model keeps data and spare apart (data = what a "cat /dev/mtdN" dump
+- * holds), so partition dumps without OOB are the backing store.
++ * holds), so partition dumps without OOB are the backing store; the spare
++ * of a dump "X" comes from an optional "X.oob" (64 bytes a page, written
++ * back), else it reads as erased.
+  *
+  * NFI: commands (CMD), address cycles (COLADDR/ROWADDR/ADDRNOB), data by
+  * PIO (DATAR/DATAW, 1 or 4 bytes); with AUTO_FMT the spare bytes of each
+@@ -68,6 +70,7 @@ typedef struct NandSegment {
+     uint64_t start;
+     uint64_t len;
+     int fd;
++    int oob_fd;                 /* optional "<path>.oob": 64 bytes a page */
+ } NandSegment;
+ 
+ struct MT7621NandState {
+@@ -170,6 +173,13 @@ static void flush_page(MT7621NandState *s, uint32_t page)
+             qemu_log_mask(LOG_GUEST_ERROR, "mt7621-nand: write to %s "
+                           "failed\n", g->path);
+         }
++        if (a < b && g->oob_fd >= 0 &&
++            file_pwrite(g->oob_fd, s->oob + (uint64_t)page * OOB_SIZE,
++                        OOB_SIZE, (loff - g->start) / PAGE_SIZE_ * OOB_SIZE) !=
++            OOB_SIZE) {
++            qemu_log_mask(LOG_GUEST_ERROR, "mt7621-nand: write to %s.oob "
++                          "failed\n", g->path);
++        }
+     }
+ }
+ 
+@@ -518,13 +528,15 @@ static bool load_dir(MT7621NandState *s, Error **errp)
+         return false;
+     }
+     while ((name = g_dir_read_name(d))) {
+-        GMatchInfo *mi;
+-        if (g_regex_match(re, name, 0, &mi)) {
++        GMatchInfo *mi = NULL;
++        if (!g_str_has_suffix(name, ".oob") &&
++            g_regex_match(re, name, 0, &mi)) {
+             g_autofree char *num = g_match_info_fetch(mi, 1);
+             s->segs = g_renew(NandSegment, s->segs, s->nsegs + 1);
+             s->segs[s->nsegs].path = g_build_filename(s->dir, name, NULL);
+             s->segs[s->nsegs].start = atoi(num);
+             s->segs[s->nsegs].fd = -1;
++            s->segs[s->nsegs].oob_fd = -1;
+             s->nsegs++;
+         }
+         g_match_info_free(mi);
+@@ -569,6 +581,19 @@ static bool load_dir(MT7621NandState *s, Error **errp)
+         }
+         info_report("NAND 0x%08" PRIx64 "-0x%08" PRIx64 ": %s", pos,
+                     pos + g->len, g->path);
++        {
++            g_autofree char *op = g_strconcat(g->path, ".oob", NULL);
++            uint64_t olen = g->len / PAGE_SIZE_ * OOB_SIZE;
++
++            g->oob_fd = open(op, O_RDWR | O_BINARY);
++            if (g->oob_fd >= 0 &&
++                file_pread(g->oob_fd, s->oob + pos / PAGE_SIZE_ * OOB_SIZE,
++                           olen, 0) != (ssize_t)olen) {
++                error_setg(errp, "mt7621-nand: %s must hold %" PRIu64
++                           " bytes (64 per page)", op, olen);
++                return false;
++            }
++        }
+         pos += g->len;
+     }
+     return true;
+-- 
+2.47.3
+

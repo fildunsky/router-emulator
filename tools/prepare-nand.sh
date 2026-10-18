@@ -35,7 +35,14 @@
 #                     mt7621: ramips/mt7621 SPI-NOR board with an OpenWrt
 #                     U-Boot build (u-boot-mt7621_PROFILE/u-boot-mt7621.bin,
 #                     e.g. zbtlink_zbt-wg3526-16m): u-boot, u-boot-env,
-#                     factory (MAC at 0xe000), firmware = sysupgrade.bin
+#                     factory (MAC at 0xe000), firmware = sysupgrade.bin;
+#                     with --stock DIR: Xiaomi-layout parallel NAND board
+#                     (e.g. xiaomi_mi-router-3g, machine option
+#                     flash=nand): DIR holds the bootloader (*mtd0*.bin or
+#                     *Bootloader*.bin: stock U-Boot or Breed) and may hold
+#                     a factory dump (*factory*.bin, Wi-Fi calibration; its
+#                     MACs are replaced); OpenWrt squashfs-kernel1.bin and
+#                     squashfs-rootfs0.bin go to "kernel" / "ubi"
 #     --parts SPEC    own flash layout for mknand.py, "label:size,...",
 #                     size "-" = rest (e.g. Xiaomi boards: BL2, Nvram, Bdata,
 #                     Factory, FIP, ..., ubi); BL2, Factory, bdinfo, FIP and
@@ -106,7 +113,7 @@ done
 P=${1:?usage: tools/prepare-nand.sh [--stock DIR] [--flash-mb N] PROFILE [VERSION] [OUTDIR]}
 V=${2:-snapshot}
 NAME=${P#*_}; NAME=${NAME%-v1}
-OUT=${3:-$([ -n "$NOR$NORNAND" ] || [ "$SOC" = mt7621 ] && echo nor || { [ -n "$EMMC" ] && echo emmc; } || echo nand)-$NAME}
+OUT=${3:-$([ -n "$NOR$NORNAND" ] || { [ "$SOC" = mt7621 ] && [ -z "$STOCK" ]; } && echo nor || { [ -n "$EMMC" ] && echo emmc; } || echo nand)-$NAME}
 TGT=mediatek/filogic
 [ "$SOC" = mt7621 ] && TGT=ramips/mt7621
 if [ "$V" = snapshot ]; then
@@ -135,7 +142,7 @@ if [ -n "$NOR" ] && [ -z "$STOCK" ]; then
     echo "--nor needs --stock DIR (OpenWrt has no own bootloader images for NOR boards)" >&2
     exit 1
 fi
-if [ -n "$STOCK" ]; then
+if [ -n "$STOCK" ] && [ "$SOC" != mt7621 ]; then
     # vendor BL2/FIP + OpenWrt sysupgrade.bin in UBI kernel/rootfs volumes
     # (eMMC: in the kernel/rootfs partitions)
     SPFX=$BASE-squashfs-sysupgrade.bin
@@ -227,6 +234,18 @@ else
         done
         [ "$2" = optional ] || { echo "no $b-{${1// /,}} in $URL (wrong profile, or no OpenWrt U-Boot build for it)" >&2; exit 1; }
     }
+fi
+if [ "$SOC" = mt7621 ] && [ -n "$STOCK" ]; then
+    BL=$(ls "$STOCK"/*mtd0*.bin "$STOCK"/*[Bb]ootloader*.bin 2>/dev/null | head -1)
+    F=$(ls "$STOCK"/*[Ff]actory*.bin 2>/dev/null | head -1)
+    [ -n "$BL" ] || { echo "need $STOCK/*mtd0*.bin or *Bootloader*.bin (stock U-Boot or Breed)" >&2; exit 1; }
+    KER=$(pick "squashfs-kernel1.bin"); ROOT=$(pick "squashfs-rootfs0.bin")
+    [ -n "$KER" ] && [ -n "$ROOT" ] || exit 1
+    echo "$P (vendor bootloader): $BL + $(basename "$KER") + $(basename "$ROOT")"
+    python3 tools/mknand.py --prefix mt7621 mt7621-nand -o "$OUT/" \
+        --bootloader "$BL" ${F:+--factory "$F"} --kernel "$KER" --ubi "$ROOT" \
+        --mac 80:af:ca:11:22:33
+    exit 0
 fi
 if [ "$SOC" = mt7621 ]; then
     # one U-Boot image (TPL + SPL with the DDR init blob + U-Boot) at 0
