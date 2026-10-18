@@ -167,7 +167,7 @@ routers use; saving from the editor drops `;` comments).
 | Bananapi BPi-R4 (MT7988A, Filogic 880) | WAN + 3×1G LAN built-in switch (SFP+ cages not emulated) | DDR4 2 GB (real: 4 GB) | **eMMC** (`bpi-r4` layout) | 3.0 | OpenWrt |
 | Teltonika RUTC50 | 1G WAN built-in PHY + 4×1G LAN MT7531 (the mobile modem is not emulated); LEDs on a **74HC595** | DDR3 256 MB | **SPI-NOR 16 MB boot + SPI-NAND 512 MB** (rutos-a / rutos-b) | 3.0 | OpenWrt RFB BL2 + own U-Boot ([`tools/uboot-rutc50`](tools/uboot-rutc50)) |
 | OpenWrt One | 2.5G WAN **Airoha EN8811H** + 1G LAN built-in PHY | DDR4 1 GB | **SPI-NAND 256 MB boot + SPI-NOR 16 MB** recovery | 2.0 | OpenWrt |
-| Zbtlink ZBT-WG3526 (16M) (**MT7621A**, MIPS) | 5×1G MT7530 (WAN = port 4); Wi-Fi (PCIe) not emulated | DDR3 512 MB (448 MB usable) | **SPI-NOR 16 MB** | 3.0 | OpenWrt |
+| Zbtlink ZBT-WG3526 (16M) (**MT7621A**, MIPS) | 5×1G MT7530 (WAN = port 4); Wi-Fi MT7603E + MT7612E on PCIe (radio silent) | DDR3 512 MB (448 MB usable) | **SPI-NOR 16 MB** | 3.0 | OpenWrt |
 
 Netis boards have no bdinfo partition (FIP at 0x380000, ubi at 0x580000;
 MACs in Factory): presets set `openwrt-no-bdinfo=1`. The MT7986 boards use
@@ -336,7 +336,15 @@ and OpenWrt. Emulated: MIPS 1004Kc (one core for now: chip ID MT7621S),
 CM/GIC/CPC, DRAM 128/256/512 MB (above 448 MB at `0x20000000`, as on the
 SoC), SPI controller + SPI-NOR, UART, Frame Engine (QDMA/PDMA, NETSYS v1)
 with the MT7530 switch (MCM), xHCI (USB 3.0 + 2.0), GPIO with buttons and
-LEDs. Not yet: PCIe (Wi-Fi cards), parallel NAND, SD card, the second core.
+LEDs, the PCIe host (three root ports, `pcie0..2=CARD`) with "radio
+silent" Wi-Fi cards for the unmodified mt76 drivers: `mt7603e` (MT7603E,
+2.4 GHz) and `mt7612e` (MT7612E, 5 GHz) load their firmware, hostapd
+runs, nothing goes on the air; a card without an EEPROM in flash gets a
+minimal one from its eFuse with the MAC 80:af:ca:11:22:35 + slot. The
+parallel NAND (NFI + ECC, `flash=nand`) and the NAND BootROM are there
+too, but no NAND board boots yet (the Xiaomi Mi Router 3G's stock
+bootloader fails its DDR calibration on the model). Not yet: SD card, the
+second core.
 
 ```bash
 tools/prepare-nand.sh --soc mt7621 zbtlink_zbt-wg3526-16m 25.12.5   # nor-zbt-wg3526-16m

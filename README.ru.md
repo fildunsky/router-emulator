@@ -171,7 +171,7 @@ WS2812B, 74HC595, PWM), GPIO
 | Bananapi BPi-R4 (MT7988A, Filogic 880) | WAN + 3×1G LAN встроенный коммутатор (SFP+ не эмулируются) | DDR4 2 ГБ (на плате 4 ГБ) | **eMMC** (разметка `bpi-r4`) | 3.0 | OpenWrt |
 | Teltonika RUTC50 | 1G WAN встроенный PHY + 4×1G LAN MT7531 (мобильный модем не эмулируется); светодиоды на **74HC595** | DDR3 256 МБ | **SPI-NOR 16 МБ (загрузка) + SPI-NAND 512 МБ** (rutos-a / rutos-b) | 3.0 | BL2 OpenWrt RFB + свой U-Boot ([`tools/uboot-rutc50`](tools/uboot-rutc50)) |
 | OpenWrt One | 2.5G WAN **Airoha EN8811H** + 1G LAN встроенный PHY | DDR4 1 ГБ | **SPI-NAND 256 МБ (загрузка) + SPI-NOR 16 МБ** (recovery) | 2.0 | OpenWrt |
-| Zbtlink ZBT-WG3526 (16M) (**MT7621A**, MIPS) | 5×1G MT7530 (WAN = порт 4); Wi-Fi (PCIe) не эмулируется | DDR3 512 МБ (доступно 448 МБ) | **SPI-NOR 16 МБ** | 3.0 | OpenWrt |
+| Zbtlink ZBT-WG3526 (16M) (**MT7621A**, MIPS) | 5×1G MT7530 (WAN = порт 4); Wi-Fi MT7603E + MT7612E на PCIe («радиомолчащие») | DDR3 512 МБ (доступно 448 МБ) | **SPI-NOR 16 МБ** | 3.0 | OpenWrt |
 
 У плат Netis нет раздела bdinfo (FIP с 0x380000, ubi с 0x580000; MAC — в
 Factory): в пресетах стоит `openwrt-no-bdinfo=1`. У плат на MT7986 та же
@@ -338,8 +338,15 @@ U-Boot и OpenWrt. Эмулируется: MIPS 1004Kc (пока одно ядр
 MT7621S), CM/GIC/CPC, DRAM 128/256/512 МБ (выше 448 МБ — по
 `0x20000000`, как у SoC), SPI-контроллер + SPI-NOR, UART, Frame Engine
 (QDMA/PDMA, NETSYS v1) с коммутатором MT7530 (MCM), xHCI (USB 3.0 + 2.0),
-GPIO с кнопками и светодиодами. Пока нет: PCIe (Wi-Fi-карты), параллельного
-NAND, SD-карты, второго ядра.
+GPIO с кнопками и светодиодами, PCIe-хост (три корневых порта,
+`pcie0..2=КАРТА`) с «радиомолчащими» Wi-Fi-картами для неизменённых
+драйверов mt76: `mt7603e` (MT7603E, 2,4 ГГц) и `mt7612e` (MT7612E, 5 ГГц)
+загружают прошивку, hostapd работает, в эфир ничего не уходит; карта без
+EEPROM во флеше получает минимальный из eFuse с MAC 80:af:ca:11:22:35 +
+номер слота. Параллельный NAND (NFI + ECC, `flash=nand`) и BootROM для
+NAND тоже есть, но NAND-платы пока не загружаются (стоковый загрузчик Xiaomi
+Mi Router 3G не проходит на модели калибровку DDR). Пока нет: SD-карты,
+второго ядра.
 
 ```bash
 tools/prepare-nand.sh --soc mt7621 zbtlink_zbt-wg3526-16m 25.12.5   # nor-zbt-wg3526-16m

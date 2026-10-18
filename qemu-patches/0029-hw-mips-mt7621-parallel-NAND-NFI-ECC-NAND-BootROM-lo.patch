@@ -1,0 +1,1219 @@
+From a7e8ae5bc512947b3cdc2f589de67ccd6cf718ce Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Sun, 18 Oct 2026 10:12:05 -0400
+Subject: [PATCH] hw/mips/mt7621: parallel NAND (NFI + ECC), NAND BootROM,
+ locked L2 lines
+
+- mt7621_nand.c: MT7621 NFI in PIO mode with a parallel SLC NAND
+  (sector format 512 + 16, FDM registers, ECC always clean), backed by a
+  folder of partition dumps; flash=nand, nand-id=
+- BootROM for NAND boot: MediaTek NAND header, stage 1 in locked L2,
+  return mailbox at 0xbe10ad00, then the bootloader to its load address
+- L2 lines locked as SRAM kept apart from the DRAM (kseg0-only overlay),
+  so the DDR init's memory tests do not overwrite the code running there
+- 1004Kc without shadow register sets; GIC with 64 interrupts and its
+  local interrupts masked after reset
+---
+ hw/mips/cps.c                           |   2 +-
+ hw/mips/meson.build                     |   2 +-
+ hw/mips/mt7621.c                        | 312 +++++++++++-
+ hw/mips/mt7621_nand.c                   | 642 ++++++++++++++++++++++++
+ hw/mips/mt7621_nand.h                   |  20 +
+ target/mips/cpu-defs.c.inc              |   2 +-
+ target/mips/cpu.h                       |   6 +
+ target/mips/system/physaddr.c           |   3 +
+ target/mips/tcg/system/special_helper.c |   4 +-
+ 9 files changed, 975 insertions(+), 18 deletions(-)
+ create mode 100644 hw/mips/mt7621_nand.c
+ create mode 100644 hw/mips/mt7621_nand.h
+
+diff --git a/hw/mips/cps.c b/hw/mips/cps.c
+index 0640cff..b091090 100644
+--- a/hw/mips/cps.c
++++ b/hw/mips/cps.c
+@@ -135,7 +135,7 @@ static void mips_cps_realize(DeviceState *dev, Error **errp)
+     object_initialize_child(OBJECT(dev), "gic", &s->gic, TYPE_MIPS_GIC);
+     object_property_set_uint(OBJECT(&s->gic), "num-vp", s->num_vp,
+                             &error_abort);
+-    object_property_set_uint(OBJECT(&s->gic), "num-irq", 128,
++    object_property_set_uint(OBJECT(&s->gic), "num-irq", MIN(s->num_irq, 128),
+                             &error_abort);
+     if (!sysbus_realize(SYS_BUS_DEVICE(&s->gic), errp)) {
+         return;
+diff --git a/hw/mips/meson.build b/hw/mips/meson.build
+index dc576b8..1399df2 100644
+--- a/hw/mips/meson.build
++++ b/hw/mips/meson.build
+@@ -11,7 +11,7 @@ mips_ss.add(when: 'CONFIG_JAZZ', if_true: files('jazz.c'))
+ mips_ss.add(when: 'CONFIG_MIPSSIM', if_true: files('mipssim.c'))
+ mips_ss.add(when: 'CONFIG_FULOONG', if_true: files('fuloong2e.c'))
+ mips_ss.add(when: 'CONFIG_MIPS_BOSTON', if_true: files('boston.c'))
+-mips_ss.add(when: 'CONFIG_MT7621_ROUTER', if_true: files('mt7621.c',
++mips_ss.add(when: 'CONFIG_MT7621_ROUTER', if_true: files('mt7621.c', 'mt7621_nand.c',
+   '../arm/filogic/spinor.c', '../arm/filogic/mtk_eth.c',
+   '../arm/filogic/mtk_pinctrl.c', '../arm/filogic/filogic_leds.c',
+   '../arm/filogic/ws2812b.c', '../arm/filogic/hc595.c'))
+diff --git a/hw/mips/mt7621.c b/hw/mips/mt7621.c
+index 6139181..ae503a9 100644
+--- a/hw/mips/mt7621.c
++++ b/hw/mips/mt7621.c
+@@ -33,6 +33,7 @@
+ #include "system/blockdev.h"
+ #include "../arm/filogic/filogic.h"
+ #include "../arm/filogic/filogic_leds.h"
++#include "mt7621_nand.h"
+ #include "hw/mips/cps.h"
+ #include "hw/timer/mips_gictimer.h"
+ #include "hw/mips/mips.h"
+@@ -40,6 +41,7 @@
+ #include "system/address-spaces.h"
+ #include "system/reset.h"
+ #include "system/runstate.h"
++#include "exec/cputlb.h"
+ #include "target/mips/cpu.h"
+ 
+ #define MT7621_LOWMEM_MAX       0x1c000000ULL   /* DRAM below the I/O space */
+@@ -50,6 +52,8 @@
+ #define MT7621_GPIO_BASE        0x1e000600ULL
+ #define MT7621_UART0_BASE       0x1e000c00ULL
+ #define MT7621_SPI_BASE         0x1e000b00ULL
++#define MT7621_NFI_BASE         0x1e003000ULL
++#define MT7621_NFI_ECC_BASE     0x1e003800ULL
+ #define MT7621_XHCI_BASE        0x1e1c0000ULL
+ #define MT7621_IPPC_BASE        0x1e1d0700ULL   /* SSUSB IP port control */
+ #define MT7621_FE_BASE          0x1e100000ULL   /* frame engine, GMAC */
+@@ -59,6 +63,9 @@
+ #define MT7621_FLASH_MMAP_SIZE  0x00400000ULL
+ 
+ #define MT7621_CPU_HZ           880000000
++/* locked L2 lines: page-granular overlay outside the SoC's address map */
++#define L2_OVL_BASE             0xd0000000ULL
++#define L2_OVL_PAGES            128             /* 512 KB */
+ #define MAX_LEDS                32
+ 
+ /* GIC shared interrupts */
+@@ -208,6 +215,9 @@ typedef struct MT7621Board {
+     MemoryRegion palmbus;       /* catch-all register file, lowest prio */
+     uint32_t palm_regs[MT7621_PALMBUS_SIZE / 4];
+     MemoryRegion fe_sram;
++    MemoryRegion l2_ovl;
++    uint32_t l2_page[L2_OVL_PAGES];     /* DRAM page of each overlay page */
++    int l2_npages;
+     MemoryRegion dram_alias[16];
+     MemoryRegion lowmem;
+     MemoryRegion highmem;
+@@ -215,6 +225,9 @@ typedef struct MT7621Board {
+ 
+     DeviceState *spi;
+     SpiNorState *nor;
++    MT7621NandState *nand;
++    MemoryRegion brom;          /* NAND boot: jump to the loaded stage */
++    MemoryRegion brom_trig;     /* its stub calls back into the model */
+ 
+     DeviceState *eth;
+     DeviceState *pinctrl;
+@@ -223,6 +236,8 @@ typedef struct MT7621Board {
+ 
+     /* properties */
+     char *flash_dir;
++    bool flash_nand;            /* flash=nand: boot from parallel NAND */
++    char *nand_id;              /* its READ ID bytes (hex) */
+     char *ports;                /* MT7530 port 0..4 netdev ids, ':' separated */
+     uint32_t usb;               /* 0 = none, 2 = USB 2.0, 3 = USB 3.0 port */
+     char *usb_host;             /* passed through host devices VID:PID;... */
+@@ -338,37 +353,235 @@ static void palmbus_reset(MT7621Board *b)
+                                                       : 0x00010103);
+     /*
+      * Bootstrap: XTAL 40 MHz (XTAL_MODE_SEL 3), DRAM type (bit 4: DDR2),
+-     * chip mode 2 = SPI-NOR 3-byte address
++     * chip mode 2 = SPI-NOR 3-byte address (1 = NAND 2K+64)
+      */
+-    sc[SYSC_SYSCFG0 / 4] = (3 << 6) | (b->ddr == 2 ? 0x10 : 0) | 2;
++    sc[SYSC_SYSCFG0 / 4] = (3 << 6) | (b->ddr == 2 ? 0x10 : 0) |
++                           (b->flash_nand ? 1 : 2);    /* 1: NAND 2K+64 */
+     sc[SYSC_CUR_CLK_STS / 4] = 0x0101;           /* CPU FDIV 1, FFRAC 1 */
+ }
+ 
+ /*
+- * CACHE instructions.  The TPL locks lines of the L2 cache and fills
+- * them (Index Store Tag / Index Store Data, secondary cache) to run the
+- * SPL from the cache before the DRAM works.  There is no cache here and
+- * the DRAM always works, so the data goes straight to the memory behind
+- * the line.
++ * L2 cache locked as SRAM.  Before the DRAM works, the boot code (U-Boot's
++ * TPL, Breed) locks L2 lines (Index Store Tag, STagLo lock bit) and fills
++ * them (Index Store Data) to run from them through kseg0, while the DDR
++ * init's memory tests write the same addresses uncached through kseg1.
++ * Locked lines are kept apart from the DRAM: the pages holding them are
++ * copied to an overlay that cached accesses see; unlocking (Index Store
++ * Tag 0, the cache reset) drops the overlay, the data of locked lines is
++ * not written back, like on the hardware.
+  */
++static int l2_find(MT7621Board *b, uint32_t page)
++{
++    for (int i = 0; i < b->l2_npages; i++) {
++        if (b->l2_page[i] == page) {
++            return i;
++        }
++    }
++    return -1;
++}
++
++static void l2_flush_tlbs(void)
++{
++    CPUState *cs;
++
++    CPU_FOREACH(cs) {
++        tlb_flush(cs);
++    }
++}
++
++static hwaddr mt7621_kseg0_remap(CPUMIPSState *env, hwaddr pa)
++{
++    MT7621Board *b = the_board;
++    int i = b->l2_npages ? l2_find(b, pa >> 12) : -1;
++
++    return i < 0 ? pa : L2_OVL_BASE + ((hwaddr)i << 12) + (pa & 0xfff);
++}
++
++static void l2_lock(MT7621Board *b, hwaddr pa)
++{
++    uint32_t page = pa >> 12;
++    uint8_t buf[4096];
++
++    if (l2_find(b, page) >= 0) {
++        return;
++    }
++    if (b->l2_npages == L2_OVL_PAGES) {
++        qemu_log_mask(LOG_UNIMP, "mt7621: too many locked L2 pages\n");
++        return;
++    }
++    /* the line's page as it is in the DRAM (the rest of the page) */
++    address_space_read(&address_space_memory, (hwaddr)page << 12,
++                       MEMTXATTRS_UNSPECIFIED, buf, sizeof(buf));
++    qemu_log_mask(LOG_UNIMP, "mt7621: L2 lock page 0x%08x\n", page << 12);
++    b->l2_page[b->l2_npages] = page;
++    address_space_write(&address_space_memory,
++                        L2_OVL_BASE + ((hwaddr)b->l2_npages << 12),
++                        MEMTXATTRS_UNSPECIFIED, buf, sizeof(buf));
++    b->l2_npages++;
++    l2_flush_tlbs();
++}
++
+ static void mt7621_cache_hook(CPUMIPSState *env, target_ulong addr,
+                               uint32_t op)
+ {
+-    if (op == 0x0f) {   /* Index Store Data, secondary cache */
++    MT7621Board *b = the_board;
++
++    if (op == 0x0b) {           /* Index Store Tag, secondary cache */
++        uint32_t tag = env->CP0_TagLo;
++
++        if (tag & 0x20) {       /* lock */
++            l2_lock(b, (tag & 0x1ffff800) | (addr & 0x7e0));
++        } else if (!tag && b->l2_npages) {
++            qemu_log_mask(LOG_UNIMP, "mt7621: L2 unlocked\n");
++            b->l2_npages = 0;   /* cache reset: everything unlocked */
++            l2_flush_tlbs();
++        }
++    } else if (op == 0x0f) {    /* Index Store Data, secondary cache */
+         uint32_t d[2] = { cpu_to_le32(env->CP0_DataLo),
+                           cpu_to_le32(env->CP0_DataHi) };
+ 
+-        address_space_write(&address_space_memory, addr & 0x1ffffff8,
++        address_space_write(&address_space_memory,
++                            mt7621_kseg0_remap(env, addr & 0x1ffffff8),
+                             MEMTXATTRS_UNSPECIFIED, d, sizeof(d));
+     }
+ }
+ 
++/*
++ * BootROM, NAND boot (high level).  Page 0 holds a legacy uImage header
++ * whose name field is MediaTek's NAND header (stage offset at 0x30); the
++ * stage starts with a header of its own (big endian: entry point at +8,
++ * size at +0xc).
++ *  1. the stage is copied into locked L2 lines at its entry point and
++ *     called (jalr, stack in the FE SRAM); it keeps the return address
++ *     and stack at 0xbe10ad00, initialises the DDR and returns
++ *  2. back in the BootROM, the bootloader (from the NAND header's
++ *     bootloader offset, 0x34, to the end of the uImage data) is copied to
++ *     the uImage load address in DRAM, 0x7621abcd is stored at 0xbe10ad00
++ *     ("DRAM is up") and the uImage entry point is called.
++ * A stub at the reset vector does the jumps; it calls back into the model
++ * for step 2 by a write to BROM_TRIG.
++ */
++#define BROM_TRIG       0xf00
++#define BROM_MAILBOX    0x1e10ad00ULL
++#define BROM_MAGIC      0x7621abcd
++
++static void brom_stub_jump(uint32_t *p, uint32_t to)
++
++{
++    p[0] = cpu_to_le32(0x3c190000 | (to >> 16));        /* lui t9 */
++    p[1] = cpu_to_le32(0x37390000 | (to & 0xffff));     /* ori t9 */
++    p[2] = cpu_to_le32(0x03200008);                     /* jr t9 */
++    p[3] = 0;                                           /* nop */
++}
++
++static void mt7621_brom_nand(MT7621Board *b)
++{
++    uint8_t hdr[0x40], sh[0x10];
++    uint32_t stage_off, ep, size, mbox[2];
++    uint32_t *stub = memory_region_get_ram_ptr(&b->brom);
++    g_autofree uint8_t *stage = NULL;
++
++    mt7621_nand_read(b->nand, 0, hdr, sizeof(hdr));
++    if (ldl_be_p(hdr) != 0x27051956) {
++        error_report("NAND boot: no image header (uImage magic) at 0");
++        return;
++    }
++    stage_off = ldl_be_p(hdr + 0x30);
++    mt7621_nand_read(b->nand, stage_off, sh, sizeof(sh));
++    ep = ldl_be_p(sh + 8);
++    size = ldl_be_p(sh + 12);
++    if (!size || size > 0x40000 || (ep >> 29) != 4) {
++        error_report("NAND boot: bad stage header (entry 0x%08x, size "
++                     "0x%x)", ep, size);
++        return;
++    }
++    stage = g_malloc(size);
++    mt7621_nand_read(b->nand, stage_off, stage, size);
++    for (uint32_t o = 0; o < size; o += 4096) {
++        l2_lock(b, ((ep & 0x1fffffff) + o) & ~0xfffu);
++    }
++    for (uint32_t o = 0; o < size; o += 4) {
++        address_space_write(&address_space_memory,
++                            mt7621_kseg0_remap(NULL, (ep & 0x1fffffff) + o),
++                            MEMTXATTRS_UNSPECIFIED, stage + o, 4);
++    }
++    mbox[0] = mbox[1] = 0;
++    address_space_write(&address_space_memory, BROM_MAILBOX,
++                        MEMTXATTRS_UNSPECIFIED, mbox, sizeof(mbox));
++
++    memset(stub, 0, 0x1000);
++    stub[0] = cpu_to_le32(0x3c1dbe10);              /* lui sp, 0xbe10 */
++    stub[1] = cpu_to_le32(0x37bddff0);              /* ori sp, 0xdff0 */
++    stub[2] = cpu_to_le32(0x3c190000 | (ep >> 16)); /* lui t9 */
++    stub[3] = cpu_to_le32(0x37390000 | (ep & 0xffff)); /* ori t9 */
++    stub[4] = cpu_to_le32(0x0320f809);              /* jalr t9 */
++    stub[5] = 0;
++    /* back from the stage: step 2 in the model, then the image */
++    stub[6] = cpu_to_le32(0x3c08bfc0);              /* lui t0, 0xbfc0 */
++    stub[7] = cpu_to_le32(0xad000000 | BROM_TRIG);  /* sw zero, TRIG(t0) */
++    brom_stub_jump(stub + 8, ldl_be_p(hdr + 0x14));
++}
++
++/* step 2: the bootloader to its load address, "DRAM is up" */
++static void brom_trig_write(void *opaque, hwaddr a, uint64_t v, unsigned sz)
++{
++    MT7621Board *b = opaque;
++    uint8_t hdr[0x40];
++    uint32_t size, load, off, magic = cpu_to_le32(BROM_MAGIC);
++    g_autofree uint8_t *img = NULL;
++
++    mt7621_nand_read(b->nand, 0, hdr, sizeof(hdr));
++    off = ldl_be_p(hdr + 0x34);
++    size = ldl_be_p(hdr + 0x0c) + 0x40;
++    load = ldl_be_p(hdr + 0x10);
++    if (off < 0x40 || off >= size || size > 64 * MiB) {
++        error_report("NAND boot: bad bootloader offset 0x%x / size 0x%x",
++                     off, size);
++        return;
++    }
++    size -= off;
++    img = g_malloc(size);
++    mt7621_nand_read(b->nand, off, img, size);
++    address_space_write(&address_space_memory, load & 0x1fffffff,
++                        MEMTXATTRS_UNSPECIFIED, img, size);
++    address_space_write(&address_space_memory, BROM_MAILBOX,
++                        MEMTXATTRS_UNSPECIFIED, &magic, 4);
++}
++
++static uint64_t brom_trig_read(void *opaque, hwaddr a, unsigned size)
++{
++    return 0;
++}
++
++static const MemoryRegionOps brom_trig_ops = {
++    .read = brom_trig_read,
++    .write = brom_trig_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++};
++
+ static void mt7621_reset(void *opaque)
+ {
+-    palmbus_reset(opaque);
++    MT7621Board *b = opaque;
++
++    palmbus_reset(b);
++    b->l2_npages = 0;
++    /*
++     * GIC: local interrupts (compare, timer, ...) masked after reset, as
++     * on the hardware; QEMU's GIC enables the compare one (mapped to pin
++     * 0), which a bootloader not using the GIC timer never clears (Breed)
++     */
++    for (int i = 0; i < b->cps.gic.num_vps; i++) {
++        b->cps.gic.vps[i].mask = 0;
++    }
++    if (b->flash_nand) {
++        mt7621_brom_nand(b);
++    }
+ }
+ 
+-/* SPI-NOR boot flash on SPI CS0: a folder of partition dumps or a drive */
++/*
++ * Boot flash: SPI-NOR on SPI CS0 (a folder of partition dumps or a
++ * drive), or with flash=nand a parallel NAND on the NFI (partition dumps)
++ */
+ static void mt7621_create_flash(MT7621Board *b)
+ {
+     DriveInfo *dinfo = drive_get(IF_MTD, 0, 0);
+@@ -380,6 +593,34 @@ static void mt7621_create_flash(MT7621Board *b)
+     sysbus_realize_and_unref(SYS_BUS_DEVICE(b->spi), &error_fatal);
+     sysbus_mmio_map(SYS_BUS_DEVICE(b->spi), 0, MT7621_SPI_BASE);
+ 
++    if (b->flash_nand) {
++        dev = qdev_new(TYPE_MT7621_NAND);
++        if (b->nand_id) {
++            qdev_prop_set_string(dev, "id", b->nand_id);
++        }
++        if (b->flash_dir) {
++            qdev_prop_set_string(dev, "dir", b->flash_dir);
++        } else {
++            warn_report("no flash given (-M mt7621-router,flash=nand,"
++                        "nand-dir=DIR), using an erased NAND");
++        }
++        sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
++        sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, MT7621_NFI_BASE);
++        sysbus_mmio_map(SYS_BUS_DEVICE(dev), 1, MT7621_NFI_ECC_BASE);
++        b->nand = MT7621_NAND(dev);
++        /* the BootROM (here: a jump to the stage it loaded) */
++        memory_region_init_ram(&b->brom, NULL, "mt7621.brom", 0x1000,
++                               &error_fatal);
++        memory_region_add_subregion(get_system_memory(),
++                                    MT7621_FLASH_MMAP_BASE, &b->brom);
++        memory_region_init_io(&b->brom_trig, NULL, &brom_trig_ops, b,
++                              "mt7621.brom-trig", 4);
++        memory_region_add_subregion_overlap(get_system_memory(),
++                                            MT7621_FLASH_MMAP_BASE + BROM_TRIG,
++                                            &b->brom_trig, 1);
++        return;
++    }
++
+     dev = qdev_new(TYPE_MTK_SPINOR);
+     qdev_prop_set_uint32(dev, "size-mb", 16);
+     if (b->flash_dir) {
+@@ -555,6 +796,8 @@ static void mt7621_init(MachineState *machine)
+     object_property_set_uint(OBJECT(&b->cps), "num-vp", machine->smp.cpus,
+                              &error_fatal);
+     object_property_set_int(OBJECT(&b->cps), "gcr-rev", 0x600, &error_fatal);
++    /* 64 shared interrupts (Breed checks GIC_SH_CONFIG) */
++    object_property_set_uint(OBJECT(&b->cps), "num-irq", 64, &error_fatal);
+     qdev_connect_clock_in(DEVICE(&b->cps), "clk-in", b->cpuclk);
+     sysbus_realize(SYS_BUS_DEVICE(&b->cps), &error_fatal);
+     sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&b->cps), 0, 0, 1);
+@@ -563,7 +806,11 @@ static void mt7621_init(MachineState *machine)
+ 
+     CPU_FOREACH(cs) {
+         cpu_env(cs)->cache_hook = mt7621_cache_hook;
++        cpu_env(cs)->kseg0_remap = mt7621_kseg0_remap;
+     }
++    memory_region_init_ram(&b->l2_ovl, NULL, "mt7621.l2-locked",
++                           L2_OVL_PAGES * 4096, &error_fatal);
++    memory_region_add_subregion(sysmem, L2_OVL_BASE, &b->l2_ovl);
+ 
+     /* DRAM, with address wrap-around below 448 MB */
+     memory_region_init_alias(&b->lowmem, NULL, "mt7621.lowmem", machine->ram,
+@@ -622,6 +869,37 @@ static void mt7621_set_flash_dir(Object *obj, const char *v, Error **errp)
+     ms->b.flash_dir = g_strdup(v);
+ }
+ 
++static char *mt7621_get_flash(Object *obj, Error **errp)
++{
++    return g_strdup(MT7621_MACHINE(obj)->b.flash_nand ? "nand" : "nor");
++}
++
++static void mt7621_set_flash(Object *obj, const char *v, Error **errp)
++{
++    MT7621MachineState *ms = MT7621_MACHINE(obj);
++
++    if (!strcmp(v, "nand")) {
++        ms->b.flash_nand = true;
++    } else if (!strcmp(v, "nor")) {
++        ms->b.flash_nand = false;
++    } else {
++        error_setg(errp, "flash must be nor or nand");
++    }
++}
++
++static char *mt7621_get_nand_id(Object *obj, Error **errp)
++{
++    return g_strdup(MT7621_MACHINE(obj)->b.nand_id);
++}
++
++static void mt7621_set_nand_id(Object *obj, const char *v, Error **errp)
++{
++    MT7621MachineState *ms = MT7621_MACHINE(obj);
++
++    g_free(ms->b.nand_id);
++    ms->b.nand_id = g_strdup(v);
++}
++
+ static char *mt7621_get_ddr(Object *obj, Error **errp)
+ {
+     return g_strdup(MT7621_MACHINE(obj)->b.ddr == 2 ? "ddr2" : "ddr3");
+@@ -792,7 +1070,17 @@ static void mt7621_machine_class_init(ObjectClass *oc, const void *data)
+     object_class_property_add_str(oc, "nand-dir", mt7621_get_flash_dir,
+                                   mt7621_set_flash_dir);
+     object_class_property_set_description(oc, "nand-dir",
+-        "SPI-NOR flash: folder of partition dumps (files named *mtdN*)");
++        "Flash: folder of partition dumps (files named *mtdN*)");
++    object_class_property_add_str(oc, "flash", mt7621_get_flash,
++                                  mt7621_set_flash);
++    object_class_property_set_description(oc, "flash",
++        "Boot flash: nor (SPI-NOR, default) or nand (parallel NAND on the "
++        "NFI, 128 MB)");
++    object_class_property_add_str(oc, "nand-id", mt7621_get_nand_id,
++                                  mt7621_set_nand_id);
++    object_class_property_set_description(oc, "nand-id",
++        "READ ID bytes of the parallel NAND, hex (default ecf1009540, "
++        "Samsung K9F1G08U0D)");
+     object_class_property_add_str(oc, "ports", mt7621_get_ports,
+                                   mt7621_set_ports);
+     object_class_property_set_description(oc, "ports",
+diff --git a/hw/mips/mt7621_nand.c b/hw/mips/mt7621_nand.c
+new file mode 100644
+index 0000000..14dbd4d
+--- /dev/null
++++ b/hw/mips/mt7621_nand.c
+@@ -0,0 +1,642 @@
++/*
++ * MediaTek MT7621 NAND flash interface (NFI + ECC engine, PIO mode) with a
++ * parallel SLC NAND chip behind it (default: 128 MiB, 2048 + 64 bytes per
++ * page, 64 pages per block, ID ec f1 00 95 40 = Samsung K9F1G08U0D).
++ *
++ * The chip sees its pages in the NFI's sector format: per 512-byte sector
++ * 512 data bytes and 16 spare bytes (8 FDM + ECC parity), i.e. raw column
++ * c is data[(c / 528) * 512 + c % 528] for c % 528 < 512, else spare.  The
++ * model keeps data and spare apart (data = what a "cat /dev/mtdN" dump
++ * holds), so partition dumps without OOB are the backing store.
++ *
++ * NFI: commands (CMD), address cycles (COLADDR/ROWADDR/ADDRNOB), data by
++ * PIO (DATAR/DATAW, 1 or 4 bytes); with AUTO_FMT the spare bytes of each
++ * sector go to / come from FDM registers; the ECC decoder reports every
++ * sector done without errors, the encoder writes 0xff parity.  Everything
++ * completes at once (never busy).
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/units.h"
++#include "qemu/log.h"
++#include "qemu/error-report.h"
++#include "qapi/error.h"
++#include "hw/sysbus.h"
++#include "hw/qdev-properties.h"
++#include "mt7621_nand.h"
++
++/* NFI registers */
++#define NFI_CNFG        0x000
++#define  CNFG_AUTO_FMT  BIT(9)
++#define  CNFG_HW_ECC    BIT(8)
++#define  CNFG_BYTE_RW   BIT(6)
++#define  CNFG_READ_MODE BIT(1)
++#define NFI_PAGEFMT     0x004
++#define NFI_CON         0x008
++#define  CON_NFI_RST    BIT(1)
++#define NFI_CMD         0x020
++#define NFI_ADDRNOB     0x030
++#define NFI_COLADDR     0x034
++#define NFI_ROWADDR     0x038
++#define NFI_STRDATA     0x040
++#define NFI_DATAW       0x050
++#define NFI_DATAR       0x054
++#define NFI_PIO_DIRDY   0x058
++#define NFI_STA         0x060
++#define NFI_ADDRCNTR    0x070
++#define NFI_FDML(n)     (0x0a0 + (n) * 8)
++#define NFI_FDMM(n)     (0x0a4 + (n) * 8)
++#define NFI_MASTER_STA  0x210
++
++/* ECC registers */
++#define ECC_ENCIDLE     0x00c
++#define ECC_DECCON      0x100
++#define ECC_DECIDLE     0x10c
++#define ECC_DECENUM     0x114
++#define ECC_DECDONE     0x118
++
++#define SECT            512
++#define SPARE           16      /* spare bytes per sector (64 / 4) */
++#define FSM_CUSTOM_DATA 14
++
++typedef struct NandSegment {
++    char *path;
++    uint64_t start;
++    uint64_t len;
++    int fd;
++} NandSegment;
++
++struct MT7621NandState {
++    SysBusDevice parent_obj;
++    MemoryRegion nfi_mr, ecc_mr;
++
++    char *dir;
++    char *id_hex;               /* READ ID bytes, hex (default ecf1009540) */
++    uint8_t chip_id[8];
++    int id_len;
++    uint32_t size_mb;
++    NandSegment *segs;
++    int nsegs;
++    uint8_t *data;              /* page_size bytes per page */
++    uint8_t *oob;               /* 64 bytes per page */
++    uint32_t pages;
++
++    /* NFI */
++    uint32_t nfi[0x800 / 4];
++    uint32_t ecc[0x800 / 4];
++    bool data_phase;
++    uint32_t sec_pos;           /* byte index in the current sector */
++    uint32_t sec;               /* current sector */
++
++    /* chip */
++    uint8_t cmd;
++    uint8_t addr[5];
++    int naddr;
++    uint32_t page;              /* row of the last READ / PROGRAM */
++    uint32_t col;               /* raw column */
++    uint8_t buf[2048 + 64];     /* page register (raw sector format) */
++    bool id_mode, status_mode;
++    uint32_t id_pos;
++};
++
++
++#define PAGE_SIZE_      2048
++#define OOB_SIZE        64
++#define RAW_PAGE        (PAGE_SIZE_ + OOB_SIZE)
++#define PAGES_PER_BLOCK 64
++
++/* raw column (sector format) -> pointer into a data[2048] + oob[64] pair */
++static uint8_t *raw_ptr(uint8_t *data, uint8_t *oob, uint32_t col)
++{
++    uint32_t s = col / (SECT + SPARE), o = col % (SECT + SPARE);
++
++    if (s >= 4) {
++        return NULL;
++    }
++    return o < SECT ? &data[s * SECT + o] : &oob[s * SPARE + o - SECT];
++}
++
++/* page register <-> storage */
++static void page_load(MT7621NandState *s, uint32_t page)
++{
++    for (uint32_t c = 0; c < RAW_PAGE; c++) {
++        uint8_t *p = page < s->pages ?
++            raw_ptr(s->data + (uint64_t)page * PAGE_SIZE_,
++                    s->oob + (uint64_t)page * OOB_SIZE, c) : NULL;
++        s->buf[c] = p ? *p : 0xff;
++    }
++}
++
++static ssize_t file_pwrite(int fd, const void *buf, size_t len, off_t off)
++{
++    if (lseek(fd, off, SEEK_SET) != off) {
++        return -1;
++    }
++    return write(fd, buf, len);
++}
++
++static ssize_t file_pread(int fd, void *buf, size_t len, off_t off)
++{
++    if (lseek(fd, off, SEEK_SET) != off) {
++        return -1;
++    }
++    return read(fd, buf, len);
++}
++
++/* the data of page back to the dump files */
++static void flush_page(MT7621NandState *s, uint32_t page)
++{
++    uint64_t loff = (uint64_t)page * PAGE_SIZE_;
++    uint8_t *src = s->data + loff;
++
++    for (int i = 0; i < s->nsegs; i++) {
++        NandSegment *g = &s->segs[i];
++        uint64_t a = MAX(loff, g->start);
++        uint64_t b = MIN(loff + PAGE_SIZE_, g->start + g->len);
++
++        if (a < b && g->fd >= 0 &&
++            file_pwrite(g->fd, src + (a - loff), b - a, a - g->start) !=
++            (ssize_t)(b - a)) {
++            qemu_log_mask(LOG_GUEST_ERROR, "mt7621-nand: write to %s "
++                          "failed\n", g->path);
++        }
++    }
++}
++
++static void page_program(MT7621NandState *s)
++{
++    uint32_t page = s->page;
++
++    if (page >= s->pages) {
++        return;
++    }
++    for (uint32_t c = 0; c < RAW_PAGE; c++) {
++        uint8_t *p = raw_ptr(s->data + (uint64_t)page * PAGE_SIZE_,
++                             s->oob + (uint64_t)page * OOB_SIZE, c);
++        if (p) {
++            *p &= s->buf[c];    /* NAND programming only clears bits */
++        }
++    }
++    flush_page(s, page);
++}
++
++static void block_erase(MT7621NandState *s, uint32_t row)
++{
++    uint32_t first = row & ~(PAGES_PER_BLOCK - 1);
++
++    for (uint32_t p = first; p < first + PAGES_PER_BLOCK && p < s->pages;
++         p++) {
++        memset(s->data + (uint64_t)p * PAGE_SIZE_, 0xff, PAGE_SIZE_);
++        memset(s->oob + (uint64_t)p * OOB_SIZE, 0xff, OOB_SIZE);
++        flush_page(s, p);
++    }
++}
++
++static uint32_t addr_row(MT7621NandState *s, int from)
++{
++    uint32_t r = 0;
++
++    for (int i = from; i < s->naddr && i < from + 3; i++) {
++        r |= s->addr[i] << (8 * (i - from));
++    }
++    return r;
++}
++
++static void chip_command(MT7621NandState *s, uint8_t cmd)
++{
++    switch (cmd) {
++    case 0xff:                  /* RESET */
++        s->id_mode = s->status_mode = false;
++        s->cmd = 0;
++        return;
++    case 0x90:                  /* READ ID */
++    case 0x70:                  /* READ STATUS */
++    case 0x00: case 0x05: case 0x80: case 0x85: case 0x60: case 0xec:
++        s->cmd = cmd;
++        s->naddr = 0;
++        s->id_mode = cmd == 0x90;
++        s->status_mode = cmd == 0x70;
++        s->id_pos = 0;
++        if (cmd == 0x80) {
++            memset(s->buf, 0xff, sizeof(s->buf));
++        }
++        return;
++    case 0x30:                  /* READ confirm */
++        s->page = addr_row(s, 2);
++        s->col = s->addr[0] | (s->addr[1] << 8);
++        page_load(s, s->page);
++        s->cmd = 0x30;
++        return;
++    case 0xe0:                  /* random data out confirm */
++        s->col = s->addr[0] | (s->addr[1] << 8);
++        s->cmd = 0x30;
++        return;
++    case 0x10:                  /* PROGRAM confirm */
++        page_program(s);
++        s->cmd = 0;
++        return;
++    case 0xd0:                  /* ERASE confirm */
++        block_erase(s, addr_row(s, 0));
++        s->cmd = 0;
++        return;
++    }
++    qemu_log_mask(LOG_UNIMP, "mt7621-nand: command 0x%02x\n", cmd);
++}
++
++static void chip_address(MT7621NandState *s, uint8_t a)
++{
++    if (s->naddr < ARRAY_SIZE(s->addr)) {
++        s->addr[s->naddr++] = a;
++    }
++    if (s->cmd == 0x80 && s->naddr >= 2) {
++        s->page = addr_row(s, 2);
++        s->col = s->addr[0] | (s->addr[1] << 8);
++    } else if (s->cmd == 0x85 && s->naddr >= 2) {
++        s->col = s->addr[0] | (s->addr[1] << 8);
++    }
++}
++
++static uint8_t chip_read(MT7621NandState *s)
++{
++    if (s->id_mode) {
++        if (s->addr[0] == 0x20) {   /* ONFI signature: not ONFI */
++            return 0x00;
++        }
++        return s->id_pos < s->id_len ? s->chip_id[s->id_pos++] : 0x00;
++    }
++    if (s->status_mode) {
++        return 0xe0;                /* ready, not write protected */
++    }
++    if (s->col < RAW_PAGE) {
++        return s->buf[s->col++];
++    }
++    return 0xff;
++}
++
++static void chip_write(MT7621NandState *s, uint8_t v)
++{
++    if (s->col < RAW_PAGE) {
++        s->buf[s->col++] = v;
++    }
++}
++
++/*
++ * One byte of the data phase through the NFI: with AUTO_FMT the spare
++ * bytes of each sector are taken from / given to the FDM registers.
++ */
++static void fmt_after_sector(MT7621NandState *s, bool rd)
++{
++    uint32_t cnfg = s->nfi[NFI_CNFG / 4];
++    uint8_t spare[SPARE];
++
++    if (rd) {
++        for (int i = 0; i < SPARE; i++) {
++            spare[i] = chip_read(s);
++        }
++        if (s->sec < 8) {
++            s->nfi[NFI_FDML(s->sec) / 4] = ldl_le_p(spare);
++            s->nfi[NFI_FDMM(s->sec) / 4] = ldl_le_p(spare + 4);
++        }
++        if (cnfg & CNFG_HW_ECC) {
++            s->ecc[ECC_DECDONE / 4] |= 1u << s->sec;
++        }
++    } else {
++        memset(spare, 0xff, sizeof(spare));
++        if (s->sec < 8) {
++            stl_le_p(spare, s->nfi[NFI_FDML(s->sec) / 4]);
++            stl_le_p(spare + 4, s->nfi[NFI_FDMM(s->sec) / 4]);
++        }
++        for (int i = 0; i < SPARE; i++) {
++            chip_write(s, spare[i]);
++        }
++    }
++    s->sec++;
++    s->sec_pos = 0;
++}
++
++static uint8_t nfi_read_byte(MT7621NandState *s)
++{
++    uint8_t v = chip_read(s);
++
++    if (s->nfi[NFI_CNFG / 4] & CNFG_AUTO_FMT && ++s->sec_pos == SECT) {
++        fmt_after_sector(s, true);
++    }
++    return v;
++}
++
++static void nfi_write_byte(MT7621NandState *s, uint8_t v)
++{
++    chip_write(s, v);
++    if (s->nfi[NFI_CNFG / 4] & CNFG_AUTO_FMT && ++s->sec_pos == SECT) {
++        fmt_after_sector(s, false);
++    }
++}
++
++static void nfi_reset(MT7621NandState *s)
++{
++    s->data_phase = false;
++    s->sec = s->sec_pos = 0;
++    s->nfi[NFI_STRDATA / 4] = 0;
++}
++
++static uint64_t nfi_read(void *opaque, hwaddr a, unsigned size)
++{
++    MT7621NandState *s = opaque;
++    uint32_t v = 0;
++
++    switch (a & ~3) {
++    case NFI_DATAR:
++        if (s->nfi[NFI_CNFG / 4] & CNFG_BYTE_RW) {
++            return nfi_read_byte(s);
++        }
++        for (int i = 0; i < 4; i++) {
++            v |= nfi_read_byte(s) << (8 * i);
++        }
++        return v;
++    case NFI_PIO_DIRDY:
++        return 1;
++    case NFI_STA:
++        /* never busy; data phase: FSM "custom data" */
++        return s->data_phase ? FSM_CUSTOM_DATA << 16 : 0;
++    case NFI_ADDRCNTR:
++        return (MIN(s->sec, 15) << 12) | (s->sec_pos & 0x3ff);
++    case NFI_MASTER_STA:
++        return 0;
++    }
++    v = s->nfi[(a & 0x7ff) / 4];
++    return v >> ((a & 3) * 8);
++}
++
++static void nfi_write(void *opaque, hwaddr a, uint64_t val, unsigned size)
++{
++    MT7621NandState *s = opaque;
++    uint32_t v = val;
++
++    switch (a & ~3) {
++    case NFI_CMD:
++        chip_command(s, v);
++        return;
++    case NFI_ADDRNOB: {
++        int ncol = v & 7, nrow = (v >> 4) & 7;
++        for (int i = 0; i < ncol; i++) {
++            chip_address(s, s->nfi[NFI_COLADDR / 4] >> (8 * i));
++        }
++        for (int i = 0; i < nrow; i++) {
++            chip_address(s, s->nfi[NFI_ROWADDR / 4] >> (8 * i));
++        }
++        return;
++    }
++    case NFI_CON:
++        if (v & CON_NFI_RST) {
++            nfi_reset(s);
++        }
++        break;
++    case NFI_STRDATA:
++        if (v & 1) {
++            s->data_phase = true;
++        }
++        break;
++    case NFI_DATAW:
++        if (s->nfi[NFI_CNFG / 4] & CNFG_BYTE_RW) {
++            nfi_write_byte(s, v);
++        } else {
++            for (int i = 0; i < 4; i++) {
++                nfi_write_byte(s, v >> (8 * i));
++            }
++        }
++        return;
++    case NFI_CNFG:
++        /* a new operation: sector counters from the start */
++        s->sec = s->sec_pos = 0;
++        break;
++    }
++    if (size == 4) {
++        s->nfi[(a & 0x7ff) / 4] = v;
++    } else {
++        uint32_t *r = &s->nfi[(a & 0x7ff) / 4];
++        unsigned sh = (a & 3) * 8;
++        uint32_t m = ((1u << (size * 8)) - 1) << sh;
++        *r = (*r & ~m) | ((v << sh) & m);
++    }
++}
++
++static const MemoryRegionOps nfi_ops = {
++    .read = nfi_read,
++    .write = nfi_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 1, .max_access_size = 4 },
++    .impl = { .min_access_size = 1, .max_access_size = 4 },
++};
++
++static uint64_t ecc_read(void *opaque, hwaddr a, unsigned size)
++{
++    MT7621NandState *s = opaque;
++    uint32_t v;
++
++    switch (a & ~3) {
++    case ECC_ENCIDLE:
++    case ECC_DECIDLE:
++        v = 3;
++        break;
++    case ECC_DECENUM:
++        v = 0;                  /* no bit errors */
++        break;
++    default:
++        v = s->ecc[(a & 0x7ff) / 4];
++    }
++    return v >> ((a & 3) * 8);
++}
++
++static void ecc_write(void *opaque, hwaddr a, uint64_t val, unsigned size)
++{
++    MT7621NandState *s = opaque;
++
++    if ((a & ~3) == ECC_DECCON) {
++        s->ecc[ECC_DECDONE / 4] = 0;    /* decoder (re)started */
++    }
++    s->ecc[(a & 0x7ff) / 4] = val;
++}
++
++static const MemoryRegionOps ecc_ops = {
++    .read = ecc_read,
++    .write = ecc_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 1, .max_access_size = 4 },
++    .impl = { .min_access_size = 4, .max_access_size = 4 },
++};
++
++void mt7621_nand_read(MT7621NandState *s, uint64_t off, void *buf,
++                      size_t len)
++{
++    uint64_t total = (uint64_t)s->pages * PAGE_SIZE_;
++
++    if (off >= total) {
++        memset(buf, 0xff, len);
++        return;
++    }
++    memcpy(buf, s->data + off, MIN(len, total - off));
++    if (len > total - off) {
++        memset((uint8_t *)buf + (total - off), 0xff, len - (total - off));
++    }
++}
++
++static int seg_cmp(const void *a, const void *b)
++{
++    const NandSegment *x = a, *y = b;
++    return (int)x->start - (int)y->start;   /* the mtd index here */
++}
++
++/*
++ * Partition dumps: every file whose name contains "mtdN", in mtd order,
++ * concatenated (data only, no OOB); the rest of the chip is erased.
++ */
++static bool load_dir(MT7621NandState *s, Error **errp)
++{
++    GDir *d = g_dir_open(s->dir, 0, NULL);
++    GRegex *re = g_regex_new("mtd([0-9]+)", 0, 0, NULL);
++    uint64_t total = (uint64_t)s->pages * PAGE_SIZE_, pos = 0;
++    const char *name;
++
++    if (!d) {
++        error_setg(errp, "mt7621-nand: cannot open NAND directory '%s'",
++                   s->dir);
++        return false;
++    }
++    while ((name = g_dir_read_name(d))) {
++        GMatchInfo *mi;
++        if (g_regex_match(re, name, 0, &mi)) {
++            g_autofree char *num = g_match_info_fetch(mi, 1);
++            s->segs = g_renew(NandSegment, s->segs, s->nsegs + 1);
++            s->segs[s->nsegs].path = g_build_filename(s->dir, name, NULL);
++            s->segs[s->nsegs].start = atoi(num);
++            s->segs[s->nsegs].fd = -1;
++            s->nsegs++;
++        }
++        g_match_info_free(mi);
++    }
++    g_dir_close(d);
++    g_regex_unref(re);
++    if (!s->nsegs) {
++        error_setg(errp, "mt7621-nand: no *mtdN* files in '%s'", s->dir);
++        return false;
++    }
++    qsort(s->segs, s->nsegs, sizeof(NandSegment), seg_cmp);
++    for (int i = 0; i < s->nsegs; i++) {
++        NandSegment *g = &s->segs[i];
++        struct stat st;
++
++        if (i && g->start == s->segs[i - 1].start) {
++            error_setg(errp, "mt7621-nand: two files for mtd%d: %s and %s",
++                       (int)g->start, s->segs[i - 1].path, g->path);
++            return false;
++        }
++        g->fd = open(g->path, O_RDWR | O_BINARY);
++        if (g->fd < 0) {
++            g->fd = open(g->path, O_RDONLY | O_BINARY);
++            warn_report("mt7621-nand: %s is read-only, writes are not "
++                        "saved", g->path);
++        }
++        if (g->fd < 0 || fstat(g->fd, &st) < 0) {
++            error_setg_errno(errp, errno, "mt7621-nand: cannot open %s",
++                             g->path);
++            return false;
++        }
++        g->start = pos;
++        g->len = st.st_size;
++        if (pos + g->len > total) {
++            error_setg(errp, "mt7621-nand: partition files exceed the flash "
++                       "size (%" PRIu64 " bytes) at %s", total, g->path);
++            return false;
++        }
++        if (file_pread(g->fd, s->data + pos, g->len, 0) != (ssize_t)g->len) {
++            error_setg(errp, "mt7621-nand: read error on %s", g->path);
++            return false;
++        }
++        info_report("NAND 0x%08" PRIx64 "-0x%08" PRIx64 ": %s", pos,
++                    pos + g->len, g->path);
++        pos += g->len;
++    }
++    return true;
++}
++
++static void mt7621_nand_realize(DeviceState *dev, Error **errp)
++{
++    MT7621NandState *s = MT7621_NAND(dev);
++    uint64_t size = (uint64_t)s->size_mb * MiB;
++
++    const char *id = s->id_hex ? s->id_hex : "ecf1009540";
++
++    s->id_len = 0;
++    for (; id[0] && id[1] && s->id_len < (int)sizeof(s->chip_id); id += 2) {
++        unsigned v;
++        if (sscanf(id, "%2x", &v) != 1) {
++            error_setg(errp, "mt7621-nand: id must be hex bytes");
++            return;
++        }
++        s->chip_id[s->id_len++] = v;
++    }
++    s->pages = size / PAGE_SIZE_;
++    s->data = g_malloc(size);
++    s->oob = g_malloc((uint64_t)s->pages * OOB_SIZE);
++    memset(s->data, 0xff, size);
++    memset(s->oob, 0xff, (uint64_t)s->pages * OOB_SIZE);
++    if (s->dir) {
++        load_dir(s, errp);
++    }
++}
++
++static void mt7621_nand_reset(DeviceState *dev)
++{
++    MT7621NandState *s = MT7621_NAND(dev);
++
++    memset(s->nfi, 0, sizeof(s->nfi));
++    memset(s->ecc, 0, sizeof(s->ecc));
++    nfi_reset(s);
++    s->cmd = 0;
++    s->naddr = 0;
++    s->id_mode = s->status_mode = false;
++}
++
++static void mt7621_nand_init(Object *obj)
++{
++    MT7621NandState *s = MT7621_NAND(obj);
++
++    memory_region_init_io(&s->nfi_mr, obj, &nfi_ops, s, "mt7621-nfi", 0x800);
++    memory_region_init_io(&s->ecc_mr, obj, &ecc_ops, s, "mt7621-nfi-ecc",
++                          0x800);
++    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->nfi_mr);
++    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->ecc_mr);
++}
++
++static const Property mt7621_nand_props[] = {
++    DEFINE_PROP_STRING("dir", MT7621NandState, dir),
++    DEFINE_PROP_STRING("id", MT7621NandState, id_hex),
++    DEFINE_PROP_UINT32("size-mb", MT7621NandState, size_mb, 128),
++};
++
++static void mt7621_nand_class_init(ObjectClass *oc, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(oc);
++
++    dc->realize = mt7621_nand_realize;
++    device_class_set_legacy_reset(dc, mt7621_nand_reset);
++    device_class_set_props(dc, mt7621_nand_props);
++    dc->desc = "MT7621 NFI + parallel SLC NAND";
++}
++
++static const TypeInfo mt7621_nand_type = {
++    .name = TYPE_MT7621_NAND,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(MT7621NandState),
++    .instance_init = mt7621_nand_init,
++    .class_init = mt7621_nand_class_init,
++};
++
++static void mt7621_nand_register(void)
++{
++    type_register_static(&mt7621_nand_type);
++}
++
++type_init(mt7621_nand_register)
+diff --git a/hw/mips/mt7621_nand.h b/hw/mips/mt7621_nand.h
+new file mode 100644
+index 0000000..15996e8
+--- /dev/null
++++ b/hw/mips/mt7621_nand.h
+@@ -0,0 +1,20 @@
++/*
++ * MediaTek MT7621 NFI + parallel NAND (see mt7621_nand.c)
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef HW_MIPS_MT7621_NAND_H
++#define HW_MIPS_MT7621_NAND_H
++
++#include "hw/sysbus.h"
++#include "qom/object.h"
++
++#define TYPE_MT7621_NAND "mt7621-nand"
++OBJECT_DECLARE_SIMPLE_TYPE(MT7621NandState, MT7621_NAND)
++
++/* data bytes (no OOB) at a logical offset, for the BootROM */
++void mt7621_nand_read(MT7621NandState *s, uint64_t off, void *buf,
++                      size_t len);
++
++#endif
+diff --git a/target/mips/cpu-defs.c.inc b/target/mips/cpu-defs.c.inc
+index e49c9df..1237f36 100644
+--- a/target/mips/cpu-defs.c.inc
++++ b/target/mips/cpu-defs.c.inc
+@@ -346,7 +346,7 @@ const mips_def_t mips_defs[] =
+                     (1 << CP0TCSt_DA) | (1 << CP0TCSt_A) |
+                     (0x3 << CP0TCSt_TKSU) | (1 << CP0TCSt_IXMT) |
+                     (0xff << CP0TCSt_TASID),
+-        .CP0_SRSCtl = (0xf << CP0SRSCtl_HSS),
++        .CP0_SRSCtl = 0,            /* no shadow register sets */
+         .SEGBITS = 32,
+         .PABITS = 32,
+         .insn_flags = CPU_MIPS32R2 | ASE_MIPS16 | ASE_DSP | ASE_DSP_R2,
+diff --git a/target/mips/cpu.h b/target/mips/cpu.h
+index 09f479c..89734e5 100644
+--- a/target/mips/cpu.h
++++ b/target/mips/cpu.h
+@@ -1185,6 +1185,12 @@ typedef struct CPUArchState {
+      */
+     void (*cache_hook)(struct CPUArchState *env, target_ulong addr,
+                        uint32_t op);
++    /*
++     * Board hook: physical address of a cached (kseg0) access, e.g. to
++     * lines of a cache locked as SRAM that are not the DRAM behind them
++     * (page granular; the board flushes the TLBs when it changes).
++     */
++    hwaddr (*kseg0_remap)(struct CPUArchState *env, hwaddr pa);
+ 
+     /* Loongson IOCSR memory */
+     struct {
+diff --git a/target/mips/system/physaddr.c b/target/mips/system/physaddr.c
+index b8e1a5a..6f1d019 100644
+--- a/target/mips/system/physaddr.c
++++ b/target/mips/system/physaddr.c
+@@ -206,6 +206,9 @@ int get_physical_address(CPUMIPSState *env, hwaddr *physical,
+         ret = get_segctl_physical_address(env, physical, prot, real_address,
+                                           access_type, mmu_idx,
+                                           env->CP0_SegCtl1 >> 16, 0x1FFFFFFF);
++        if (ret == TLBRET_MATCH && env->kseg0_remap) {
++            *physical = env->kseg0_remap(env, *physical);
++        }
+     } else if (address < KSEG2_BASE) {
+         /* kseg1 */
+         ret = get_segctl_physical_address(env, physical, prot, real_address,
+diff --git a/target/mips/tcg/system/special_helper.c b/target/mips/tcg/system/special_helper.c
+index e457359..c13b1d7 100644
+--- a/target/mips/tcg/system/special_helper.c
++++ b/target/mips/tcg/system/special_helper.c
+@@ -153,9 +153,7 @@ void helper_cache(CPUMIPSState *env, target_ulong addr, uint32_t op)
+ 
+     if (env->cache_hook) {
+         env->cache_hook(env, addr, op);
+-        if (!env->itc_tag) {
+-            return;
+-        }
++        return;
+     }
+ 
+     switch (cache_operation) {
+-- 
+2.47.3
+

@@ -61,7 +61,7 @@ namespace RouterEmulator
         // machine options of the MT7621 machine (the editor writes the
         // Filogic ones, e.g. gmac0/nand, for every preset)
         static readonly string[] Mt7621Keys = { "ports", "ddr", "usb-port", "reset-gpio", "wps-gpio",
-            "reset-active-high", "wps-active-high" };   // + led1..ledN
+            "reset-active-high", "wps-active-high", "pcie0", "pcie1", "pcie2" };   // + led1..ledN
 
         // LAN1 "This PC only": router LAN address and port forwards
         // "pcport:routerport,..." from 127.0.0.1 to the router

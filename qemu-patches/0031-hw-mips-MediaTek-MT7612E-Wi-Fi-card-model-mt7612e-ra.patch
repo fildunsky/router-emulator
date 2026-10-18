@@ -1,0 +1,338 @@
+From 9f91531d146bcb5e30c183f1a38e455733358f0f Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Sun, 18 Oct 2026 10:41:58 -0400
+Subject: [PATCH 31/32] hw/mips: MediaTek MT7612E Wi-Fi card model (mt7612e,
+ radio silent)
+
+---
+ hw/mips/meson.build   |   1 +
+ hw/mips/mt7621_pcie.c |   6 +
+ hw/mips/mt76x2_wifi.c | 287 ++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 294 insertions(+)
+ create mode 100644 hw/mips/mt76x2_wifi.c
+
+diff --git a/hw/mips/meson.build b/hw/mips/meson.build
+index a3a6b47..3a1b278 100644
+--- a/hw/mips/meson.build
++++ b/hw/mips/meson.build
+@@ -12,6 +12,7 @@ mips_ss.add(when: 'CONFIG_MIPSSIM', if_true: files('mipssim.c'))
+ mips_ss.add(when: 'CONFIG_FULOONG', if_true: files('fuloong2e.c'))
+ mips_ss.add(when: 'CONFIG_MIPS_BOSTON', if_true: files('boston.c'))
+ mips_ss.add(when: 'CONFIG_MT7621_ROUTER', if_true: files('mt7621.c', 'mt7621_nand.c', 'mt7621_pcie.c',
++  'mt76x2_wifi.c',
+   '../arm/filogic/spinor.c', '../arm/filogic/mtk_eth.c',
+   '../arm/filogic/mtk_pinctrl.c', '../arm/filogic/filogic_leds.c',
+   '../arm/filogic/ws2812b.c', '../arm/filogic/hc595.c'))
+diff --git a/hw/mips/mt7621_pcie.c b/hw/mips/mt7621_pcie.c
+index ee3216f..0821fbf 100644
+--- a/hw/mips/mt7621_pcie.c
++++ b/hw/mips/mt7621_pcie.c
+@@ -175,6 +175,12 @@ static void mt7621_pcie_realize(DeviceState *dev, Error **errp)
+             PCIBus *sec = pci_bridge_get_sec_bus(PCI_BRIDGE(s->root[p]));
+             PCIDevice *card = pci_new(PCI_DEVFN(0, 0), s->card[p]);
+ 
++            /* Wi-Fi card models: MAC 80:af:ca:11:22:35 + slot */
++            if (object_property_find(OBJECT(card), "mac")) {
++                g_autofree char *mac =
++                    g_strdup_printf("80:af:ca:11:22:%02x", 0x35 + p);
++                object_property_parse(OBJECT(card), "mac", mac, &error_abort);
++            }
+             if (!pci_realize_and_unref(card, sec, errp)) {
+                 return;
+             }
+diff --git a/hw/mips/mt76x2_wifi.c b/hw/mips/mt76x2_wifi.c
+new file mode 100644
+index 0000000..11b9c16
+--- /dev/null
++++ b/hw/mips/mt76x2_wifi.c
+@@ -0,0 +1,287 @@
++/*
++ * MediaTek MT7612E (802.11ac 2x2, 5 GHz) PCIe card - "radio silent" model.
++ *
++ * Enough of the chip for the unmodified mt76x2e driver: ASIC version,
++ * power-on handshake, eFuse (a minimal EEPROM: chip ID, MAC, 2x2 paths)
++ * for boards without one in flash, the ROM patch / firmware download
++ * through the MCU window with the "running" flags, and the WPDMA rings:
++ * MCU commands get a CMD_DONE event with their sequence number on RX ring
++ * 1, TX frames are completed.  Nothing goes on the air: an AP runs
++ * without clients.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qapi/error.h"
++#include "hw/pci/pci_device.h"
++#include "hw/pci/pcie.h"
++#include "hw/qdev-properties.h"
++#include "system/dma.h"
++#include "net/net.h"
++
++#define TYPE_MT76X2_WIFI "mt7612e"
++OBJECT_DECLARE_SIMPLE_TYPE(Mt76x2State, MT76X2_WIFI)
++
++#define BAR0_SIZE       0x100000
++#define ASIC_REV        0x76120044      /* MT7612, rev E3+ */
++
++#define R_ASIC_VERSION  0x0000
++#define R_EFUSE_CTRL    0x0024
++#define  EFUSE_KICK     BIT(30)
++#define R_EFUSE_DATA0   0x0028
++#define R_INT_SOURCE    0x0200
++#define R_INT_MASK      0x0204
++#define R_WPDMA_GLO     0x0208
++#define R_WPDMA_RST     0x020c
++#define R_TX_RING       0x0300          /* + 0x10 * queue */
++#define R_RX_RING       0x03c0          /* + 0x10 * queue */
++#define R_MCU_CLOCK     0x0708
++#define R_MCU_INT_LEVEL 0x0718
++#define R_MCU_COM_REG0  0x0730
++#define R_MAC_CSR0      0x1000
++#define R_MTC_CTRL      0x10148
++#define  MTC_ACK        (BIT(12) | BIT(13) | BIT(28))
++
++#define NTXQ            10
++#define NRXQ            2
++#define MCU_TXQ         8
++#define MCU_RXQ         1
++#define CMD_CALIBRATION_OP 31
++#define EEPROM_SIZE     512
++
++#define INT_RX_DONE(n)  BIT(n)
++#define INT_TX_DONE(n)  BIT((n) + 4)
++
++#define DMA_DONE        BIT(31)
++#define LAST_SEC0       BIT(30)
++
++struct Mt76x2State {
++    PCIDevice parent_obj;
++
++    MemoryRegion bar0;
++    uint32_t r[BAR0_SIZE / 4];
++    uint8_t eeprom[EEPROM_SIZE];
++    MACAddr mac;
++};
++
++static void update_irq(Mt76x2State *s)
++{
++    pci_set_irq(PCI_DEVICE(s),
++                !!(s->r[R_INT_SOURCE / 4] & s->r[R_INT_MASK / 4]));
++}
++
++static void raise_irq(Mt76x2State *s, uint32_t bits)
++{
++    s->r[R_INT_SOURCE / 4] |= bits;
++    update_irq(s);
++}
++
++/* the eFuse: chip ID, version, MAC, 2 RX + 2 TX paths, the rest erased */
++static void eeprom_init(Mt76x2State *s)
++{
++    memset(s->eeprom, 0xff, sizeof(s->eeprom));
++    stw_le_p(s->eeprom + 0x00, 0x7612);
++    stw_le_p(s->eeprom + 0x02, 0x0001);
++    memcpy(s->eeprom + 0x04, s->mac.a, 6);
++    stw_le_p(s->eeprom + 0x34, 0x0022);     /* NIC_CONF_0: 2T2R */
++    stw_le_p(s->eeprom + 0x36, 0x0000);     /* NIC_CONF_1 */
++    stw_le_p(s->eeprom + 0x42, 0x0000);     /* NIC_CONF_2 */
++}
++
++/* ring registers: base, size, CPU index, DMA index */
++static uint32_t *ring(Mt76x2State *s, hwaddr base, int q)
++{
++    return &s->r[(base + q * 0x10) / 4];
++}
++
++/* an MCU event for the command with sequence number seq on RX ring 1 */
++static void mcu_event(Mt76x2State *s, uint32_t seq)
++{
++    uint32_t *rq = ring(s, R_RX_RING, MCU_RXQ);
++    uint32_t size = rq[1], didx = rq[3], desc[4];
++    uint8_t payload[4] = { 0 };
++    dma_addr_t d;
++
++    if (!rq[0] || !size || didx == rq[2] % size) {
++        return;                 /* no ring, or no free buffer */
++    }
++    d = rq[0] + didx * 16;
++    pci_dma_read(PCI_DEVICE(s), d, desc, sizeof(desc));
++    pci_dma_write(PCI_DEVICE(s), le32_to_cpu(desc[0]), payload,
++                  sizeof(payload));
++    desc[1] = cpu_to_le32(DMA_DONE | LAST_SEC0 | (sizeof(payload) << 16));
++    /* RX FCE info: length, command sequence, event "command done" */
++    desc[3] = cpu_to_le32(sizeof(payload) | (seq << 16) | (1u << 20));
++    pci_dma_write(PCI_DEVICE(s), d, desc, sizeof(desc));
++    rq[3] = (didx + 1) % size;
++    raise_irq(s, INT_RX_DONE(MCU_RXQ));
++}
++
++/* the driver handed TX descriptors up to its CPU index: complete them */
++static void tx_kick(Mt76x2State *s, int q)
++{
++    uint32_t *tq = ring(s, R_TX_RING, q);
++    uint32_t size = tq[1];
++
++    if (!tq[0] || !size) {
++        return;
++    }
++    while (tq[3] != tq[2] % size) {
++        dma_addr_t d = tq[0] + tq[3] * 16;
++        uint32_t desc[4];
++
++        pci_dma_read(PCI_DEVICE(s), d, desc, sizeof(desc));
++        desc[1] |= cpu_to_le32(DMA_DONE);
++        pci_dma_write(PCI_DEVICE(s), d + 4, &desc[1], 4);
++        if (q == MCU_TXQ) {
++            /* MCU message info: command 26:20, sequence number 19:16 */
++            uint32_t info = le32_to_cpu(desc[3]);
++
++            if (((info >> 20) & 0x7f) == CMD_CALIBRATION_OP) {
++                s->r[R_MCU_COM_REG0 / 4] |= BIT(31);    /* calibrated */
++            }
++            mcu_event(s, (info >> 16) & 0xf);
++        }
++        tq[3] = (tq[3] + 1) % size;
++    }
++    raise_irq(s, INT_TX_DONE(q));
++}
++
++static uint64_t bar0_read(void *opaque, hwaddr off, unsigned size)
++{
++    Mt76x2State *s = opaque;
++
++    switch (off) {
++    case R_ASIC_VERSION:
++    case R_MAC_CSR0:
++        return ASIC_REV;
++    case R_WPDMA_GLO:
++        return s->r[off / 4] & ~(BIT(1) | BIT(3));      /* never busy */
++    }
++    return s->r[off / 4];
++}
++
++static void bar0_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
++{
++    Mt76x2State *s = opaque;
++    uint32_t v = val;
++
++    switch (off) {
++    case R_INT_SOURCE:
++        s->r[off / 4] &= ~v;                /* write 1 to clear */
++        update_irq(s);
++        return;
++    case R_INT_MASK:
++        s->r[off / 4] = v;
++        update_irq(s);
++        return;
++    case R_WPDMA_RST:
++        for (int q = 0; q < NTXQ; q++) {
++            if (v & BIT(q)) {
++                ring(s, R_TX_RING, q)[3] = 0;
++            }
++        }
++        for (int q = 0; q < NRXQ; q++) {
++            if (v & BIT(16 + q)) {
++                ring(s, R_RX_RING, q)[3] = 0;
++            }
++        }
++        return;
++    case R_EFUSE_CTRL:
++        if (v & EFUSE_KICK) {
++            uint32_t a = ((v >> 16) & 0x3ff) & ~0xf;
++
++            for (int i = 0; i < 4; i++) {
++                s->r[R_EFUSE_DATA0 / 4 + i] = a + 16 <= EEPROM_SIZE ?
++                    ldl_le_p(s->eeprom + a + 4 * i) : 0xffffffff;
++            }
++            v &= ~(EFUSE_KICK | 0x3f);      /* done, data present */
++        }
++        break;
++    case R_MCU_INT_LEVEL:
++        if (v == 4) {
++            s->r[R_MCU_CLOCK / 4] |= BIT(0);    /* ROM patch applied */
++        } else if (v == 2) {
++            s->r[R_MCU_COM_REG0 / 4] |= BIT(0); /* firmware running */
++        }
++        break;
++    case R_MTC_CTRL:
++        v = (v & BIT(0)) ? v | MTC_ACK : v & ~MTC_ACK;
++        break;
++    }
++    s->r[off / 4] = v;
++    if (off >= R_TX_RING && off < R_TX_RING + NTXQ * 0x10 &&
++        (off & 0xf) == 8) {
++        tx_kick(s, (off - R_TX_RING) / 0x10);
++    }
++}
++
++static const MemoryRegionOps bar0_ops = {
++    .read = bar0_read,
++    .write = bar0_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 4, .max_access_size = 4 },
++};
++
++static void mt76x2_reset(DeviceState *dev)
++{
++    Mt76x2State *s = MT76X2_WIFI(dev);
++
++    memset(s->r, 0, sizeof(s->r));
++    update_irq(s);
++}
++
++static void mt76x2_realize(PCIDevice *pd, Error **errp)
++{
++    Mt76x2State *s = MT76X2_WIFI(pd);
++
++    pd->config[PCI_INTERRUPT_PIN] = 1;
++    if (pcie_endpoint_cap_init(pd, 0x80) < 0) {
++        error_setg(errp, "mt7612e: PCIe capability");
++        return;
++    }
++    memory_region_init_io(&s->bar0, OBJECT(s), &bar0_ops, s, "mt7612e",
++                          BAR0_SIZE);
++    pci_register_bar(pd, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bar0);
++    eeprom_init(s);
++}
++
++static const Property mt76x2_props[] = {
++    DEFINE_PROP_MACADDR("mac", Mt76x2State, mac),
++};
++
++static void mt76x2_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
++
++    k->realize = mt76x2_realize;
++    k->vendor_id = 0x14c3;
++    k->device_id = 0x7662;
++    k->class_id = PCI_CLASS_NETWORK_OTHER;
++    device_class_set_legacy_reset(dc, mt76x2_reset);
++    device_class_set_props(dc, mt76x2_props);
++    dc->desc = "MediaTek MT7612E Wi-Fi (radio silent)";
++    set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
++}
++
++static const TypeInfo mt76x2_info = {
++    .name = TYPE_MT76X2_WIFI,
++    .parent = TYPE_PCI_DEVICE,
++    .instance_size = sizeof(Mt76x2State),
++    .class_init = mt76x2_class_init,
++    .interfaces = (const InterfaceInfo[]) {
++        { INTERFACE_PCIE_DEVICE },
++        { }
++    },
++};
++
++static void mt76x2_register_types(void)
++{
++    type_register_static(&mt76x2_info);
++}
++
++type_init(mt76x2_register_types)
+-- 
+2.47.3
+

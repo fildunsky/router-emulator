@@ -1,0 +1,435 @@
+From 2329b3a38b1afebb83b5699a6f791e3155f0982f Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Sun, 18 Oct 2026 10:17:23 -0400
+Subject: [PATCH 30/32] hw/mips/mt7621: PCIe host with three root ports
+ (pcie0..2=DEVICE)
+
+---
+ hw/mips/Kconfig       |  18 ++++
+ hw/mips/meson.build   |   2 +-
+ hw/mips/mt7621.c      |  53 +++++++++++
+ hw/mips/mt7621_pcie.c | 216 ++++++++++++++++++++++++++++++++++++++++++
+ hw/mips/mt7621_pcie.h |  15 +++
+ 5 files changed, 303 insertions(+), 1 deletion(-)
+ create mode 100644 hw/mips/mt7621_pcie.c
+ create mode 100644 hw/mips/mt7621_pcie.h
+
+diff --git a/hw/mips/Kconfig b/hw/mips/Kconfig
+index 84c8f0a..c4916a7 100644
+--- a/hw/mips/Kconfig
++++ b/hw/mips/Kconfig
+@@ -13,6 +13,9 @@ config MALTA
+     select SERIAL_MM
+     select SSI
+     select USB_XHCI_SYSBUS
++    select PCI_EXPRESS
++    select PCIE_PORT
++    select MSI_NONBROKEN
+     select SMBUS_EEPROM
+ 
+ config MIPSSIM
+@@ -22,6 +25,9 @@ config MIPSSIM
+     select SERIAL_MM
+     select SSI
+     select USB_XHCI_SYSBUS
++    select PCI_EXPRESS
++    select PCIE_PORT
++    select MSI_NONBROKEN
+     select MIPSNET
+ 
+ config JAZZ
+@@ -44,6 +50,9 @@ config JAZZ
+     select SERIAL_MM
+     select SSI
+     select USB_XHCI_SYSBUS
++    select PCI_EXPRESS
++    select PCIE_PORT
++    select MSI_NONBROKEN
+     select PARALLEL
+     select DS1225Y
+     select JAZZ_LED
+@@ -74,6 +83,9 @@ config LOONGSON3V
+     select SERIAL_MM
+     select SSI
+     select USB_XHCI_SYSBUS
++    select PCI_EXPRESS
++    select PCIE_PORT
++    select MSI_NONBROKEN
+     select GOLDFISH_RTC
+     select LOONGSON_IPI
+     select LOONGSON_LIOINTC
+@@ -100,6 +112,9 @@ config MIPS_BOSTON
+     select SERIAL_MM
+     select SSI
+     select USB_XHCI_SYSBUS
++    select PCI_EXPRESS
++    select PCIE_PORT
++    select MSI_NONBROKEN
+ 
+ config FW_CFG_MIPS
+     bool
+@@ -112,3 +127,6 @@ config MT7621_ROUTER
+     select SERIAL_MM
+     select SSI
+     select USB_XHCI_SYSBUS
++    select PCI_EXPRESS
++    select PCIE_PORT
++    select MSI_NONBROKEN
+diff --git a/hw/mips/meson.build b/hw/mips/meson.build
+index 1399df2..a3a6b47 100644
+--- a/hw/mips/meson.build
++++ b/hw/mips/meson.build
+@@ -11,7 +11,7 @@ mips_ss.add(when: 'CONFIG_JAZZ', if_true: files('jazz.c'))
+ mips_ss.add(when: 'CONFIG_MIPSSIM', if_true: files('mipssim.c'))
+ mips_ss.add(when: 'CONFIG_FULOONG', if_true: files('fuloong2e.c'))
+ mips_ss.add(when: 'CONFIG_MIPS_BOSTON', if_true: files('boston.c'))
+-mips_ss.add(when: 'CONFIG_MT7621_ROUTER', if_true: files('mt7621.c', 'mt7621_nand.c',
++mips_ss.add(when: 'CONFIG_MT7621_ROUTER', if_true: files('mt7621.c', 'mt7621_nand.c', 'mt7621_pcie.c',
+   '../arm/filogic/spinor.c', '../arm/filogic/mtk_eth.c',
+   '../arm/filogic/mtk_pinctrl.c', '../arm/filogic/filogic_leds.c',
+   '../arm/filogic/ws2812b.c', '../arm/filogic/hc595.c'))
+diff --git a/hw/mips/mt7621.c b/hw/mips/mt7621.c
+index ae503a9..9f9a963 100644
+--- a/hw/mips/mt7621.c
++++ b/hw/mips/mt7621.c
+@@ -34,6 +34,7 @@
+ #include "../arm/filogic/filogic.h"
+ #include "../arm/filogic/filogic_leds.h"
+ #include "mt7621_nand.h"
++#include "mt7621_pcie.h"
+ #include "hw/mips/cps.h"
+ #include "hw/timer/mips_gictimer.h"
+ #include "hw/mips/mips.h"
+@@ -239,6 +240,7 @@ typedef struct MT7621Board {
+     bool flash_nand;            /* flash=nand: boot from parallel NAND */
+     char *nand_id;              /* its READ ID bytes (hex) */
+     char *ports;                /* MT7530 port 0..4 netdev ids, ':' separated */
++    char *pcie_card[3];         /* device type in PCIe slot 0..2 */
+     uint32_t usb;               /* 0 = none, 2 = USB 2.0, 3 = USB 3.0 port */
+     char *usb_host;             /* passed through host devices VID:PID;... */
+     bool gpio_log;
+@@ -769,6 +771,26 @@ static void mt7621_create_gpio(MT7621Board *b)
+                               &error_fatal);
+ }
+ 
++/* PCIe host with three root ports; INTx to GIC 4, 24, 25 */
++static void mt7621_create_pcie(MT7621Board *b)
++{
++    static const int irq[3] = { 4, 24, 25 };
++    DeviceState *dev = qdev_new(TYPE_MT7621_PCIE);
++
++    for (int i = 0; i < 3; i++) {
++        if (b->pcie_card[i] && *b->pcie_card[i]) {
++            g_autofree char *prop = g_strdup_printf("card%d", i);
++            qdev_prop_set_string(dev, prop, b->pcie_card[i]);
++        }
++    }
++    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
++    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, 0x1e140000);
++    for (int i = 0; i < 3; i++) {
++        sysbus_connect_irq(SYS_BUS_DEVICE(dev), i,
++                           get_cps_irq(&b->cps, irq[i]));
++    }
++}
++
+ static void mt7621_init(MachineState *machine)
+ {
+     MT7621MachineState *ms = MT7621_MACHINE(machine);
+@@ -848,6 +870,7 @@ static void mt7621_init(MachineState *machine)
+     mt7621_create_flash(b);
+     mt7621_create_eth(b);
+     mt7621_create_usb(b);
++    mt7621_create_pcie(b);
+     mt7621_create_gpio(b);
+ 
+     /* UART1 (console) */
+@@ -1047,6 +1070,29 @@ static char *mt7621_get_led_state(Object *obj, Error **errp)
+     return router_leds_state(MT7621_MACHINE(obj)->b.leds);
+ }
+ 
++
++static void mt7621_set_pcie(Object *obj, Visitor *v, const char *name,
++                            void *opaque, Error **errp)
++{
++    MT7621MachineState *ms = MT7621_MACHINE(obj);
++    char *value;
++
++    if (visit_type_str(v, name, &value, errp)) {
++        g_free(ms->b.pcie_card[(uintptr_t)opaque]);
++        ms->b.pcie_card[(uintptr_t)opaque] = value;
++    }
++}
++
++static void mt7621_get_pcie_v(Object *obj, Visitor *v, const char *name,
++                              void *opaque, Error **errp)
++{
++    char *d = MT7621_MACHINE(obj)->b.pcie_card[(uintptr_t)opaque];
++    char *value = g_strdup(d ? d : "");
++
++    visit_type_str(v, name, &value, errp);
++    g_free(value);
++}
++
+ static void mt7621_instance_init(Object *obj)
+ {
+     MT7621_MACHINE(obj)->b.reset_gpio = 18;
+@@ -1081,6 +1127,13 @@ static void mt7621_machine_class_init(ObjectClass *oc, const void *data)
+     object_class_property_set_description(oc, "nand-id",
+         "READ ID bytes of the parallel NAND, hex (default ecf1009540, "
+         "Samsung K9F1G08U0D)");
++    for (int i = 0; i < 3; i++) {
++        g_autofree char *name = g_strdup_printf("pcie%d", i);
++        object_class_property_add(oc, name, "str", mt7621_get_pcie_v,
++                                  mt7621_set_pcie, NULL, (void *)(uintptr_t)i);
++        object_class_property_set_description(oc, name,
++            "QEMU device type of the card in this PCIe slot");
++    }
+     object_class_property_add_str(oc, "ports", mt7621_get_ports,
+                                   mt7621_set_ports);
+     object_class_property_set_description(oc, "ports",
+diff --git a/hw/mips/mt7621_pcie.c b/hw/mips/mt7621_pcie.c
+new file mode 100644
+index 0000000..ee3216f
+--- /dev/null
++++ b/hw/mips/mt7621_pcie.c
+@@ -0,0 +1,216 @@
++/*
++ * MediaTek MT7621 PCIe host ("mediatek,mt7621-pci").
++ *
++ * Three root ports (QEMU's generic PCIe root port, bus 0 devices 0..2)
++ * with a slot each on their secondary bus; configuration space through
++ * CONFIG_ADDR / CONFIG_DATA; a port's link is up when its slot holds a
++ * card; INTx of port N on output line N.  PCI memory addresses map 1:1
++ * to CPU addresses.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qapi/error.h"
++#include "hw/irq.h"
++#include "hw/sysbus.h"
++#include "hw/qdev-properties.h"
++#include "hw/pci/pci.h"
++#include "hw/pci/pci_bus.h"
++#include "hw/pci/pci_bridge.h"
++#include "hw/pci/pci_host.h"
++#include "hw/pci/msi.h"
++#include "system/address-spaces.h"
++#include "mt7621_pcie.h"
++
++#define REG_SIZE        0x8000
++#define CONFIG_ADDR     0x0020
++#define CONFIG_DATA     0x0024
++#define PORT_BASE(n)    (0x2000 + (n) * 0x1000)
++#define PORT_STATUS     0x50
++#define NPORTS          3
++
++struct MT7621PcieState {
++    PCIHostState parent_obj;
++
++    MemoryRegion regs;
++    MemoryRegion mem, io, mem_win, io_win;
++    qemu_irq irq[NPORTS];
++    uint32_t r[REG_SIZE / 4];
++    PCIDevice *root[NPORTS];
++    char *card[NPORTS];
++};
++
++static bool card_present(MT7621PcieState *s, int port)
++{
++    PCIBus *sec = pci_bridge_get_sec_bus(PCI_BRIDGE(s->root[port]));
++
++    return pci_find_device(sec, pci_bus_num(sec), 0) != NULL;
++}
++
++static int pcie_map_irq(PCIDevice *d, int pin)
++{
++    return PCI_SLOT(d->devfn) % NPORTS;
++}
++
++static void pcie_set_irq(void *opaque, int port, int level)
++{
++    MT7621PcieState *s = opaque;
++
++    qemu_set_irq(s->irq[port], level > 0);
++}
++
++/* CONFIG_ADDR: enable 31, ext. register 27:24, bus 23:16, devfn 15:8, reg */
++static PCIDevice *cfg_target(MT7621PcieState *s, unsigned *where)
++{
++    uint32_t a = s->r[CONFIG_ADDR / 4];
++    PCIHostState *h = PCI_HOST_BRIDGE(s);
++
++    *where = ((a >> 16) & 0xf00) | (a & 0xfc);
++    if (!(a & BIT(31))) {
++        return NULL;
++    }
++    return pci_find_device(h->bus, (a >> 16) & 0xff, (a >> 8) & 0xff);
++}
++
++static uint64_t pcie_read(void *opaque, hwaddr off, unsigned size)
++{
++    MT7621PcieState *s = opaque;
++
++    if (off >= CONFIG_DATA && off < CONFIG_DATA + 4) {
++        unsigned where;
++        PCIDevice *d = cfg_target(s, &where);
++
++        if (!d) {
++            return ~0u;
++        }
++        return pci_host_config_read_common(d, where + (off & 3),
++                                           pci_config_size(d), size);
++    }
++    for (int p = 0; p < NPORTS; p++) {
++        if (off == PORT_BASE(p) + PORT_STATUS) {
++            return card_present(s, p) ? 1 : 0;
++        }
++    }
++    return s->r[off / 4] >> ((off & 3) * 8);
++}
++
++static void pcie_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
++{
++    MT7621PcieState *s = opaque;
++
++    if (off >= CONFIG_DATA && off < CONFIG_DATA + 4) {
++        unsigned where;
++        PCIDevice *d = cfg_target(s, &where);
++
++        if (d) {
++            pci_host_config_write_common(d, where + (off & 3),
++                                         pci_config_size(d), val, size);
++        }
++        return;
++    }
++    if (size == 4) {
++        s->r[off / 4] = val;
++    }
++}
++
++static const MemoryRegionOps pcie_ops = {
++    .read = pcie_read,
++    .write = pcie_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 1, .max_access_size = 4 },
++    .impl = { .min_access_size = 1, .max_access_size = 4 },
++};
++
++static void mt7621_pcie_reset(DeviceState *dev)
++{
++    MT7621PcieState *s = MT7621_PCIE(dev);
++
++    memset(s->r, 0, sizeof(s->r));
++}
++
++static const char *mt7621_pcie_root_bus_path(PCIHostState *h, PCIBus *b)
++{
++    return "0000:00";
++}
++
++static void mt7621_pcie_realize(DeviceState *dev, Error **errp)
++{
++    MT7621PcieState *s = MT7621_PCIE(dev);
++    PCIHostState *h = PCI_HOST_BRIDGE(dev);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
++    MemoryRegion *sysmem = get_system_memory();
++
++    memory_region_init_io(&s->regs, OBJECT(s), &pcie_ops, s, "mt7621-pcie",
++                          REG_SIZE);
++    sysbus_init_mmio(sbd, &s->regs);
++    for (int p = 0; p < NPORTS; p++) {
++        sysbus_init_irq(sbd, &s->irq[p]);
++    }
++
++    memory_region_init(&s->mem, OBJECT(s), "pcie-mem", UINT64_MAX);
++    memory_region_init(&s->io, OBJECT(s), "pcie-io", 0x10000);
++    memory_region_init_alias(&s->mem_win, OBJECT(s), "pcie-mem-win", &s->mem,
++                             0x60000000, 0x10000000);
++    memory_region_add_subregion(sysmem, 0x60000000, &s->mem_win);
++    memory_region_init_alias(&s->io_win, OBJECT(s), "pcie-io-win", &s->io, 0,
++                             0x10000);
++    memory_region_add_subregion(sysmem, 0x1e160000, &s->io_win);
++
++    /* the root ports need it; the MT7621 itself has no MSI controller */
++    msi_nonbroken = true;
++    h->bus = pci_register_root_bus(dev, NULL, pcie_set_irq, pcie_map_irq, s,
++                                   &s->mem, &s->io, 0, NPORTS, TYPE_PCIE_BUS);
++
++    for (int p = 0; p < NPORTS; p++) {
++        s->root[p] = pci_new(PCI_DEVFN(p, 0), "pcie-root-port");
++        qdev_prop_set_uint8(DEVICE(s->root[p]), "chassis", 1 + p);
++        qdev_prop_set_uint16(DEVICE(s->root[p]), "slot", p);
++        if (!pci_realize_and_unref(s->root[p], h->bus, errp)) {
++            return;
++        }
++        if (s->card[p] && *s->card[p]) {
++            PCIBus *sec = pci_bridge_get_sec_bus(PCI_BRIDGE(s->root[p]));
++            PCIDevice *card = pci_new(PCI_DEVFN(0, 0), s->card[p]);
++
++            if (!pci_realize_and_unref(card, sec, errp)) {
++                return;
++            }
++        }
++    }
++}
++
++static const Property mt7621_pcie_props[] = {
++    DEFINE_PROP_STRING("card0", MT7621PcieState, card[0]),
++    DEFINE_PROP_STRING("card1", MT7621PcieState, card[1]),
++    DEFINE_PROP_STRING("card2", MT7621PcieState, card[2]),
++};
++
++static void mt7621_pcie_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    PCIHostBridgeClass *hc = PCI_HOST_BRIDGE_CLASS(klass);
++
++    hc->root_bus_path = mt7621_pcie_root_bus_path;
++    dc->realize = mt7621_pcie_realize;
++    device_class_set_legacy_reset(dc, mt7621_pcie_reset);
++    device_class_set_props(dc, mt7621_pcie_props);
++    dc->user_creatable = false;
++    set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
++}
++
++static const TypeInfo mt7621_pcie_info = {
++    .name = TYPE_MT7621_PCIE,
++    .parent = TYPE_PCI_HOST_BRIDGE,
++    .instance_size = sizeof(MT7621PcieState),
++    .class_init = mt7621_pcie_class_init,
++};
++
++static void mt7621_pcie_register_types(void)
++{
++    type_register_static(&mt7621_pcie_info);
++}
++
++type_init(mt7621_pcie_register_types)
+diff --git a/hw/mips/mt7621_pcie.h b/hw/mips/mt7621_pcie.h
+new file mode 100644
+index 0000000..f8f25ec
+--- /dev/null
++++ b/hw/mips/mt7621_pcie.h
+@@ -0,0 +1,15 @@
++/*
++ * MediaTek MT7621 PCIe host (see mt7621_pcie.c)
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef HW_MIPS_MT7621_PCIE_H
++#define HW_MIPS_MT7621_PCIE_H
++
++#include "qom/object.h"
++
++#define TYPE_MT7621_PCIE "mt7621-pcie"
++OBJECT_DECLARE_SIMPLE_TYPE(MT7621PcieState, MT7621_PCIE)
++
++#endif
+-- 
+2.47.3
+
