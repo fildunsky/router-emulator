@@ -1,0 +1,67 @@
+From 61eefd80dcb478188fce1f7f023cfb6e2c2cb922 Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Sun, 18 Oct 2026 11:14:41 -0400
+Subject: [PATCH] hw/mips: MT7603E / MT7612E eFuse EEPROMs with TX power (16
+ dBm per chain)
+
+---
+ hw/mips/mt7603_wifi.c |  9 +++++++++
+ hw/mips/mt76x2_wifi.c | 22 ++++++++++++++++++++++
+ 2 files changed, 31 insertions(+)
+
+diff --git a/hw/mips/mt7603_wifi.c b/hw/mips/mt7603_wifi.c
+index aedb271..6528e6e 100644
+--- a/hw/mips/mt7603_wifi.c
++++ b/hw/mips/mt7603_wifi.c
+@@ -88,6 +88,15 @@ static void eeprom_init(Mt7603State *s)
+     memcpy(s->eeprom + 0x04, s->mac.a, 6);
+     s->eeprom[0x34] = 0x22;             /* NIC_CONF_0: 2 RX, 2 TX paths */
+     s->eeprom[0x35] = 0x00;
++    /*
++     * TX power: target 0x20 = 16 dBm per chain (2 GHz group of chain 0
++     * and 1, + 2), per-rate offsets 0 (CCK... at 0xa0, 14 bytes); without
++     * them the driver's current power is 0 (shown as 3 dBm)
++     */
++    memset(s->eeprom + 0x56, 0, 12);
++    s->eeprom[0x56 + 2] = 0x20;
++    s->eeprom[0x5c + 2] = 0x20;
++    memset(s->eeprom + 0xa0, 0, 14);
+ }
+ 
+ /* BAR0 offset in a remap window -> chip address */
+diff --git a/hw/mips/mt76x2_wifi.c b/hw/mips/mt76x2_wifi.c
+index 11b9c16..56d9283 100644
+--- a/hw/mips/mt76x2_wifi.c
++++ b/hw/mips/mt76x2_wifi.c
+@@ -89,6 +89,28 @@ static void eeprom_init(Mt76x2State *s)
+     stw_le_p(s->eeprom + 0x34, 0x0022);     /* NIC_CONF_0: 2T2R */
+     stw_le_p(s->eeprom + 0x36, 0x0000);     /* NIC_CONF_1 */
+     stw_le_p(s->eeprom + 0x42, 0x0000);     /* NIC_CONF_2 */
++    /*
++     * TX power: per chain and channel group (TSSI slope, offset, target
++     * power, deltas), 2 GHz groups at 0x56 / 0x5c, 5 GHz groups (8 x 5
++     * bytes) at 0x62 / 0x80; target 0x20 = 16 dBm, no deltas, and the
++     * per-band targets at 0xf6 / 0xf8.  Without them the driver's
++     * current power is 0 (shown as 3 dBm)
++     */
++    for (int c = 0; c < 2; c++) {
++        uint8_t *g2 = s->eeprom + (c ? 0x5c : 0x56);
++        uint8_t *g5 = s->eeprom + (c ? 0x80 : 0x62);
++
++        memset(g2, 0, 6);
++        g2[2] = 0x20;
++        for (int g = 0; g < 6; g++) {
++            memset(g5 + g * 5, 0, 5);
++            g5[g * 5 + 2] = 0x20;
++        }
++    }
++    memset(s->eeprom + 0x50, 0, 4);         /* BW40 / BW80 deltas */
++    memset(s->eeprom + 0xa0, 0, 0x20);      /* per-rate powers: +0 */
++    s->eeprom[0xf7] = 0x20;                 /* 2 GHz target */
++    s->eeprom[0xf8] = 0x20;                 /* 5 GHz target */
+ }
+ 
+ /* ring registers: base, size, CPU index, DMA index */
+-- 
+2.47.3
+
