@@ -43,9 +43,10 @@ SYSROOT=/usr/x86_64-w64-mingw32/sys-root/mingw
 GCCLIB=/usr/lib/gcc/x86_64-w64-mingw32/$(ls /usr/lib/gcc/x86_64-w64-mingw32/ | head -1)
 CLANG="--target=x86_64-w64-windows-gnu --sysroot=$SYSROOT -fuse-ld=lld"
 mkdir -p /src/build-win-clang && cd /src/build-win-clang
-[ -f build.ninja ] || ../configure --cross-prefix=x86_64-w64-mingw32- \
+# (a build directory from before the MT7621 machine is configured again)
+grep -qs mipsel-softmmu build.ninja || ../configure --cross-prefix=x86_64-w64-mingw32- \
     --cc="clang $CLANG" --cxx="clang++ $CLANG" --extra-ldflags="-L$GCCLIB" \
-    --target-list=aarch64-softmmu --enable-slirp --enable-fdt=internal \
+    --target-list=aarch64-softmmu,mipsel-softmmu --enable-slirp --enable-fdt=internal \
     --enable-libusb \
     --disable-docs --disable-werror --disable-gtk --disable-sdl \
     --disable-vnc --disable-spice --disable-opengl --disable-curl \
@@ -54,7 +55,7 @@ mkdir -p /src/build-win-clang && cd /src/build-win-clang
 grep -q "CONFIG_USB_LIBUSB 1" config-host.h || ./pyvenv/bin/meson configure -Dlibusb=enabled
 ninja
 SR=/usr/x86_64-w64-mingw32/sys-root/mingw/bin
-cp qemu-system-aarch64.exe /out/
+cp qemu-system-aarch64.exe qemu-system-mipsel.exe /out/
 cp $(find subprojects -name "*.dll") /out/
 todo=$(ls /out/*.exe /out/*.dll)
 while [ -n "$todo" ]; do next=""

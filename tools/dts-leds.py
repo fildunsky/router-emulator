@@ -9,7 +9,9 @@ Front panel LEDs of a board from its OpenWrt device tree, as preset lines
 
 PRESET is a file in presets/ (with or without .ini) or a path; its
 openwrt= key names the OpenWrt device whose DEVICE_DTS is read from
-target/linux/mediatek/image/filogic.mk (default OpenWrt tree: src/openwrt).
+target/linux/mediatek/image/filogic.mk (default OpenWrt tree: src/openwrt);
+soc=mt7621 presets: target/linux/ramips/image/mt7621.mk (default DTS
+mt7621_<device>), GPIO controller "gpio".
 
 A preset LED line:  ledN=<name>: <colour> <source> [+ <colour> <source>...]
   sources  gpio:N[:low]     SoC GPIO (":low" = GPIO_ACTIVE_LOW)
@@ -336,7 +338,7 @@ def find_leds(dts):
                         continue
                     ctl = g[0].lstrip("&")
                     flags = num(g[2]) if len(g) > 2 else 0
-                    if ctl != "pio":
+                    if ctl not in ("pio", "gpio"):
                         src = shift_register(dts, ctl, num(g[1]), flags)
                         if not src:
                             skipped.append("%s (GPIO of %s)" % (c.name, ctl))
@@ -483,7 +485,17 @@ def ini_get(path, key):
     return None
 
 
-def device_dts(owrt, profile):
+def device_dts(owrt, profile, soc=None):
+    if soc == "mt7621":
+        mk = os.path.join(owrt, "target/linux/ramips/image/mt7621.mk")
+        with open(mk, encoding="utf-8") as f:
+            text = f.read()
+        m = re.search(r'^define Device/%s\n(.*?)^endef' % re.escape(profile),
+                      text, re.S | re.M)
+        if not m:
+            return None
+        d = re.search(r'DEVICE_DTS\s*:=\s*(\S+)', m.group(1))
+        return d.group(1) if d else "mt7621_" + profile
     mk = os.path.join(owrt, "target/linux/mediatek/image/filogic.mk")
     with open(mk, encoding="utf-8") as f:
         text = f.read()
@@ -496,8 +508,16 @@ def device_dts(owrt, profile):
     return None
 
 
-def load_dts(owrt, name):
+def load_dts(owrt, name, soc=None):
     linux = os.path.join(ROOT, "src", "linux")
+    if soc == "mt7621":
+        d = os.path.join(owrt, "target/linux/ramips/dts")
+        dts = Dts([d, os.path.join(linux, "include")], {})
+        for h in ("dt-bindings/gpio/gpio.h", "dt-bindings/leds/common.h",
+                  "dt-bindings/input/input.h"):
+            dts.read_macros(os.path.join(linux, "include", h))
+        dts.load(os.path.join(d, name + ".dts"))
+        return dts
     # boards whose DTS is in the kernel (DEVICE_DTS_DIR := $(DTS_DIR), e.g.
     # the BPi-R4): the kernel's mediatek DTS with OpenWrt's patches applied
     # (work/kdts, made by tools/kernel-dts.sh), else the plain kernel tree
@@ -559,12 +579,14 @@ def main():
                 print("%s: no openwrt= key" % f, file=sys.stderr)
                 rc = 1
             continue
-        name = device_dts(a.openwrt, prof)
+        soc = ini_get(f, "soc")
+        name = device_dts(a.openwrt, prof, soc)
         if not name:
-            print("%s: device %s not in filogic.mk" % (f, prof), file=sys.stderr)
+            print("%s: device %s not in %s" % (f, prof, "mt7621.mk" if soc == "mt7621"
+                                               else "filogic.mk"), file=sys.stderr)
             rc = 1
             continue
-        dts = load_dts(a.openwrt, name)
+        dts = load_dts(a.openwrt, name, soc)
         lines, skipped = lines_for(dts)
         print("# %s (%s.dts)" % (os.path.basename(f), name))
         for l in lines:

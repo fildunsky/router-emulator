@@ -1,0 +1,1670 @@
+From 5b00a86fb4f71a9e8792dc2efda7318187a3c5c8 Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Sun, 18 Oct 2026 05:22:27 -0400
+Subject: [PATCH] hw/mips: MediaTek MT7621 router machine (mt7621-router)
+
+MIPS 1004Kc CPU model, CM GCR coherence registers, a settable GIC timer
+frequency and a CACHE instruction hook for boards (the MT7621 TPL runs
+the SPL from L2 cache locked as SRAM); the mt7621-router machine with
+DRAM wrap-around, palmbus register file with the DDR init blob's status
+bits, Frame Engine PSE SRAM, SPI controller (more-buffer mode) with the
+Filogic SPI-NOR model memory-mapped at the reset vector, UART, and the
+Filogic Ethernet model with NETSYS v1 QDMA descriptors, configurable
+PDMA/QDMA bases and an MT7530 switch (MCM) for MT7621.
+---
+ hw/arm/filogic/filogic.h                |   2 +
+ hw/arm/filogic/mtk_eth.c                |  73 +-
+ hw/arm/filogic/mtk_pinctrl.c            | 123 +++-
+ hw/arm/filogic/spinor.c                 |   6 +
+ hw/mips/Kconfig                         |  19 +
+ hw/mips/cps.c                           |   3 +-
+ hw/mips/meson.build                     |   4 +
+ hw/mips/mt7621.c                        | 862 ++++++++++++++++++++++++
+ hw/misc/mips_cmgcr.c                    |  11 +
+ hw/timer/mips_gictimer.c                |  26 +-
+ include/hw/mips/cps.h                   |   1 +
+ include/hw/misc/mips_cmgcr.h            |   2 +
+ include/hw/timer/mips_gictimer.h        |   2 +
+ target/mips/cpu-defs.c.inc              |  35 +
+ target/mips/cpu.h                       |   6 +
+ target/mips/tcg/system/special_helper.c |   7 +
+ target/mips/tcg/translate.c             |   7 +-
+ target/mips/tcg/translate.h             |   1 +
+ 18 files changed, 1158 insertions(+), 32 deletions(-)
+ create mode 100644 hw/mips/mt7621.c
+
+diff --git a/hw/arm/filogic/filogic.h b/hw/arm/filogic/filogic.h
+index b6cf44e..60f3e27 100644
+--- a/hw/arm/filogic/filogic.h
++++ b/hw/arm/filogic/filogic.h
+@@ -65,6 +65,8 @@ uint32_t spinand_page_size(SpiNandState *s);
+ #define TYPE_MTK_SPINOR "mtk-spinor"
+ OBJECT_DECLARE_SIMPLE_TYPE(SpiNorState, MTK_SPINOR)
+ void spinor_read(SpiNorState *s, uint64_t off, void *buf, size_t len);
++/* the chip contents (for a memory-mapped read window), after realize */
++uint8_t *spinor_storage(SpiNorState *s, uint64_t *size);
+ 
+ /* MSDC SD/MMC host (eMMC) */
+ #define TYPE_MTK_MSDC "mtk-msdc"
+diff --git a/hw/arm/filogic/mtk_eth.c b/hw/arm/filogic/mtk_eth.c
+index 884e8ef..051a054 100644
+--- a/hw/arm/filogic/mtk_eth.c
++++ b/hw/arm/filogic/mtk_eth.c
+@@ -209,11 +209,14 @@ struct MtkEthState {
+     uint32_t dphy_addr[2];
+     uint32_t switch_addr;
+     bool has_switch;            /* a switch on GMAC0 */
+-    uint32_t switch_model;      /* 0 = MT7531, 1 = Airoha AN8855, 2 = MT7988 */
++    uint32_t switch_model;      /* 0 = MT7531, 1 = AN8855, 2 = MT7988, 3 = MT7530 */
+     uint32_t i2p5ge_phyid2;     /* internal 2.5G PHY ID (MT7987 / MT7988) */
+     /* AN8855 32-bit register access through MDIO page 4 ("PBUS") */
+     uint32_t an_wr_addr, an_wr_hi, an_rd_addr, an_rd_val;
+     uint32_t pdma2_base;        /* PDMA with 32-byte descriptors */
++    uint32_t pdma_base;         /* PDMA (MT7621: 0x0800) */
++    uint32_t qdma_base;         /* QDMA (MT7621: 0x1800) */
++    bool single_irq;            /* MT7621: one FE interrupt */
+ 
+     /* PHY on MT7531 port 5 (PHY_NONE: not present), on the FE MDIO bus */
+     EthPhy p5phy;
+@@ -783,9 +786,9 @@ static uint32_t sw_reg_read(MtkEthState *s, uint32_t a)
+          */
+         return s->p5phy_type ? BIT(1) : 0;
+     case 0x781c:            /* CREV */
+-        return 0x75310000;
+-    case 0x7ffc:
+-        return 0x75310000;
++        return s->switch_model == 3 ? 0 : 0x75310000;
++    case 0x7ffc:            /* MT7530 CREV (MT7531: same value) */
++        return s->switch_model == 3 ? 0x75300101 : 0x75310000;
+     case SW_ATC:
+         return ht_get(s->sw, a, 0) & ~BIT(15);
+     case SW_VTCR:
+@@ -1109,6 +1112,10 @@ static EthPhy *mdio_find_phy(MtkEthState *s, int addr, bool sw_internal)
+     if (s->p5phy_type && addr == s->p5phy_addr) {
+         return s->p5phy.in_reset ? NULL : &s->p5phy;
+     }
++    if (s->switch_model == 3 && addr < SW_NPHY) {
++        /* MT7530 (MCM): its PHYs answer on the FE MDIO bus at 0..4 */
++        return &s->gphy[addr];
++    }
+     if (addr == 0) {
+         return &s->intphy;
+     }
+@@ -1695,6 +1702,10 @@ static void fe_update_irq(MtkEthState *s)
+                (s->pdma[1].regs[PDMA_IRQ_STATUS / 4] &
+                 s->pdma[1].regs[PDMA_GRP_MSK(n) / 4]);
+     }
++    if (s->single_irq) {
++        qemu_set_irq(s->irq[0], q || p || p2);
++        return;
++    }
+     qemu_set_irq(s->irq[0], g[0]);
+     qemu_set_irq(s->irq[1], q || (p & 0x1000000f) || (p2 & 0x1000000f) || g[1]);
+     qemu_set_irq(s->irq[2], (p & 0x400f4000) || (p2 & 0x400f4000) || g[2]);
+@@ -1836,12 +1847,27 @@ static void qdma_kick(MtkEthState *s)
+         if (d[2] & TXD3_OWNER_CPU) {
+             break;      /* not handed to DMA */
+         }
+-        plen = (d[2] >> 8) & 0xffff;
+-        if (flen == 0) {
+-            fport = (d[3] >> 8) & 0xf;
+-            tso = d[4] & BIT(31);
+-            csum = (d[4] >> 28) & 0x7;
+-            vlan = d[5];
++        if (s->qdma_base != 0x4400) {
++            /*
++             * NETSYS v1 (MT7621): 16-byte descriptors, PLEN0 in txd3
++             * bits 29:16, txd4: forward port 27:25, TSO 28, checksum
++             * 31:29, VLAN insert 16 + TCI
++             */
++            plen = (d[2] >> 16) & 0x3fff;
++            if (flen == 0) {
++                fport = (d[3] >> 25) & 0x7;
++                tso = d[3] & BIT(28);
++                csum = (d[3] >> 29) & 0x7;
++                vlan = d[3] & 0x1ffff;
++            }
++        } else {
++            plen = (d[2] >> 8) & 0xffff;
++            if (flen == 0) {
++                fport = (d[3] >> 8) & 0xf;
++                tso = d[4] & BIT(31);
++                csum = (d[4] >> 28) & 0x7;
++                vlan = d[5];
++            }
+         }
+         if (flen + plen <= MAX_FRAME - 8) {
+             dma_memory_read(&address_space_memory, d[0], s->txbuf + flen,
+@@ -1984,8 +2010,13 @@ static uint64_t fe_read(void *opaque, hwaddr addr, unsigned size)
+     MtkEthState *s = opaque;
+     uint32_t v;
+ 
+-    if (addr >= PDMA_BASE && addr < PDMA_BASE + 0x300) {
+-        return pdma_read(&s->pdma[0], addr - PDMA_BASE);
++    if (addr >= s->pdma_base && addr < s->pdma_base + 0x300) {
++        return pdma_read(&s->pdma[0], addr - s->pdma_base);
++    }
++    if (addr >= s->qdma_base && addr < s->qdma_base + 0x400) {
++        addr = addr - s->qdma_base + 0x4400;    /* the NETSYS layout */
++    } else if (addr >= 0x4000 && addr < 0x4800 && s->qdma_base != 0x4400) {
++        return ht_get(s->fe, addr, 0);
+     }
+     if (addr >= s->pdma2_base && addr < s->pdma2_base + 0x300) {
+         return pdma_read(&s->pdma[1], addr - s->pdma2_base);
+@@ -2018,8 +2049,14 @@ static void fe_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
+     MtkEthState *s = opaque;
+     uint32_t v = val;
+ 
+-    if (addr >= PDMA_BASE && addr < PDMA_BASE + 0x300) {
+-        pdma_write(s, &s->pdma[0], addr - PDMA_BASE, v);
++    if (addr >= s->pdma_base && addr < s->pdma_base + 0x300) {
++        pdma_write(s, &s->pdma[0], addr - s->pdma_base, v);
++        return;
++    }
++    if (addr >= s->qdma_base && addr < s->qdma_base + 0x400) {
++        addr = addr - s->qdma_base + 0x4400;    /* the NETSYS layout */
++    } else if (addr >= 0x4000 && addr < 0x4800 && s->qdma_base != 0x4400) {
++        ht_set(s->fe, addr, v);
+         return;
+     }
+     if (addr >= s->pdma2_base && addr < s->pdma2_base + 0x300) {
+@@ -2172,6 +2209,8 @@ static void eth_reset(DeviceState *dev)
+                  port_link(s, i));
+         if (s->switch_model == 2) {
+             s->gphy[i].c22[MII_PHYID2] = 0x9481;
++        } else if (s->switch_model == 3) {
++            s->gphy[i].c22[MII_PHYID2] = 0x9412;    /* MT7530 GPHY */
+         }
+     }
+     for (int g = 0; g < 2; g++) {
+@@ -2283,11 +2322,15 @@ static const Property eth_props[] = {
+     DEFINE_PROP_UINT32("switch-addr", MtkEthState, switch_addr, 31),
+     /*
+      * 0 = MediaTek MT7531, 1 = Airoha AN8855 (CPU port 5, PBUS access),
+-     * 2 = MT7988 built-in switch (MMIO, region 3; no MDIO address)
++     * 2 = MT7988 built-in switch (MMIO, region 3; no MDIO address),
++     * 3 = MediaTek MT7530 (MT7621 multi-chip module)
+      */
+     DEFINE_PROP_UINT32("switch-model", MtkEthState, switch_model, 0),
+     DEFINE_PROP_UINT32("i2p5ge-phyid2", MtkEthState, i2p5ge_phyid2, 0),
+     DEFINE_PROP_UINT32("pdma2-base", MtkEthState, pdma2_base, 0x6000),
++    DEFINE_PROP_UINT32("pdma-base", MtkEthState, pdma_base, PDMA_BASE),
++    DEFINE_PROP_UINT32("qdma-base", MtkEthState, qdma_base, 0x4400),
++    DEFINE_PROP_BOOL("single-irq", MtkEthState, single_irq, false),
+     DEFINE_PROP_UINT32("port5-phy", MtkEthState, p5phy_type, 0),
+     DEFINE_PROP_UINT32("port5-phy-addr", MtkEthState, p5phy_addr, 5),
+ };
+diff --git a/hw/arm/filogic/mtk_pinctrl.c b/hw/arm/filogic/mtk_pinctrl.c
+index 66c9898..46ad6c4 100644
+--- a/hw/arm/filogic/mtk_pinctrl.c
++++ b/hw/arm/filogic/mtk_pinctrl.c
+@@ -2,6 +2,10 @@
+  * MT7981 / MT7986 GPIO controller + external interrupt (EINT) controller
+  * (57 pins on MT7981, 101 on MT7986, same register layout).
+  *
++ * With mt7621=on: the MT7621 GPIO block (3 banks of 32 pins, CTRL, POL,
++ * DATA, DSET, DCLR, edge / level interrupt enables and status, one
++ * interrupt line), no EINT block.
++ *
+  * GPIO inputs are driven by board level signals (buttons, the MT7531
+  * interrupt line).  Buttons can be pressed from the monitor:
+  *   qom-set /machine/soc/pinctrl reset-button true
+@@ -47,6 +51,11 @@ struct MtkPinctrlState {
+     uint32_t reset_hold_ms;     /* hold reset from power on (TFTP recovery) */
+     QEMUTimer *reset_release;
+     bool gpio_log;
++
++    /* MT7621 layout */
++    bool mt7621;
++    uint32_t m_pol[3], m_redge[3], m_fedge[3], m_hlvl[3], m_llvl[3];
++    uint32_t m_stat[3];
+ };
+ 
+ static bool pin_level(MtkPinctrlState *s, int pin)
+@@ -98,6 +107,21 @@ static void eint_update(MtkPinctrlState *s)
+ {
+     bool level = false;
+ 
++    if (s->mt7621) {
++        for (int w = 0; w < 3; w++) {
++            for (int b = 0; b < 32; b++) {
++                bool lvl = pin_level(s, w * 32 + b);
++                if ((s->m_hlvl[w] & BIT(b) && lvl) ||
++                    (s->m_llvl[w] & BIT(b) && !lvl)) {
++                    s->m_stat[w] |= BIT(b);
++                }
++            }
++            level |= s->m_stat[w] != 0;
++        }
++        qemu_set_irq(s->irq, level);
++        return;
++    }
++
+     for (int p = 0; p < EINT_PORTS; p++) {
+         for (int b = 0; b < 32; b++) {
+             int pin = p * 32 + b;
+@@ -125,6 +149,15 @@ static void set_input(MtkPinctrlState *s, int pin, bool level)
+     } else {
+         s->ext_level[w] &= ~BIT(b);
+     }
++    if (s->mt7621) {
++        if (old != level &&
++            ((level && (s->m_redge[w] & BIT(b))) ||
++             (!level && (s->m_fedge[w] & BIT(b))))) {
++            s->m_stat[w] |= BIT(b);
++        }
++        eint_update(s);
++        return;
++    }
+     /* edge detection for edge sensitive EINTs */
+     if (old != level && !(s->e_sens[p] & BIT(b))) {
+         bool pol = s->e_pol[p] & BIT(b);
+@@ -153,11 +186,78 @@ static uint32_t *gpio_reg(MtkPinctrlState *s, hwaddr a)
+     return NULL;
+ }
+ 
++/*
++ * MT7621: 0x00 CTRL (1 = output), 0x10 POL, 0x20 DATA, 0x30 DSET,
++ * 0x40 DCLR, 0x50 REDGE, 0x60 FEDGE, 0x70 HLVL, 0x80 LLVL, 0x90 STAT
++ * (write 1 to clear), 0xa0 EDGE; + 4 * bank
++ */
++static uint32_t *m7621_reg(MtkPinctrlState *s, hwaddr a)
++{
++    int w = (a & 0xf) / 4;
++
++    if (w > 2) {
++        return NULL;
++    }
++    switch (a & 0xff0) {
++    case 0x00: return &s->dir[w];
++    case 0x10: return &s->m_pol[w];
++    case 0x50: return &s->m_redge[w];
++    case 0x60: return &s->m_fedge[w];
++    case 0x70: return &s->m_hlvl[w];
++    case 0x80: return &s->m_llvl[w];
++    case 0x90: case 0xa0: return &s->m_stat[w];
++    }
++    return NULL;
++}
++
++static uint64_t m7621_read(MtkPinctrlState *s, hwaddr a)
++{
++    int w = (a & 0xf) / 4;
++    uint32_t *r;
++
++    if ((a & 0xff0) == 0x20 && w < 3) {
++        uint32_t v = 0;
++        for (int b = 0; b < 32; b++) {
++            if (w * 32 + b < s->npins && pin_level(s, w * 32 + b)) {
++                v |= BIT(b);
++            }
++        }
++        return v;
++    }
++    r = m7621_reg(s, a);
++    return r ? *r : 0;
++}
++
++static void m7621_write(MtkPinctrlState *s, hwaddr a, uint32_t val)
++{
++    int w = (a & 0xf) / 4;
++    uint32_t *r;
++
++    if (w > 2) {
++        return;
++    }
++    switch (a & 0xff0) {
++    case 0x20: s->dout[w] = val; break;
++    case 0x30: s->dout[w] |= val; break;
++    case 0x40: s->dout[w] &= ~val; break;
++    case 0x90: case 0xa0: s->m_stat[w] &= ~val; break;
++    default:
++        r = m7621_reg(s, a);
++        if (r) {
++            *r = val;
++        }
++    }
++}
++
+ static uint64_t gpio_read(void *opaque, hwaddr a, unsigned size)
+ {
+     MtkPinctrlState *s = opaque;
+     uint32_t *r;
+ 
++    if (s->mt7621) {
++        return m7621_read(s, a);
++    }
++
+     if (a == 0x6f0) {
+         return s->bootstrap;
+     }
+@@ -178,10 +278,10 @@ static uint64_t gpio_read(void *opaque, hwaddr a, unsigned size)
+ static void gpio_write(void *opaque, hwaddr a, uint64_t val, unsigned size)
+ {
+     MtkPinctrlState *s = opaque;
+-    uint32_t *r = gpio_reg(s, a);
++    uint32_t *r = s->mt7621 ? NULL : gpio_reg(s, a);
+     uint32_t old_out[NWORDS];
+ 
+-    if (!r) {
++    if (!r && !s->mt7621) {
+         return;
+     }
+     for (int w = 0; w < NWORDS; w++) {
+@@ -192,10 +292,14 @@ static void gpio_write(void *opaque, hwaddr a, uint64_t val, unsigned size)
+             }
+         }
+     }
+-    switch (a & 0xf) {
+-    case 0x0: *r = val; break;
+-    case 0x4: *r |= val; break;
+-    case 0x8: *r &= ~val; break;
++    if (s->mt7621) {
++        m7621_write(s, a, val);
++    } else {
++        switch (a & 0xf) {
++        case 0x0: *r = val; break;
++        case 0x4: *r |= val; break;
++        case 0x8: *r &= ~val; break;
++        }
+     }
+     if (s->gpio_log) {
+         for (int w = 0; w < NWORDS; w++) {
+@@ -288,6 +392,12 @@ static void pinctrl_reset(DeviceState *dev)
+     memset(s->e_pol, 0, sizeof(s->e_pol));
+     memset(s->e_dom, 0, sizeof(s->e_dom));
+     memset(s->e_other, 0, sizeof(s->e_other));
++    memset(s->m_pol, 0, sizeof(s->m_pol));
++    memset(s->m_redge, 0, sizeof(s->m_redge));
++    memset(s->m_fedge, 0, sizeof(s->m_fedge));
++    memset(s->m_hlvl, 0, sizeof(s->m_hlvl));
++    memset(s->m_llvl, 0, sizeof(s->m_llvl));
++    memset(s->m_stat, 0, sizeof(s->m_stat));
+     for (int p = 0; p < EINT_PORTS; p++) {
+         s->e_mask[p] = 0xffffffff;
+     }
+@@ -428,6 +538,7 @@ static const Property pinctrl_props[] = {
+     DEFINE_PROP_UINT32("reset-hold", MtkPinctrlState, reset_hold_ms, 0),
+     DEFINE_PROP_BOOL("reset-active-high", MtkPinctrlState, reset_active_high, false),
+     DEFINE_PROP_BOOL("wps-active-high", MtkPinctrlState, wps_active_high, false),
++    DEFINE_PROP_BOOL("mt7621", MtkPinctrlState, mt7621, false),
+ };
+ 
+ static void pinctrl_class_init(ObjectClass *klass, const void *data)
+diff --git a/hw/arm/filogic/spinor.c b/hw/arm/filogic/spinor.c
+index 0e0f940..e3b5e11 100644
+--- a/hw/arm/filogic/spinor.c
++++ b/hw/arm/filogic/spinor.c
+@@ -226,6 +226,12 @@ void spinor_read(SpiNorState *s, uint64_t off, void *buf, size_t len)
+ }
+ 
+ /* address bytes and mode/dummy bytes after the opcode */
++uint8_t *spinor_storage(SpiNorState *s, uint64_t *size)
++{
++    *size = nor_size(s);
++    return s->storage;
++}
++
+ static void cmd_layout(SpiNorState *s, uint8_t cmd, int *alen, int *dummy)
+ {
+     int a3 = s->addr4 ? 4 : 3;      /* 3-byte opcodes follow the mode */
+diff --git a/hw/mips/Kconfig b/hw/mips/Kconfig
+index f84fffc..84c8f0a 100644
+--- a/hw/mips/Kconfig
++++ b/hw/mips/Kconfig
+@@ -11,6 +11,8 @@ config MALTA
+     select PIIX
+     select PFLASH_CFI01
+     select SERIAL_MM
++    select SSI
++    select USB_XHCI_SYSBUS
+     select SMBUS_EEPROM
+ 
+ config MIPSSIM
+@@ -18,6 +20,8 @@ config MIPSSIM
+     default y
+     depends on MIPS
+     select SERIAL_MM
++    select SSI
++    select USB_XHCI_SYSBUS
+     select MIPSNET
+ 
+ config JAZZ
+@@ -38,6 +42,8 @@ config JAZZ
+     select MC146818RTC
+     select PCKBD
+     select SERIAL_MM
++    select SSI
++    select USB_XHCI_SYSBUS
+     select PARALLEL
+     select DS1225Y
+     select JAZZ_LED
+@@ -66,6 +72,8 @@ config LOONGSON3V
+     imply QXL if SPICE
+     imply USB_OHCI_PCI
+     select SERIAL_MM
++    select SSI
++    select USB_XHCI_SYSBUS
+     select GOLDFISH_RTC
+     select LOONGSON_IPI
+     select LOONGSON_LIOINTC
+@@ -90,6 +98,17 @@ config MIPS_BOSTON
+     select PCI_EXPRESS_XILINX
+     select AHCI_ICH9
+     select SERIAL_MM
++    select SSI
++    select USB_XHCI_SYSBUS
+ 
+ config FW_CFG_MIPS
+     bool
++
++config MT7621_ROUTER
++    bool
++    default y
++    depends on MIPS && !MIPS64 && !TARGET_BIG_ENDIAN
++    select MIPS_CPS
++    select SERIAL_MM
++    select SSI
++    select USB_XHCI_SYSBUS
+diff --git a/hw/mips/cps.c b/hw/mips/cps.c
+index e47695e..0640cff 100644
+--- a/hw/mips/cps.c
++++ b/hw/mips/cps.c
+@@ -150,7 +150,7 @@ static void mips_cps_realize(DeviceState *dev, Error **errp)
+     object_initialize_child(OBJECT(dev), "gcr", &s->gcr, TYPE_MIPS_GCR);
+     object_property_set_uint(OBJECT(&s->gcr), "num-vp", s->num_vp,
+                             &error_abort);
+-    object_property_set_int(OBJECT(&s->gcr), "gcr-rev", 0x800,
++    object_property_set_int(OBJECT(&s->gcr), "gcr-rev", s->gcr_rev,
+                             &error_abort);
+     object_property_set_int(OBJECT(&s->gcr), "gcr-base", gcr_base,
+                             &error_abort);
+@@ -169,6 +169,7 @@ static void mips_cps_realize(DeviceState *dev, Error **errp)
+ static const Property mips_cps_properties[] = {
+     DEFINE_PROP_UINT32("num-vp", MIPSCPSState, num_vp, 1),
+     DEFINE_PROP_UINT32("num-irq", MIPSCPSState, num_irq, 256),
++    DEFINE_PROP_INT32("gcr-rev", MIPSCPSState, gcr_rev, 0x800),
+     DEFINE_PROP_STRING("cpu-type", MIPSCPSState, cpu_type),
+     DEFINE_PROP_BOOL("cpu-big-endian", MIPSCPSState, cpu_is_bigendian, false),
+ };
+diff --git a/hw/mips/meson.build b/hw/mips/meson.build
+index 31dbd2b..dc576b8 100644
+--- a/hw/mips/meson.build
++++ b/hw/mips/meson.build
+@@ -11,6 +11,10 @@ mips_ss.add(when: 'CONFIG_JAZZ', if_true: files('jazz.c'))
+ mips_ss.add(when: 'CONFIG_MIPSSIM', if_true: files('mipssim.c'))
+ mips_ss.add(when: 'CONFIG_FULOONG', if_true: files('fuloong2e.c'))
+ mips_ss.add(when: 'CONFIG_MIPS_BOSTON', if_true: files('boston.c'))
++mips_ss.add(when: 'CONFIG_MT7621_ROUTER', if_true: files('mt7621.c',
++  '../arm/filogic/spinor.c', '../arm/filogic/mtk_eth.c',
++  '../arm/filogic/mtk_pinctrl.c', '../arm/filogic/filogic_leds.c',
++  '../arm/filogic/ws2812b.c', '../arm/filogic/hc595.c'))
+ endif
+ 
+ hw_arch += {'mips': mips_ss}
+diff --git a/hw/mips/mt7621.c b/hw/mips/mt7621.c
+new file mode 100644
+index 0000000..6139181
+--- /dev/null
++++ b/hw/mips/mt7621.c
+@@ -0,0 +1,862 @@
++/*
++ * MediaTek MT7621 router board (mt7621-router)
++ *
++ * MIPS 1004Kc with the MIPS Coherent Processing System (CM GCR, CPC,
++ * GIC), DRAM at 0 with address wrap-around like the real memory
++ * controller, the palmbus peripherals at 0x1e000000 and the SPI-NOR
++ * flash memory-mapped at 0x1fc00000 (the reset vector), so the boot
++ * chain runs from the flash like on a real board: TPL (from the flash)
++ * -> SPL in L2 cache locked as SRAM -> MediaTek DDR init blob in the
++ * Frame Engine SRAM -> U-Boot -> OpenWrt.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/units.h"
++#include "qemu/log.h"
++#include "qemu/error-report.h"
++#include "qapi/error.h"
++#include "qapi/visitor.h"
++#include "hw/boards.h"
++#include "hw/sysbus.h"
++#include "hw/qdev-clock.h"
++#include "hw/qdev-properties.h"
++#include "hw/char/serial-mm.h"
++#include "hw/usb/xhci.h"
++#include "hw/usb/hcd-xhci-sysbus.h"
++#include "hw/irq.h"
++#include "hw/ssi/ssi.h"
++#include "hw/qdev-properties-system.h"
++#include "net/net.h"
++#include "system/block-backend.h"
++#include "system/blockdev.h"
++#include "../arm/filogic/filogic.h"
++#include "../arm/filogic/filogic_leds.h"
++#include "hw/mips/cps.h"
++#include "hw/timer/mips_gictimer.h"
++#include "hw/mips/mips.h"
++#include "system/system.h"
++#include "system/address-spaces.h"
++#include "system/reset.h"
++#include "system/runstate.h"
++#include "target/mips/cpu.h"
++
++#define MT7621_LOWMEM_MAX       0x1c000000ULL   /* DRAM below the I/O space */
++#define MT7621_HIGHMEM_BASE     0x20000000ULL   /* DRAM above 448 MB */
++#define MT7621_PALMBUS_BASE     ((hwaddr)0x1e000000)
++#define MT7621_PALMBUS_SIZE     0x00200000ULL
++#define MT7621_SYSCTL_BASE      0x1e000000ULL
++#define MT7621_GPIO_BASE        0x1e000600ULL
++#define MT7621_UART0_BASE       0x1e000c00ULL
++#define MT7621_SPI_BASE         0x1e000b00ULL
++#define MT7621_XHCI_BASE        0x1e1c0000ULL
++#define MT7621_IPPC_BASE        0x1e1d0700ULL   /* SSUSB IP port control */
++#define MT7621_FE_BASE          0x1e100000ULL   /* frame engine, GMAC */
++#define MT7621_FE_SRAM_BASE     0x1e108000ULL   /* PSE SRAM of the FE */
++#define MT7621_FE_SRAM_SIZE     0x6000
++#define MT7621_FLASH_MMAP_BASE  0x1fc00000ULL
++#define MT7621_FLASH_MMAP_SIZE  0x00400000ULL
++
++#define MT7621_CPU_HZ           880000000
++#define MAX_LEDS                32
++
++/* GIC shared interrupts */
++#define MT7621_IRQ_FE           3
++#define MT7621_IRQ_GPIO         12
++#define MT7621_IRQ_XHCI         22
++#define MT7621_IRQ_SWITCH       23
++#define MT7621_IRQ_UART0        26
++
++/* sysctl registers */
++#define SYSC_CHIP_NAME0         0x00
++#define SYSC_CHIP_NAME1         0x04
++#define SYSC_CHIP_REV           0x0c
++#define SYSC_SYSCFG0            0x10
++#define SYSC_CLKCFG0            0x2c
++#define SYSC_RSTCTL             0x34
++#define SYSC_CUR_CLK_STS        0x44
++
++/*
++ * SPI controller in "more buffer" mode, as the U-Boot and Linux drivers
++ * use it: OPCODE holds up to 4 command bytes (MSB first), DATA0..7 up to
++ * 32 bytes out or in (LSB first), MOREBUF the bit counts; TRANS bit 8
++ * starts the transfer, which completes at once.  Chip select: POLAR.
++ */
++#define TYPE_MT7621_SPI "mt7621-spi"
++OBJECT_DECLARE_SIMPLE_TYPE(MT7621SpiState, MT7621_SPI)
++
++#define SPI_TRANS       0x00
++#define SPI_OPCODE      0x04
++#define SPI_DATA0       0x08
++#define SPI_MASTER      0x28
++#define SPI_MOREBUF     0x2c
++#define SPI_POLAR       0x38
++#define SPI_NREGS       (0x100 / 4)
++
++struct MT7621SpiState {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++    SSIBus *bus;
++    qemu_irq cs[2];
++    uint32_t regs[SPI_NREGS];
++};
++
++static void mt7621_spi_xfer(MT7621SpiState *s)
++{
++    uint32_t mb = s->regs[SPI_MOREBUF / 4];
++    unsigned cmd = ((mb >> 24) & 0x3f) / 8;
++    unsigned mosi = (mb & 0x1ff) / 8;
++    unsigned miso = ((mb >> 12) & 0x1ff) / 8;
++    uint8_t *data = (uint8_t *)&s->regs[SPI_DATA0 / 4];
++
++    if (!(s->regs[SPI_MASTER / 4] & 4)) {
++        return;         /* legacy mode: only used to idle the bus */
++    }
++    cmd = MIN(cmd, 4);
++    mosi = MIN(mosi, 32);
++    miso = MIN(miso, 32);
++    for (unsigned i = 0; i < cmd; i++) {
++        ssi_transfer(s->bus, (s->regs[SPI_OPCODE / 4] >> (8 * (cmd - 1 - i)))
++                             & 0xff);
++    }
++    for (unsigned i = 0; i < mosi; i++) {
++        ssi_transfer(s->bus, data[i ^ (HOST_BIG_ENDIAN ? 3 : 0)]);
++    }
++    for (unsigned i = 0; i < miso; i++) {
++        data[i ^ (HOST_BIG_ENDIAN ? 3 : 0)] = ssi_transfer(s->bus, 0);
++    }
++}
++
++static uint64_t mt7621_spi_read(void *opaque, hwaddr addr, unsigned size)
++{
++    MT7621SpiState *s = opaque;
++
++    return s->regs[addr / 4];
++}
++
++static void mt7621_spi_write(void *opaque, hwaddr addr, uint64_t val,
++                             unsigned size)
++{
++    MT7621SpiState *s = opaque;
++
++    switch (addr) {
++    case SPI_TRANS:
++        s->regs[0] = val & ~((1u << 8) | (1u << 16));   /* never busy */
++        if (val & (1u << 8)) {
++            mt7621_spi_xfer(s);
++        }
++        return;
++    case SPI_POLAR:
++        for (int i = 0; i < 2; i++) {
++            /* SSI chip selects are active low */
++            qemu_set_irq(s->cs[i], !(val & (1u << i)));
++        }
++        break;
++    }
++    s->regs[addr / 4] = val;
++}
++
++static const MemoryRegionOps mt7621_spi_ops = {
++    .read = mt7621_spi_read,
++    .write = mt7621_spi_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 4, .max_access_size = 4 },
++};
++
++static void mt7621_spi_reset(DeviceState *dev)
++{
++    MT7621SpiState *s = MT7621_SPI(dev);
++
++    memset(s->regs, 0, sizeof(s->regs));
++    for (int i = 0; i < 2; i++) {
++        qemu_set_irq(s->cs[i], 1);
++    }
++}
++
++static void mt7621_spi_init(Object *obj)
++{
++    MT7621SpiState *s = MT7621_SPI(obj);
++
++    memory_region_init_io(&s->iomem, obj, &mt7621_spi_ops, s, "mt7621-spi",
++                          0x100);
++    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
++    s->bus = ssi_create_bus(DEVICE(obj), "spi");
++    for (int i = 0; i < 2; i++) {
++        sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->cs[i]);
++    }
++}
++
++static void mt7621_spi_class_init(ObjectClass *oc, const void *data)
++{
++    device_class_set_legacy_reset(DEVICE_CLASS(oc), mt7621_spi_reset);
++}
++
++static const TypeInfo mt7621_spi_type = {
++    .name = TYPE_MT7621_SPI,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(MT7621SpiState),
++    .instance_init = mt7621_spi_init,
++    .class_init = mt7621_spi_class_init,
++};
++
++typedef struct MT7621Board {
++    MachineState *machine;
++    MIPSCPSState cps;
++    Clock *cpuclk;
++
++    MemoryRegion palmbus;       /* catch-all register file, lowest prio */
++    uint32_t palm_regs[MT7621_PALMBUS_SIZE / 4];
++    MemoryRegion fe_sram;
++    MemoryRegion dram_alias[16];
++    MemoryRegion lowmem;
++    MemoryRegion highmem;
++    MemoryRegion flash_mmap;
++
++    DeviceState *spi;
++    SpiNorState *nor;
++
++    DeviceState *eth;
++    DeviceState *pinctrl;
++    MemoryRegion gpio_alias;
++    RouterLeds *leds;
++
++    /* properties */
++    char *flash_dir;
++    char *ports;                /* MT7530 port 0..4 netdev ids, ':' separated */
++    uint32_t usb;               /* 0 = none, 2 = USB 2.0, 3 = USB 3.0 port */
++    char *usb_host;             /* passed through host devices VID:PID;... */
++    bool gpio_log;
++    uint32_t reset_hold;
++    uint32_t reset_gpio, wps_gpio;
++    bool reset_high, wps_high;
++    char *led_def[MAX_LEDS];
++    uint32_t ddr;               /* 2 or 3 */
++} MT7621Board;
++
++typedef struct MT7621MachineState {
++    MachineState parent;
++    MT7621Board b;
++} MT7621MachineState;
++
++#define TYPE_MT7621_MACHINE MACHINE_TYPE_NAME("mt7621-router")
++OBJECT_DECLARE_SIMPLE_TYPE(MT7621MachineState, MT7621_MACHINE)
++
++static MT7621Board *the_board;
++
++/*
++ * Palmbus: a plain register file that remembers writes, with the reset
++ * values the boot code needs.  Unmodelled blocks behave like this too;
++ * accesses are traced with -d unimp.
++ */
++/*
++ * Status bits the DDR init blob polls (calibration / PLL done): they
++ * read as set, the real hardware sets them within microseconds.
++ */
++static const struct {
++    hwaddr reg;
++    uint32_t set;
++} dramc_status[] = {
++    { 0x1e0053fc, 0x00000400 },
++};
++
++static uint64_t palmbus_read(void *opaque, hwaddr addr, unsigned size)
++{
++    MT7621Board *b = opaque;
++    uint32_t v = b->palm_regs[addr >> 2];
++
++    for (int i = 0; i < ARRAY_SIZE(dramc_status); i++) {
++        if (dramc_status[i].reg == MT7621_PALMBUS_BASE + (addr & ~3)) {
++            v |= dramc_status[i].set;
++        }
++    }
++    switch (MT7621_PALMBUS_BASE + (addr & ~3)) {
++    /* SSUSB IPPC: clocks stable, IP sleeps when the host is powered down */
++    case MT7621_IPPC_BASE + 0x10:
++        v = BIT(0) | BIT(8) | BIT(10) | BIT(11) | BIT(16) |
++            ((b->palm_regs[(MT7621_IPPC_BASE + 4 - MT7621_PALMBUS_BASE) / 4]
++              & 1) ? BIT(30) : 0);
++        break;
++    case MT7621_IPPC_BASE + 0x24:       /* IP_XHCI_CAP: 1 USB3 + 1 USB2 */
++        v = 0x0101;
++        break;
++    }
++
++    qemu_log_mask(LOG_UNIMP, "mt7621: read  0x%08" HWADDR_PRIx " = 0x%08x\n",
++                  MT7621_PALMBUS_BASE + addr, v);
++    return v >> ((addr & 3) * 8);
++}
++
++static void palmbus_write(void *opaque, hwaddr addr, uint64_t val,
++                          unsigned size)
++{
++    MT7621Board *b = opaque;
++    uint32_t *r = &b->palm_regs[addr >> 2];
++    unsigned sh = (addr & 3) * 8;
++    uint32_t mask = (size == 4 ? 0xffffffffu : ((1u << (size * 8)) - 1)) << sh;
++
++    qemu_log_mask(LOG_UNIMP, "mt7621: write 0x%08" HWADDR_PRIx " = 0x%08x\n",
++                  MT7621_PALMBUS_BASE + addr, (uint32_t)val);
++
++    switch (MT7621_PALMBUS_BASE + (addr & ~3)) {
++    case MT7621_SYSCTL_BASE + SYSC_CHIP_NAME0:
++    case MT7621_SYSCTL_BASE + SYSC_CHIP_NAME1:
++    case MT7621_SYSCTL_BASE + SYSC_CHIP_REV:
++    case MT7621_SYSCTL_BASE + SYSC_SYSCFG0:
++    case MT7621_SYSCTL_BASE + SYSC_CUR_CLK_STS:
++        return;                         /* read-only */
++    case MT7621_SYSCTL_BASE + SYSC_RSTCTL:
++        if (val & 1) {                  /* SYS_RST */
++            qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
++        }
++        val &= ~1ull;
++        break;
++    }
++    *r = (*r & ~mask) | (((uint32_t)val << sh) & mask);
++}
++
++static const MemoryRegionOps palmbus_ops = {
++    .read = palmbus_read,
++    .write = palmbus_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 1, .max_access_size = 4 },
++    .impl = { .min_access_size = 1, .max_access_size = 4 },
++};
++
++static void palmbus_reset(MT7621Board *b)
++{
++    uint32_t *sc = &b->palm_regs[(MT7621_SYSCTL_BASE - MT7621_PALMBUS_BASE) / 4];
++
++    memset(b->palm_regs, 0, sizeof(b->palm_regs));
++    sc[SYSC_CHIP_NAME0 / 4] = 0x3637544d;       /* "MT76" */
++    sc[SYSC_CHIP_NAME1 / 4] = 0x20203132;       /* "21  " */
++    /*
++     * ver 1, eco 3; MT7621A (dual core, PKG_ID A) or, with one emulated
++     * CPU, MT7621S (single core)
++     */
++    sc[SYSC_CHIP_REV / 4] = (b->machine->smp.cpus > 1 ? 0x00030103
++                                                      : 0x00010103);
++    /*
++     * Bootstrap: XTAL 40 MHz (XTAL_MODE_SEL 3), DRAM type (bit 4: DDR2),
++     * chip mode 2 = SPI-NOR 3-byte address
++     */
++    sc[SYSC_SYSCFG0 / 4] = (3 << 6) | (b->ddr == 2 ? 0x10 : 0) | 2;
++    sc[SYSC_CUR_CLK_STS / 4] = 0x0101;           /* CPU FDIV 1, FFRAC 1 */
++}
++
++/*
++ * CACHE instructions.  The TPL locks lines of the L2 cache and fills
++ * them (Index Store Tag / Index Store Data, secondary cache) to run the
++ * SPL from the cache before the DRAM works.  There is no cache here and
++ * the DRAM always works, so the data goes straight to the memory behind
++ * the line.
++ */
++static void mt7621_cache_hook(CPUMIPSState *env, target_ulong addr,
++                              uint32_t op)
++{
++    if (op == 0x0f) {   /* Index Store Data, secondary cache */
++        uint32_t d[2] = { cpu_to_le32(env->CP0_DataLo),
++                          cpu_to_le32(env->CP0_DataHi) };
++
++        address_space_write(&address_space_memory, addr & 0x1ffffff8,
++                            MEMTXATTRS_UNSPECIFIED, d, sizeof(d));
++    }
++}
++
++static void mt7621_reset(void *opaque)
++{
++    palmbus_reset(opaque);
++}
++
++/* SPI-NOR boot flash on SPI CS0: a folder of partition dumps or a drive */
++static void mt7621_create_flash(MT7621Board *b)
++{
++    DriveInfo *dinfo = drive_get(IF_MTD, 0, 0);
++    DeviceState *dev;
++    uint64_t size;
++    uint8_t *data;
++
++    b->spi = qdev_new(TYPE_MT7621_SPI);
++    sysbus_realize_and_unref(SYS_BUS_DEVICE(b->spi), &error_fatal);
++    sysbus_mmio_map(SYS_BUS_DEVICE(b->spi), 0, MT7621_SPI_BASE);
++
++    dev = qdev_new(TYPE_MTK_SPINOR);
++    qdev_prop_set_uint32(dev, "size-mb", 16);
++    if (b->flash_dir) {
++        qdev_prop_set_string(dev, "dir", b->flash_dir);
++    } else if (dinfo) {
++        qdev_prop_set_drive_err(dev, "drive", blk_by_legacy_dinfo(dinfo),
++                                &error_fatal);
++    } else {
++        warn_report("no flash given (-M mt7621-router,nand-dir=DIR or "
++                    "-drive if=mtd,format=raw,file=NOR_IMAGE), "
++                    "using an erased flash");
++    }
++    qdev_realize_and_unref(dev, BUS(qdev_get_child_bus(b->spi, "spi")),
++                           &error_fatal);
++    sysbus_connect_irq(SYS_BUS_DEVICE(b->spi), 0,
++                       qdev_get_gpio_in_named(dev, SSI_GPIO_CS, 0));
++    b->nor = MTK_SPINOR(dev);
++
++    /* memory-mapped read window at the reset vector */
++    data = spinor_storage(b->nor, &size);
++    memory_region_init_ram_ptr(&b->flash_mmap, NULL, "mt7621.flash-mmap",
++                               MIN(size, MT7621_FLASH_MMAP_SIZE), data);
++    memory_region_set_readonly(&b->flash_mmap, true);
++    memory_region_add_subregion(get_system_memory(), MT7621_FLASH_MMAP_BASE,
++                                &b->flash_mmap);
++}
++
++/* Frame engine (QDMA TX, PDMA RX), GMAC, MT7530 switch (MCM) on MDIO 31 */
++static void mt7621_create_eth(MT7621Board *b)
++{
++    DeviceState *dev = qdev_new(TYPE_MTK_ETH);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
++    g_auto(GStrv) ports = g_strsplit(b->ports ? b->ports : "", ":", 0);
++
++    qdev_prop_set_uint32(dev, "pdma-base", 0x0800);
++    qdev_prop_set_uint32(dev, "qdma-base", 0x1800);
++    qdev_prop_set_uint32(dev, "pdma2-base", 0xfff000);     /* none */
++    qdev_prop_set_bit(dev, "single-irq", true);
++    qdev_prop_set_uint32(dev, "switch-model", 3);
++    for (int i = 0; i < 5 && ports[i]; i++) {
++        g_autofree char *prop = g_strdup_printf("netdev-p%d", i);
++        NetClientState *nc = *ports[i] && strcmp(ports[i], "-")
++                             ? qemu_find_netdev(ports[i]) : NULL;
++        if (nc) {
++            qdev_prop_set_netdev(dev, prop, nc);
++        }
++    }
++    sysbus_realize_and_unref(sbd, &error_fatal);
++    /* above the palmbus register file, below the PSE SRAM */
++    memory_region_add_subregion_overlap(get_system_memory(), MT7621_FE_BASE,
++                                        sysbus_mmio_get_region(sbd, 0), -5);
++    sysbus_connect_irq(sbd, 0, get_cps_irq(&b->cps, MT7621_IRQ_FE));
++    qdev_connect_gpio_out_named(dev, "switch-irq", 0,
++                                get_cps_irq(&b->cps, MT7621_IRQ_SWITCH));
++    b->eth = dev;
++}
++
++/*
++ * xHCI (with the MediaTek IPPC wrapper in the palmbus register file):
++ * one USB 3.0 and one USB 2.0 root port, the board's connector on one of
++ * them; usb-host=VID:PID[;...] devices of the host on USB 2.0 ports 2, 3...
++ */
++static void mt7621_create_usb(MT7621Board *b)
++{
++    DeviceState *dev = qdev_new(TYPE_XHCI_SYSBUS);
++    g_auto(GStrv) hosts = g_strsplit_set(b->usb_host ? b->usb_host : "",
++                                         "; ", -1);
++    int nhost = 0;
++
++    for (int i = 0; hosts[i]; i++) {
++        nhost += *hosts[i] != 0;
++    }
++    qdev_prop_set_uint32(dev, "slots", 32);
++    qdev_prop_set_uint32(DEVICE(&XHCI_SYSBUS(dev)->xhci), "p2",
++                         nhost ? 1 + nhost : b->usb ? 1 : 0);
++    qdev_prop_set_uint32(DEVICE(&XHCI_SYSBUS(dev)->xhci), "p3",
++                         b->usb == 3 ? 1 : 0);
++    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
++    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, MT7621_XHCI_BASE);
++    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
++                       get_cps_irq(&b->cps, MT7621_IRQ_XHCI));
++    if (nhost && !object_class_by_name("usb-host")) {
++        error_report("usb-host: this QEMU is built without USB "
++                     "pass-through (libusb)");
++        exit(1);
++    }
++    for (int i = 0, n = 0; hosts[i]; i++) {
++        unsigned vid, pid;
++        DeviceState *host;
++        g_autofree char *port = NULL;
++
++        if (!*hosts[i]) {
++            continue;
++        }
++        if (sscanf(hosts[i], "%x:%x", &vid, &pid) != 2 ||
++            vid > 0xffff || pid > 0xffff) {
++            error_report("usb-host: \"%s\": expected VID:PID (hex), e.g. "
++                         "148f:5370", hosts[i]);
++            exit(1);
++        }
++        port = g_strdup_printf("%d", 2 + n++);
++        host = qdev_new("usb-host");
++        qdev_prop_set_uint32(host, "vendorid", vid);
++        qdev_prop_set_uint32(host, "productid", pid);
++        qdev_prop_set_string(host, "port", port);
++        qdev_realize_and_unref(host, BUS(&XHCI_SYSBUS(dev)->xhci.bus),
++                               &error_fatal);
++    }
++}
++
++/* LED panel: PWM LED sources (Filogic sysctl registers) do not exist here */
++uint32_t mtk_sysctl_peek(DeviceState *dev, hwaddr a)
++{
++    return 0;
++}
++
++/* GPIO (3 x 32 pins), buttons, front panel LEDs */
++static void mt7621_create_gpio(MT7621Board *b)
++{
++    DeviceState *dev = qdev_new(TYPE_MTK_PINCTRL);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
++    RouterLedsHw hw = { 0 };
++
++    qdev_prop_set_bit(dev, "mt7621", true);
++    qdev_prop_set_uint32(dev, "npins", 96);
++    qdev_prop_set_uint32(dev, "reset-pin", b->reset_gpio);
++    qdev_prop_set_uint32(dev, "wps-pin", b->wps_gpio);
++    qdev_prop_set_bit(dev, "reset-active-high", b->reset_high);
++    qdev_prop_set_bit(dev, "wps-active-high", b->wps_high);
++    qdev_prop_set_bit(dev, "gpio-log", b->gpio_log);
++    qdev_prop_set_uint32(dev, "reset-hold", b->reset_hold);
++    /* same QOM path as on Filogic: the launcher presses buttons there */
++    object_property_add_child(OBJECT(b->machine), "pinctrl", OBJECT(dev));
++    sysbus_realize_and_unref(sbd, &error_fatal);
++    /* the block is 0x100 bytes: map only that much of the model */
++    memory_region_init_alias(&b->gpio_alias, NULL, "mt7621.gpio",
++                             sysbus_mmio_get_region(sbd, 0), 0, 0x100);
++    memory_region_add_subregion(get_system_memory(), MT7621_GPIO_BASE,
++                                &b->gpio_alias);
++    sysbus_connect_irq(sbd, 0, get_cps_irq(&b->cps, MT7621_IRQ_GPIO));
++    b->pinctrl = dev;
++
++    hw.pinctrl = dev;
++    hw.eth = b->eth;
++    b->leds = router_leds_new(b->led_def, MAX_LEDS, &hw, b->gpio_log,
++                              &error_fatal);
++}
++
++static void mt7621_init(MachineState *machine)
++{
++    MT7621MachineState *ms = MT7621_MACHINE(machine);
++    MT7621Board *b = &ms->b;
++    MemoryRegion *sysmem = get_system_memory();
++    uint64_t ram_size = machine->ram_size;
++    uint64_t low = MIN(ram_size, MT7621_LOWMEM_MAX);
++    CPUState *cs;
++
++    the_board = b;
++    b->machine = machine;
++
++    if (ram_size != 128 * MiB && ram_size != 256 * MiB &&
++        ram_size != 512 * MiB) {
++        error_report("RAM size must be 128M, 256M or 512M");
++        exit(1);
++    }
++
++    /* CPU cores, CM GCR, CPC, GIC */
++    b->cpuclk = clock_new(OBJECT(machine), "cpu-refclk");
++    clock_set_hz(b->cpuclk, MT7621_CPU_HZ);
++    object_initialize_child(OBJECT(machine), "cps", &b->cps, TYPE_MIPS_CPS);
++    object_property_set_str(OBJECT(&b->cps), "cpu-type", machine->cpu_type,
++                            &error_fatal);
++    object_property_set_uint(OBJECT(&b->cps), "num-vp", machine->smp.cpus,
++                             &error_fatal);
++    object_property_set_int(OBJECT(&b->cps), "gcr-rev", 0x600, &error_fatal);
++    qdev_connect_clock_in(DEVICE(&b->cps), "clk-in", b->cpuclk);
++    sysbus_realize(SYS_BUS_DEVICE(&b->cps), &error_fatal);
++    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&b->cps), 0, 0, 1);
++    /* the GIC counter runs at the CPU clock (Linux: clocks = CPU) */
++    mips_gictimer_set_freq(b->cps.gic.gic_timer, MT7621_CPU_HZ);
++
++    CPU_FOREACH(cs) {
++        cpu_env(cs)->cache_hook = mt7621_cache_hook;
++    }
++
++    /* DRAM, with address wrap-around below 448 MB */
++    memory_region_init_alias(&b->lowmem, NULL, "mt7621.lowmem", machine->ram,
++                             0, low);
++    memory_region_add_subregion(sysmem, 0, &b->lowmem);
++    for (uint64_t a = low, i = 0;
++         a < MT7621_LOWMEM_MAX && i < ARRAY_SIZE(b->dram_alias);
++         a += low, i++) {
++        memory_region_init_alias(&b->dram_alias[i], NULL, "mt7621.dram-alias",
++                                 machine->ram, 0,
++                                 MIN(low, MT7621_LOWMEM_MAX - a));
++        memory_region_add_subregion(sysmem, a, &b->dram_alias[i]);
++    }
++    if (ram_size > MT7621_LOWMEM_MAX) {
++        memory_region_init_alias(&b->highmem, NULL, "mt7621.highmem",
++                                 machine->ram, MT7621_LOWMEM_MAX,
++                                 ram_size - MT7621_LOWMEM_MAX);
++        memory_region_add_subregion(sysmem, MT7621_HIGHMEM_BASE, &b->highmem);
++    }
++
++    /* Palmbus register file (lowest priority) */
++    memory_region_init_io(&b->palmbus, NULL, &palmbus_ops, b,
++                          "mt7621.palmbus", MT7621_PALMBUS_SIZE);
++    memory_region_add_subregion_overlap(sysmem, MT7621_PALMBUS_BASE,
++                                        &b->palmbus, -10);
++    palmbus_reset(b);
++    qemu_register_reset(mt7621_reset, b);
++
++    /* Frame Engine PSE SRAM: early stack, DDR init blob */
++    memory_region_init_ram(&b->fe_sram, NULL, "mt7621.fe-sram",
++                           MT7621_FE_SRAM_SIZE, &error_fatal);
++    memory_region_add_subregion_overlap(sysmem, MT7621_FE_SRAM_BASE,
++                                        &b->fe_sram, 1);
++
++    mt7621_create_flash(b);
++    mt7621_create_eth(b);
++    mt7621_create_usb(b);
++    mt7621_create_gpio(b);
++
++    /* UART1 (console) */
++    serial_mm_init(sysmem, MT7621_UART0_BASE, 2,
++                   get_cps_irq(&b->cps, MT7621_IRQ_UART0), 50000000 / 16,
++                   serial_hd(0), DEVICE_LITTLE_ENDIAN);
++}
++
++static char *mt7621_get_flash_dir(Object *obj, Error **errp)
++{
++    return g_strdup(MT7621_MACHINE(obj)->b.flash_dir);
++}
++
++static void mt7621_set_flash_dir(Object *obj, const char *v, Error **errp)
++{
++    MT7621MachineState *ms = MT7621_MACHINE(obj);
++
++    g_free(ms->b.flash_dir);
++    ms->b.flash_dir = g_strdup(v);
++}
++
++static char *mt7621_get_ddr(Object *obj, Error **errp)
++{
++    return g_strdup(MT7621_MACHINE(obj)->b.ddr == 2 ? "ddr2" : "ddr3");
++}
++
++static void mt7621_set_ddr(Object *obj, const char *v, Error **errp)
++{
++    MT7621MachineState *ms = MT7621_MACHINE(obj);
++
++    if (!strcmp(v, "ddr2")) {
++        ms->b.ddr = 2;
++    } else if (!strcmp(v, "ddr3")) {
++        ms->b.ddr = 3;
++    } else {
++        error_setg(errp, "ddr must be ddr2 or ddr3");
++    }
++}
++
++static char *mt7621_get_ports(Object *obj, Error **errp)
++{
++    return g_strdup(MT7621_MACHINE(obj)->b.ports);
++}
++
++static void mt7621_set_ports(Object *obj, const char *v, Error **errp)
++{
++    MT7621MachineState *ms = MT7621_MACHINE(obj);
++
++    g_free(ms->b.ports);
++    ms->b.ports = g_strdup(v);
++}
++
++static bool mt7621_get_gpio_log(Object *obj, Error **errp)
++{
++    return MT7621_MACHINE(obj)->b.gpio_log;
++}
++
++static void mt7621_set_gpio_log(Object *obj, bool v, Error **errp)
++{
++    MT7621_MACHINE(obj)->b.gpio_log = v;
++}
++
++static void mt7621_get_reset_hold(Object *obj, Visitor *v, const char *name,
++                                  void *opaque, Error **errp)
++{
++    visit_type_uint32(v, name, &MT7621_MACHINE(obj)->b.reset_hold, errp);
++}
++
++static void mt7621_set_reset_hold(Object *obj, Visitor *v, const char *name,
++                                  void *opaque, Error **errp)
++{
++    visit_type_uint32(v, name, &MT7621_MACHINE(obj)->b.reset_hold, errp);
++}
++
++static char *mt7621_get_usb_host(Object *obj, Error **errp)
++{
++    return g_strdup(MT7621_MACHINE(obj)->b.usb_host);
++}
++
++static void mt7621_set_usb_host(Object *obj, const char *v, Error **errp)
++{
++    MT7621MachineState *ms = MT7621_MACHINE(obj);
++
++    g_free(ms->b.usb_host);
++    ms->b.usb_host = g_strdup(v);
++}
++
++static char *mt7621_get_usb(Object *obj, Error **errp)
++{
++    uint32_t u = MT7621_MACHINE(obj)->b.usb;
++
++    return g_strdup(u == 0 ? "none" : u == 2 ? "2" : "3");
++}
++
++static void mt7621_set_usb(Object *obj, const char *v, Error **errp)
++{
++    MT7621MachineState *ms = MT7621_MACHINE(obj);
++
++    if (!strcmp(v, "none")) {
++        ms->b.usb = 0;
++    } else if (!strcmp(v, "2") || !strcmp(v, "3")) {
++        ms->b.usb = *v - '0';
++    } else {
++        error_setg(errp, "usb-port must be none, 2 or 3");
++    }
++}
++
++static void mt7621_get_u32(Object *obj, Visitor *v, const char *name,
++                           void *opaque, Error **errp)
++{
++    visit_type_uint32(v, name, (uint32_t *)((char *)&MT7621_MACHINE(obj)->b +
++                                            (uintptr_t)opaque), errp);
++}
++
++static void mt7621_set_u32(Object *obj, Visitor *v, const char *name,
++                           void *opaque, Error **errp)
++{
++    visit_type_uint32(v, name, (uint32_t *)((char *)&MT7621_MACHINE(obj)->b +
++                                            (uintptr_t)opaque), errp);
++}
++
++static bool mt7621_get_reset_high(Object *obj, Error **errp)
++{
++    return MT7621_MACHINE(obj)->b.reset_high;
++}
++
++static void mt7621_set_reset_high(Object *obj, bool v, Error **errp)
++{
++    MT7621_MACHINE(obj)->b.reset_high = v;
++}
++
++static bool mt7621_get_wps_high(Object *obj, Error **errp)
++{
++    return MT7621_MACHINE(obj)->b.wps_high;
++}
++
++static void mt7621_set_wps_high(Object *obj, bool v, Error **errp)
++{
++    MT7621_MACHINE(obj)->b.wps_high = v;
++}
++
++static void mt7621_get_led(Object *obj, Visitor *v, const char *name,
++                           void *opaque, Error **errp)
++{
++    char *d = MT7621_MACHINE(obj)->b.led_def[(uintptr_t)opaque];
++    char *value = g_strdup(d ? d : "");
++
++    visit_type_str(v, name, &value, errp);
++    g_free(value);
++}
++
++static void mt7621_set_led(Object *obj, Visitor *v, const char *name,
++                           void *opaque, Error **errp)
++{
++    MT7621Board *b = &MT7621_MACHINE(obj)->b;
++    char *value;
++
++    if (visit_type_str(v, name, &value, errp)) {
++        g_free(b->led_def[(uintptr_t)opaque]);
++        b->led_def[(uintptr_t)opaque] = value;
++    }
++}
++
++static char *mt7621_get_led_state(Object *obj, Error **errp)
++{
++    return router_leds_state(MT7621_MACHINE(obj)->b.leds);
++}
++
++static void mt7621_instance_init(Object *obj)
++{
++    MT7621_MACHINE(obj)->b.reset_gpio = 18;
++    MT7621_MACHINE(obj)->b.wps_gpio = 95;     /* none: an unused pin */
++    MT7621_MACHINE(obj)->b.ddr = 3;
++    MT7621_MACHINE(obj)->b.usb = 3;
++}
++
++static void mt7621_machine_class_init(ObjectClass *oc, const void *data)
++{
++    MachineClass *mc = MACHINE_CLASS(oc);
++
++    mc->desc = "MediaTek MT7621 router board";
++    mc->init = mt7621_init;
++    mc->default_cpu_type = MIPS_CPU_TYPE_NAME("1004Kc");
++    mc->default_ram_size = 256 * MiB;
++    mc->default_ram_id = "mt7621.dram";
++    mc->max_cpus = 4;
++    mc->default_cpus = 1;
++
++    object_class_property_add_str(oc, "nand-dir", mt7621_get_flash_dir,
++                                  mt7621_set_flash_dir);
++    object_class_property_set_description(oc, "nand-dir",
++        "SPI-NOR flash: folder of partition dumps (files named *mtdN*)");
++    object_class_property_add_str(oc, "ports", mt7621_get_ports,
++                                  mt7621_set_ports);
++    object_class_property_set_description(oc, "ports",
++        "netdev ids of MT7530 ports 0..4, ':' separated (- = unconnected)");
++    object_class_property_add_bool(oc, "gpio-log", mt7621_get_gpio_log,
++                                   mt7621_set_gpio_log);
++    object_class_property_set_description(oc, "gpio-log",
++        "Print GPIO output changes and LED states");
++    object_class_property_add(oc, "reset-hold", "uint32",
++                              mt7621_get_reset_hold, mt7621_set_reset_hold,
++                              NULL, NULL);
++    object_class_property_set_description(oc, "reset-hold",
++        "Power on with the reset button held for this many ms");
++    object_class_property_add(oc, "reset-gpio", "uint32", mt7621_get_u32,
++                              mt7621_set_u32, NULL,
++                              (void *)offsetof(MT7621Board, reset_gpio));
++    object_class_property_set_description(oc, "reset-gpio",
++        "GPIO of the reset button (default 18)");
++    object_class_property_add(oc, "wps-gpio", "uint32", mt7621_get_u32,
++                              mt7621_set_u32, NULL,
++                              (void *)offsetof(MT7621Board, wps_gpio));
++    object_class_property_set_description(oc, "wps-gpio",
++        "GPIO of the WPS button (default: none)");
++    object_class_property_add_bool(oc, "reset-active-high",
++                                   mt7621_get_reset_high,
++                                   mt7621_set_reset_high);
++    object_class_property_add_bool(oc, "wps-active-high",
++                                   mt7621_get_wps_high, mt7621_set_wps_high);
++    for (int i = 0; i < MAX_LEDS; i++) {
++        g_autofree char *name = g_strdup_printf("led%d", i + 1);
++        object_class_property_add(oc, name, "str", mt7621_get_led,
++                                  mt7621_set_led, NULL, (void *)(uintptr_t)i);
++        object_class_property_set_description(oc, name,
++            "front panel LED: \"<name>: <colour> gpio:N[:low][ + ...]\"");
++    }
++    object_class_property_add_str(oc, "led-state", mt7621_get_led_state,
++                                  NULL);
++    object_class_property_set_description(oc, "led-state",
++        "LED states, ';' per LED, ',' per colour: 0, 1, b (blinking)");
++    object_class_property_add_str(oc, "usb-host", mt7621_get_usb_host,
++                                  mt7621_set_usb_host);
++    object_class_property_set_description(oc, "usb-host",
++        "Host USB devices passed through, VID:PID[;VID:PID...]");
++    object_class_property_add_str(oc, "usb-port", mt7621_get_usb,
++                                  mt7621_set_usb);
++    object_class_property_set_description(oc, "usb-port",
++        "Board USB connector: 3 (USB 3.0, default), 2 (USB 2.0) or none");
++    object_class_property_add_str(oc, "ddr", mt7621_get_ddr, mt7621_set_ddr);
++    object_class_property_set_description(oc, "ddr",
++        "DRAM type strap: ddr2 or ddr3 (default)");
++}
++
++static const TypeInfo mt7621_machine_type = {
++    .name = TYPE_MT7621_MACHINE,
++    .parent = TYPE_MACHINE,
++    .instance_size = sizeof(MT7621MachineState),
++    .instance_init = mt7621_instance_init,
++    .class_init = mt7621_machine_class_init,
++};
++
++static void mt7621_machine_register(void)
++{
++    type_register_static(&mt7621_spi_type);
++    type_register_static(&mt7621_machine_type);
++}
++
++type_init(mt7621_machine_register)
+diff --git a/hw/misc/mips_cmgcr.c b/hw/misc/mips_cmgcr.c
+index 5484b73..d90b2ea 100644
+--- a/hw/misc/mips_cmgcr.c
++++ b/hw/misc/mips_cmgcr.c
+@@ -101,6 +101,10 @@ static uint64_t gcr_read(void *opaque, hwaddr addr, unsigned size)
+     case MIPS_COCB_OFS + GCR_CL_CONFIG_OFS:
+         /* Set PVP to # of VPs - 1 */
+         return gcr->num_vps - 1;
++    case MIPS_CLCB_OFS + GCR_CL_COHERENCE_OFS:
++        return current_vps->coherence;
++    case MIPS_COCB_OFS + GCR_CL_COHERENCE_OFS:
++        return other_vps->coherence;
+     case MIPS_CLCB_OFS + GCR_CL_RESETBASE_OFS:
+         return current_vps->reset_base;
+     case MIPS_COCB_OFS + GCR_CL_RESETBASE_OFS:
+@@ -140,6 +144,12 @@ static void gcr_write(void *opaque, hwaddr addr, uint64_t data, unsigned size)
+     case GCR_CPC_BASE_OFS:
+         update_cpc_base(gcr, data);
+         break;
++    case MIPS_CLCB_OFS + GCR_CL_COHERENCE_OFS:
++        current_vps->coherence = data & 0xff;
++        break;
++    case MIPS_COCB_OFS + GCR_CL_COHERENCE_OFS:
++        other_vps->coherence = data & 0xff;
++        break;
+     case MIPS_CLCB_OFS + GCR_CL_RESETBASE_OFS:
+         current_vps->reset_base = data & GCR_CL_RESET_BASE_MSK;
+         cpu_set_exception_base(current_cpu->cpu_index,
+@@ -196,6 +206,7 @@ static void mips_gcr_reset(DeviceState *dev)
+ 
+     for (i = 0; i < s->num_vps; i++) {
+         s->vps[i].other = 0;
++        s->vps[i].coherence = 0;
+         s->vps[i].reset_base = 0xBFC00000 & GCR_CL_RESET_BASE_MSK;
+         cpu_set_exception_base(i, get_exception_base(&s->vps[i]));
+     }
+diff --git a/hw/timer/mips_gictimer.c b/hw/timer/mips_gictimer.c
+index 2b0696d..2206aa1 100644
+--- a/hw/timer/mips_gictimer.c
++++ b/hw/timer/mips_gictimer.c
+@@ -10,11 +10,22 @@
+ #include "qemu/timer.h"
+ #include "hw/timer/mips_gictimer.h"
+ 
+-#define TIMER_PERIOD 10 /* 10 ns period for 100 Mhz frequency */
++/* default 100 MHz; boards set their own (MT7621: the CPU clock) */
++#define TIMER_FREQ_DEFAULT  100000000
+ 
+ uint32_t mips_gictimer_get_freq(MIPSGICTimerState *gic)
+ {
+-    return NANOSECONDS_PER_SECOND / TIMER_PERIOD;
++    return gic->freq;
++}
++
++void mips_gictimer_set_freq(MIPSGICTimerState *gic, uint32_t hz)
++{
++    gic->freq = hz;
++}
++
++static uint32_t gic_ticks(MIPSGICTimerState *gic, uint64_t ns)
++{
++    return muldiv64(ns, gic->freq, NANOSECONDS_PER_SECOND);
+ }
+ 
+ static void gic_vptimer_update(MIPSGICTimerState *gictimer,
+@@ -24,8 +35,8 @@ static void gic_vptimer_update(MIPSGICTimerState *gictimer,
+     uint32_t wait;
+ 
+     wait = gictimer->vptimers[vp_index].comparelo - gictimer->sh_counterlo -
+-           (uint32_t)(now / TIMER_PERIOD);
+-    next = now + (uint64_t)wait * TIMER_PERIOD;
++           gic_ticks(gictimer, now);
++    next = now + muldiv64(wait, NANOSECONDS_PER_SECOND, gictimer->freq);
+ 
+     timer_mod(gictimer->vptimers[vp_index].qtimer, next);
+ }
+@@ -64,7 +75,7 @@ uint32_t mips_gictimer_get_sh_count(MIPSGICTimerState *gictimer)
+                 gic_vptimer_expire(gictimer, i, now);
+             }
+         }
+-        return gictimer->sh_counterlo + (uint32_t)(now / TIMER_PERIOD);
++        return gictimer->sh_counterlo + gic_ticks(gictimer, now);
+     }
+ }
+ 
+@@ -78,7 +89,7 @@ void mips_gictimer_store_sh_count(MIPSGICTimerState *gictimer, uint64_t count)
+     } else {
+         /* Store new count register */
+         now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+-        gictimer->sh_counterlo = count - (uint32_t)(now / TIMER_PERIOD);
++        gictimer->sh_counterlo = count - gic_ticks(gictimer, now);
+         /* Update timer timer */
+         for (i = 0; i < gictimer->num_vps; i++) {
+             gic_vptimer_update(gictimer, i, now);
+@@ -118,7 +129,7 @@ void mips_gictimer_stop_count(MIPSGICTimerState *gictimer)
+     gictimer->countstop = 1;
+     /* Store the current value */
+     gictimer->sh_counterlo +=
+-        (uint32_t)(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / TIMER_PERIOD);
++        gic_ticks(gictimer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+     for (i = 0; i < gictimer->num_vps; i++) {
+         timer_del(gictimer->vptimers[i].qtimer);
+     }
+@@ -131,6 +142,7 @@ MIPSGICTimerState *mips_gictimer_init(void *opaque, uint32_t nvps,
+     MIPSGICTimerState *gictimer = g_new(MIPSGICTimerState, 1);
+     gictimer->vptimers = g_new(MIPSGICTimerVPState, nvps);
+     gictimer->countstop = 1;
++    gictimer->freq = TIMER_FREQ_DEFAULT;
+     gictimer->num_vps = nvps;
+     gictimer->opaque = opaque;
+     gictimer->cb = cb;
+diff --git a/include/hw/mips/cps.h b/include/hw/mips/cps.h
+index 05ef9f7..9ff0a98 100644
+--- a/include/hw/mips/cps.h
++++ b/include/hw/mips/cps.h
+@@ -36,6 +36,7 @@ struct MIPSCPSState {
+     SysBusDevice parent_obj;
+ 
+     uint32_t num_vp;
++    int32_t gcr_rev;
+     uint32_t num_irq;
+     char *cpu_type;
+     bool cpu_is_bigendian;
+diff --git a/include/hw/misc/mips_cmgcr.h b/include/hw/misc/mips_cmgcr.h
+index db4bf5f..7492a9d 100644
+--- a/include/hw/misc/mips_cmgcr.h
++++ b/include/hw/misc/mips_cmgcr.h
+@@ -36,6 +36,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(MIPSGCRState, MIPS_GCR)
+ #define GCR_L2_CONFIG_OFS   0x0130
+ 
+ /* Core Local and Core Other Block Register Map */
++#define GCR_CL_COHERENCE_OFS 0x0008
+ #define GCR_CL_CONFIG_OFS   0x0010
+ #define GCR_CL_OTHER_OFS    0x0018
+ #define GCR_CL_RESETBASE_OFS 0x0020
+@@ -68,6 +69,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(MIPSGCRState, MIPS_GCR)
+ typedef struct MIPSGCRVPState MIPSGCRVPState;
+ struct MIPSGCRVPState {
+     uint32_t other;
++    uint32_t coherence;
+     uint64_t reset_base;
+ };
+ 
+diff --git a/include/hw/timer/mips_gictimer.h b/include/hw/timer/mips_gictimer.h
+index c7ca6c8..32a9e18 100644
+--- a/include/hw/timer/mips_gictimer.h
++++ b/include/hw/timer/mips_gictimer.h
+@@ -25,6 +25,7 @@ struct MIPSGICTimerVPState {
+ struct MIPSGICTimerState {
+     void *opaque;
+     uint8_t countstop;
++    uint32_t freq;              /* counter frequency, Hz */
+     uint32_t sh_counterlo;
+     int32_t num_vps;
+     MIPSGICTimerVPState *vptimers;
+@@ -32,6 +33,7 @@ struct MIPSGICTimerState {
+ };
+ 
+ uint32_t mips_gictimer_get_freq(MIPSGICTimerState *gic);
++void mips_gictimer_set_freq(MIPSGICTimerState *gic, uint32_t hz);
+ uint32_t mips_gictimer_get_sh_count(MIPSGICTimerState *gic);
+ void mips_gictimer_store_sh_count(MIPSGICTimerState *gic, uint64_t count);
+ uint32_t mips_gictimer_get_vp_compare(MIPSGICTimerState *gictimer,
+diff --git a/target/mips/cpu-defs.c.inc b/target/mips/cpu-defs.c.inc
+index d93b9d3..e49c9df 100644
+--- a/target/mips/cpu-defs.c.inc
++++ b/target/mips/cpu-defs.c.inc
+@@ -317,6 +317,41 @@ const mips_def_t mips_defs[] =
+         .insn_flags = CPU_MIPS32R2 | ASE_MIPS16 | ASE_DSP,
+         .mmu_type = MMU_TYPE_R4000,
+     },
++    {
++        /*
++         * MIPS 1004Kc (MediaTek MT7621): 34K-class core without FPU, MT ASE,
++         * Coherence Manager (Config3.CMGCR), 32 KB 4-way L1 caches with
++         * 32-byte lines and a 256 KB 8-way L2.
++         */
++        .name = "1004Kc",
++        .CP0_PRid = 0x0001992f,
++        .CP0_Config0 = MIPS_CONFIG0 | (0x1 << CP0C0_AR) |
++                       (MMU_TYPE_R4000 << CP0C0_MT),
++        .CP0_Config1 = MIPS_CONFIG1 | (31 << CP0C1_MMU) |
++                       (2 << CP0C1_IS) | (4 << CP0C1_IL) | (3 << CP0C1_IA) |
++                       (2 << CP0C1_DS) | (4 << CP0C1_DL) | (3 << CP0C1_DA) |
++                       (1 << CP0C1_PC) | (1 << CP0C1_CA),
++        .CP0_Config2 = MIPS_CONFIG2 | (4 << 8) | (4 << 4) | 7,
++        .CP0_Config3 = MIPS_CONFIG3 | (1 << CP0C3_CMGCR) | (1 << CP0C3_ULRI) |
++                       (1 << CP0C3_VInt) | (1 << CP0C3_MT) |
++                       (1 << CP0C3_DSPP) | (1 << CP0C3_DSP2P),
++        .CP0_LLAddr_rw_bitmask = 0,
++        .CP0_LLAddr_shift = 0,
++        .SYNCI_Step = 32,
++        .CCRes = 2,
++        .CP0_Status_rw_bitmask = 0x1378FF1F,
++        .CP0_TCStatus_rw_bitmask = (0 << CP0TCSt_TCU3) | (0 << CP0TCSt_TCU2) |
++                    (0 << CP0TCSt_TCU1) | (1 << CP0TCSt_TCU0) |
++                    (0 << CP0TCSt_TMX) | (1 << CP0TCSt_DT) |
++                    (1 << CP0TCSt_DA) | (1 << CP0TCSt_A) |
++                    (0x3 << CP0TCSt_TKSU) | (1 << CP0TCSt_IXMT) |
++                    (0xff << CP0TCSt_TASID),
++        .CP0_SRSCtl = (0xf << CP0SRSCtl_HSS),
++        .SEGBITS = 32,
++        .PABITS = 32,
++        .insn_flags = CPU_MIPS32R2 | ASE_MIPS16 | ASE_DSP | ASE_DSP_R2,
++        .mmu_type = MMU_TYPE_R4000,
++    },
+     {
+         .name = "74Kf",
+         .CP0_PRid = 0x00019700,
+diff --git a/target/mips/cpu.h b/target/mips/cpu.h
+index 5cd4c6c..09f479c 100644
+--- a/target/mips/cpu.h
++++ b/target/mips/cpu.h
+@@ -1179,6 +1179,12 @@ typedef struct CPUArchState {
+     CPUMIPSTLBContext *tlb;
+     qemu_irq irq[8];
+     MemoryRegion *itc_tag; /* ITC Configuration Tags */
++    /*
++     * Board hook for CACHE instructions (e.g. L2 locked as SRAM): called
++     * for every CACHE op when set, before the ITC handling.
++     */
++    void (*cache_hook)(struct CPUArchState *env, target_ulong addr,
++                       uint32_t op);
+ 
+     /* Loongson IOCSR memory */
+     struct {
+diff --git a/target/mips/tcg/system/special_helper.c b/target/mips/tcg/system/special_helper.c
+index b54cbe8..e457359 100644
+--- a/target/mips/tcg/system/special_helper.c
++++ b/target/mips/tcg/system/special_helper.c
+@@ -151,6 +151,13 @@ void helper_cache(CPUMIPSState *env, target_ulong addr, uint32_t op)
+     uint32_t cache_operation = extract32(op, 2, 3);
+     target_ulong index = addr & 0x1fffffff;
+ 
++    if (env->cache_hook) {
++        env->cache_hook(env, addr, op);
++        if (!env->itc_tag) {
++            return;
++        }
++    }
++
+     switch (cache_operation) {
+     case 0b010: /* Index Store Tag */
+         memory_region_dispatch_write(env->itc_tag, index, env->CP0_TagLo,
+diff --git a/target/mips/tcg/translate.c b/target/mips/tcg/translate.c
+index d91d6ef..03068ab 100644
+--- a/target/mips/tcg/translate.c
++++ b/target/mips/tcg/translate.c
+@@ -13468,7 +13468,7 @@ static void decode_opc_special3_r6(CPUMIPSState *env, DisasContext *ctx)
+         break;
+     case R6_OPC_CACHE:
+         check_cp0_enabled(ctx);
+-        if (ctx->hflags & MIPS_HFLAG_ITC_CACHE) {
++        if ((ctx->hflags & MIPS_HFLAG_ITC_CACHE) || ctx->cache_hook) {
+             gen_cache_operation(ctx, rt, rs, imm);
+         }
+         break;
+@@ -14198,7 +14198,7 @@ static void decode_opc_special3(CPUMIPSState *env, DisasContext *ctx)
+         case OPC_CACHEE:
+             check_eva(ctx);
+             check_cp0_enabled(ctx);
+-            if (ctx->hflags & MIPS_HFLAG_ITC_CACHE) {
++            if ((ctx->hflags & MIPS_HFLAG_ITC_CACHE) || ctx->cache_hook) {
+                 gen_cache_operation(ctx, rt, rs, imm);
+             }
+             return;
+@@ -14662,7 +14662,7 @@ static bool decode_opc_legacy(CPUMIPSState *env, DisasContext *ctx)
+     case OPC_CACHE:
+         check_cp0_enabled(ctx);
+         check_insn(ctx, ISA_MIPS3 | ISA_MIPS_R1);
+-        if (ctx->hflags & MIPS_HFLAG_ITC_CACHE) {
++        if ((ctx->hflags & MIPS_HFLAG_ITC_CACHE) || ctx->cache_hook) {
+             gen_cache_operation(ctx, rt, rs, imm);
+         }
+         /* Treat as NOP. */
+@@ -15087,6 +15087,7 @@ static void mips_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+     ctx->sc = (env->CP0_Config3 >> CP0C3_SC) & 1;
+     ctx->CP0_LLAddr_shift = env->CP0_LLAddr_shift;
+     ctx->cmgcr = (env->CP0_Config3 >> CP0C3_CMGCR) & 1;
++    ctx->cache_hook = env->cache_hook != NULL;
+     /* Restore delay slot state from the tb context.  */
+     ctx->hflags = (uint32_t)ctx->base.tb->flags; /* FIXME: maybe use 64 bits? */
+     ctx->ulri = (env->CP0_Config3 >> CP0C3_ULRI) & 1;
+diff --git a/target/mips/tcg/translate.h b/target/mips/tcg/translate.h
+index 89dde1e..f21ba07 100644
+--- a/target/mips/tcg/translate.h
++++ b/target/mips/tcg/translate.h
+@@ -46,6 +46,7 @@ typedef struct DisasContext {
+     bool ps;
+     bool vp;
+     bool cmgcr;
++    bool cache_hook;
+     bool mrp;
+     bool nan2008;
+     bool abs2008;
+-- 
+2.47.3
+

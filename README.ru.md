@@ -1,4 +1,4 @@
-# Router Emulator (MediaTek MT7981B / Filogic 820, MT7986 / Filogic 830, MT7987 / Filogic 850, MT7988 / Filogic 860 / 880)
+# Router Emulator (MediaTek MT7981B / Filogic 820, MT7986 / Filogic 830, MT7987 / Filogic 850, MT7988 / Filogic 860 / 880, MT7621)
 
 [English](README.md) · **Русский** · Сборка: [Linux](README.build.linux.ru.md) · [Windows](README.build.windows.ru.md)
 
@@ -31,7 +31,9 @@ BootROM (эмулирован) → BL2 (preloader MediaTek, калибровка
 размера, см. [MT7986](#mt7986-filogic-830); платы на MT7987A/B — на
 `mt7987-router` (`soc=mt7987`, см. [MT7987](#mt7987-filogic-850)); платы на
 MT7988A/D (Filogic 880 / 860) — на `mt7988-router` (`soc=mt7988`, см.
-[MT7988](#mt7988-filogic-880--860)).
+[MT7988](#mt7988-filogic-880--860)); платы на MT7621A (MIPS) — на
+`mt7621-router` в `qemu-system-mipsel` (`soc=mt7621`, см.
+[MT7621](#mt7621-mips)).
 
 ## Быстрый старт
 
@@ -169,6 +171,7 @@ WS2812B, 74HC595, PWM), GPIO
 | Bananapi BPi-R4 (MT7988A, Filogic 880) | WAN + 3×1G LAN встроенный коммутатор (SFP+ не эмулируются) | DDR4 2 ГБ (на плате 4 ГБ) | **eMMC** (разметка `bpi-r4`) | 3.0 | OpenWrt |
 | Teltonika RUTC50 | 1G WAN встроенный PHY + 4×1G LAN MT7531 (мобильный модем не эмулируется); светодиоды на **74HC595** | DDR3 256 МБ | **SPI-NOR 16 МБ (загрузка) + SPI-NAND 512 МБ** (rutos-a / rutos-b) | 3.0 | BL2 OpenWrt RFB + свой U-Boot ([`tools/uboot-rutc50`](tools/uboot-rutc50)) |
 | OpenWrt One | 2.5G WAN **Airoha EN8811H** + 1G LAN встроенный PHY | DDR4 1 ГБ | **SPI-NAND 256 МБ (загрузка) + SPI-NOR 16 МБ** (recovery) | 2.0 | OpenWrt |
+| Zbtlink ZBT-WG3526 (16M) (**MT7621A**, MIPS) | 5×1G MT7530 (WAN = порт 4); Wi-Fi (PCIe) не эмулируется | DDR3 512 МБ (доступно 448 МБ) | **SPI-NOR 16 МБ** | 3.0 | OpenWrt |
 
 У плат Netis нет раздела bdinfo (FIP с 0x380000, ubi с 0x580000; MAC — в
 Factory): в пресетах стоит `openwrt-no-bdinfo=1`. У плат на MT7986 та же
@@ -322,6 +325,32 @@ tools/prepare-nand.sh --nor-nand rutc50 teltonika_rutc50 25.12.5
 tools/prepare-nand.sh --nor-nand openwrt-one openwrt_one 25.12.5
 ./emulator.sh -P openwrt-one            # -o flash=nor: recovery с NOR
 ```
+
+## MT7621 (MIPS)
+
+Платы на MediaTek MT7621A работают на втором бинарнике QEMU,
+`qemu-system-mipsel`, машина `mt7621-router` (ключ пресета `soc=mt7621`;
+`emulator.sh`, лаунчер и `tests/quick.py` выбирают бинарник сами).
+Цепочка загрузки настоящая: CPU стартует из SPI-NOR, отображённого на
+`0x1fc00000`; TPL из U-Boot блокирует L2-кэш и загружает в него SPL, SPL
+запускает blob инициализации DDR от MediaTek в SRAM Frame Engine, дальше
+U-Boot и OpenWrt. Эмулируется: MIPS 1004Kc (пока одно ядро: chip ID
+MT7621S), CM/GIC/CPC, DRAM 128/256/512 МБ (выше 448 МБ — по
+`0x20000000`, как у SoC), SPI-контроллер + SPI-NOR, UART, Frame Engine
+(QDMA/PDMA, NETSYS v1) с коммутатором MT7530 (MCM), xHCI (USB 3.0 + 2.0),
+GPIO с кнопками и светодиодами. Пока нет: PCIe (Wi-Fi-карты), параллельного
+NAND, SD-карты, второго ядра.
+
+```bash
+tools/prepare-nand.sh --soc mt7621 zbtlink_zbt-wg3526-16m 25.12.5   # nor-zbt-wg3526-16m
+./emulator.sh -P zbtlink-zbt-wg3526-16m
+```
+
+В папке флеша: `mt7621.mtd0.u-boot.bin` (сборка U-Boot OpenWrt
+`u-boot-mt7621_zbtlink_zbt-wg3526-16m/u-boot-mt7621.bin`), `u-boot-env`,
+`factory` (MAC 80:af:ca:11:22:33 по 0xe000: LAN …:33, WAN …:34) и
+`firmware` (sysupgrade.bin). В образе OpenWrt нет `kmod-usb-storage`: для
+USB-флешки его нужно поставить (`apk add kmod-usb-storage`).
 
 ## Что эмулируется
 

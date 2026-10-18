@@ -1,7 +1,9 @@
 #!/bin/bash
 # Build the Linux package dist/Router-Emulator-<version>-linux-<arch>.tar.gz
 # from an existing QEMU build (./build.sh):
-#   - qemu/qemu-system-aarch64 (stripped) with the shared libraries it needs
+#   - qemu/qemu-system-aarch64 and qemu-system-mipsel (MT7621 boards; the
+#     same directory as the first binary), stripped, with the shared
+#     libraries they need
 #     in qemu/lib/ (all but the C library itself), found through
 #     RUNPATH=$ORIGIN, so the package runs on other distributions with the
 #     same or a newer glibc
@@ -40,12 +42,15 @@ TGZ=$APP-$EMU_VERSION-linux-$ARCH.tar.gz
 PKG=$ROOT/work/linuxpkg/$APP
 rm -rf "$PKG" && mkdir -p "$PKG/qemu/lib" "$PKG/usb" "$PKG/tools" "$PKG/tests"
 
+MIPS=$(dirname "$BIN")/qemu-system-mipsel
+[ -x "$MIPS" ] || { echo "no $MIPS: run ./build.sh" >&2; exit 1; }
 install -m 755 "$BIN" "$PKG/qemu/qemu-system-aarch64"
-$STRIP --strip-all "$PKG/qemu/qemu-system-aarch64"
+install -m 755 "$MIPS" "$PKG/qemu/qemu-system-mipsel"
+$STRIP --strip-all "$PKG/qemu/qemu-system-aarch64" "$PKG/qemu/qemu-system-mipsel"
 # shared libraries; the parts of glibc only with BUNDLE_LIBC (otherwise
 # they must match the system)
-$LDD "$BIN" | awk '/=> \// { print $1, $3 } /^\t\/[^ ]*ld-linux/ { print $1, $1 }' |
-while read -r name path; do
+{ $LDD "$BIN"; $LDD "$MIPS"; } | awk '/=> \// { print $1, $3 } /^\t\/[^ ]*ld-linux/ { print $1, $1 }' |
+sort -u | while read -r name path; do
     name=$(basename "$name")
     glibc=0
     case $name in
@@ -66,7 +71,7 @@ if [ $BUNDLE_LIBC = 1 ] && [ ! -f "$PKG/qemu/lib/libgcc_s.so.1" ]; then
     cp -L "$(dirname "$libc")/libgcc_s.so.1" "$PKG/qemu/lib/"
     chmod 644 "$PKG/qemu/lib/libgcc_s.so.1"
 fi
-patchelf --set-rpath '$ORIGIN/lib' "$PKG/qemu/qemu-system-aarch64"
+patchelf --set-rpath '$ORIGIN/lib' "$PKG/qemu/qemu-system-aarch64" "$PKG/qemu/qemu-system-mipsel"
 [ -n "$BASH_STATIC" ] && install -m 755 "$BASH_STATIC" "$PKG/bash"
 
 cp emulator.sh VERSION LICENSE README.md README.ru.md \
@@ -85,6 +90,9 @@ QRUN=("$PKG/qemu/qemu-system-aarch64")
 [ $BUNDLE_LIBC = 1 ] && QRUN=("$PKG/qemu/lib/ld-linux-aarch64.so.1" --library-path "$PKG/qemu/lib" "${QRUN[@]}")
 (cd / && env -i PATH=/usr/bin:/bin "${QRUN[@]}" -M help |
     grep -q mt7981-router) || { echo "packaged QEMU does not start" >&2; exit 1; }
+QRUN[${#QRUN[@]}-1]=$PKG/qemu/qemu-system-mipsel
+(cd / && env -i PATH=/usr/bin:/bin "${QRUN[@]}" -M help |
+    grep -q mt7621-router) || { echo "packaged qemu-system-mipsel does not start" >&2; exit 1; }
 
 mkdir -p dist && rm -f "dist/$APP"-*-linux-"$ARCH".tar.gz
 tar -C work/linuxpkg -czf "dist/$TGZ" --owner=0 --group=0 "$APP"

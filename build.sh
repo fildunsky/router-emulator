@@ -2,7 +2,8 @@
 # Build the Router Emulator: QEMU v10.1.0 + qemu-patches/*.patch
 #
 #   ./build.sh            clone QEMU into src/qemu, apply the patches, build
-#                         src/qemu/build/qemu-system-aarch64
+#                         src/qemu/build/qemu-system-aarch64 (Filogic boards)
+#                         and qemu-system-mipsel (MT7621 boards)
 #
 # Environment:
 #   JOBS=N                parallel build jobs (default: ninja's choice)
@@ -54,8 +55,10 @@ if [ "$have" -lt ${#patches[@]} ]; then
     git -c user.name=build -c user.email=build@localhost am "${patches[@]:$have}"
 fi
 mkdir -p build && cd build
-# --enable-fdt=enabled: system libfdt if found, else the bundled dtc
-[ -f build.ninja ] || ../configure --target-list=aarch64-softmmu --enable-slirp \
-    --enable-fdt=enabled --disable-docs --disable-werror $CONFIGURE_ARGS
-ninja ${JOBS:+-j "$JOBS"} qemu-system-aarch64
-echo "built: $PWD/qemu-system-aarch64"
+# --enable-fdt=enabled: system libfdt if found, else the bundled dtc;
+# a build directory from before the MT7621 machine is configured again
+grep -qs mipsel-softmmu build.ninja ||
+    ../configure --target-list=aarch64-softmmu,mipsel-softmmu --enable-slirp \
+        --enable-fdt=enabled --disable-docs --disable-werror $CONFIGURE_ARGS
+ninja ${JOBS:+-j "$JOBS"} qemu-system-aarch64 qemu-system-mipsel
+echo "built: $PWD/qemu-system-aarch64 $PWD/qemu-system-mipsel"

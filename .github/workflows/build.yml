@@ -51,11 +51,14 @@ env:
   #   teltonika-rutc50 SPI-NOR boot + SPI-NAND (nor-nand), own U-Boot
   #                    (tools/uboot-rutc50), 74HC595 LEDs on SPI1
   #   openwrt-one      SPI-NAND boot + SPI-NOR recovery (nor-nand)
+  #   zbtlink-zbt-wg3526-16m  MT7621A (MIPS, qemu-system-mipsel), SPI-NOR,
+  #                    OpenWrt U-Boot (TPL/SPL, DDR init blob), MT7530
   TEST_PRESETS: >-
     cudy-wr3000p-v1 cudy-wr3000h-v1 cudy-wr3000s-v1 cudy-tr3000-v1 netis-nx31
     xiaomi-redmi-ax6000 netcore-n60 netcore-n60-pro glinet-gl-mt6000
     huasifei-wh3000-pro-emmc bananapi-bpi-r4-lite routerich-be7200
     asus-zenwifi-bt8 bananapi-bpi-r4 teltonika-rutc50 openwrt-one
+    zbtlink-zbt-wg3526-16m
 
 jobs:
   # release or not: VERSION without its tag on main, or the tag itself
@@ -122,6 +125,7 @@ jobs:
           src/qemu/build/qemu-system-aarch64 -M help | grep mt7986-router
           src/qemu/build/qemu-system-aarch64 -M help | grep mt7987-router
           src/qemu/build/qemu-system-aarch64 -M mt7981-router,help
+          src/qemu/build/qemu-system-mipsel -M help | grep mt7621-router
 
       - name: NAND image (official OpenWrt for cudy_wr3000p-v1)
         if: matrix.target != 'win64'
@@ -230,7 +234,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # wan: the WAN link as the kernel names it on that board
+        # wan: the WAN link as the kernel names it on that board; first:
+        # the first boot stage's line (default BL2), qemu: the binary
         include:
           - { preset: cudy-wr3000p-v1, wan: 'wan: Link is Up' }
           - { preset: cudy-wr3000h-v1, wan: 'wan: Link is Up' }
@@ -248,6 +253,7 @@ jobs:
           - { preset: bananapi-bpi-r4, wan: 'wan: Link is Up' }
           - { preset: teltonika-rutc50, wan: 'wan: Link is Up' }
           - { preset: openwrt-one, wan: 'eth0: Link is Up' }
+          - { preset: zbtlink-zbt-wg3526-16m, wan: 'wan: Link is Up', first: 'U-Boot SPL', qemu: qemu-system-mipsel }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -265,7 +271,7 @@ jobs:
           unzip -q "$GITHUB_WORKSPACE/dist/ci-flash.zip" && mkdir -p work
           env -i PATH=/usr/bin:/bin python3 tests/quick.py --limit 900 \
             -P ${{ matrix.preset }} --qemu="-netdev user,id=wan,restrict=on" \
-            'BL2: @120' 'U-Boot 20@240' 'Please press Enter@600' \
+            '${{ matrix.first || 'BL2: ' }}@120' 'U-Boot 20@240' 'Please press Enter@600' \
             '${{ matrix.wan }}@180'
       - name: Logs
         if: always()
@@ -283,7 +289,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # wan: the WAN link as the kernel names it on that board
+        # wan: the WAN link as the kernel names it on that board; first:
+        # the first boot stage's line (default BL2), qemu: the binary
         include:
           - { preset: cudy-wr3000p-v1, wan: 'wan: Link is Up' }
           - { preset: cudy-wr3000h-v1, wan: 'wan: Link is Up' }
@@ -301,6 +308,7 @@ jobs:
           - { preset: bananapi-bpi-r4, wan: 'wan: Link is Up' }
           - { preset: teltonika-rutc50, wan: 'wan: Link is Up' }
           - { preset: openwrt-one, wan: 'eth0: Link is Up' }
+          - { preset: zbtlink-zbt-wg3526-16m, wan: 'wan: Link is Up', first: 'U-Boot SPL', qemu: qemu-system-mipsel }
     steps:
       - uses: actions/checkout@v4
 
@@ -329,18 +337,20 @@ jobs:
           if (-not $m) { exit 1 }
           $m = & $q -M help | Select-String mt7986-router
           if (-not $m) { exit 1 }
+          $m = & "pkg/Router-Emulator/qemu/qemu-system-mipsel.exe" -M help | Select-String mt7621-router
+          if (-not $m) { exit 1 }
           if (-not (Test-Path pkg/Router-Emulator/emulator.exe)) { exit 1 }
 
       - name: Boot ${{ matrix.preset }} with the packaged QEMU
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force work | Out-Null
-          $env:QEMU_BIN = (Resolve-Path pkg/Router-Emulator/qemu/qemu-system-aarch64.exe).Path
+          $env:QEMU_BIN = (Resolve-Path pkg/Router-Emulator/qemu/${{ matrix.qemu || 'qemu-system-aarch64' }}.exe).Path
           $dir = (Select-String -Path presets/${{ matrix.preset }}.ini -Pattern '^nand-dir=(.*)$').Matches[0].Groups[1].Value
           python tests/quick.py --limit 1200 -P ${{ matrix.preset }} `
             -n "pkg/Router-Emulator/$dir" `
             --qemu="-netdev user,id=wan,restrict=on" `
-            'BL2: @120' 'U-Boot 20@240' 'Linux version@300' 'Please press Enter@600' `
+            '${{ matrix.first || 'BL2: ' }}@120' 'U-Boot 20@240' 'Linux version@300' 'Please press Enter@600' `
             '${{ matrix.wan }}@300'
           if ($LASTEXITCODE -ne 0) { exit 1 }
 

@@ -1,4 +1,4 @@
-# Router Emulator (MediaTek MT7981B / Filogic 820, MT7986 / Filogic 830, MT7987 / Filogic 850, MT7988 / Filogic 860 / 880)
+# Router Emulator (MediaTek MT7981B / Filogic 820, MT7986 / Filogic 830, MT7987 / Filogic 850, MT7988 / Filogic 860 / 880, MT7621)
 
 **English** · [Русский](README.ru.md) · Build: [Linux](README.build.linux.md) · [Windows](README.build.windows.md)
 
@@ -29,7 +29,9 @@ BL2 with its own DRAM calibration and size detection, see
 [MT7986](#mt7986-filogic-830); MT7987A/B boards on `mt7987-router`
 (`soc=mt7987`, see [MT7987](#mt7987-filogic-850)); MT7988A/D boards
 (Filogic 880 / 860) on `mt7988-router` (`soc=mt7988`, see
-[MT7988](#mt7988-filogic-880--860)).
+[MT7988](#mt7988-filogic-880--860)); MT7621A boards (MIPS) on
+`mt7621-router` in `qemu-system-mipsel` (`soc=mt7621`, see
+[MT7621](#mt7621-mips)).
 
 ## Quick start
 
@@ -165,6 +167,7 @@ routers use; saving from the editor drops `;` comments).
 | Bananapi BPi-R4 (MT7988A, Filogic 880) | WAN + 3×1G LAN built-in switch (SFP+ cages not emulated) | DDR4 2 GB (real: 4 GB) | **eMMC** (`bpi-r4` layout) | 3.0 | OpenWrt |
 | Teltonika RUTC50 | 1G WAN built-in PHY + 4×1G LAN MT7531 (the mobile modem is not emulated); LEDs on a **74HC595** | DDR3 256 MB | **SPI-NOR 16 MB boot + SPI-NAND 512 MB** (rutos-a / rutos-b) | 3.0 | OpenWrt RFB BL2 + own U-Boot ([`tools/uboot-rutc50`](tools/uboot-rutc50)) |
 | OpenWrt One | 2.5G WAN **Airoha EN8811H** + 1G LAN built-in PHY | DDR4 1 GB | **SPI-NAND 256 MB boot + SPI-NOR 16 MB** recovery | 2.0 | OpenWrt |
+| Zbtlink ZBT-WG3526 (16M) (**MT7621A**, MIPS) | 5×1G MT7530 (WAN = port 4); Wi-Fi (PCIe) not emulated | DDR3 512 MB (448 MB usable) | **SPI-NOR 16 MB** | 3.0 | OpenWrt |
 
 Netis boards have no bdinfo partition (FIP at 0x380000, ubi at 0x580000;
 MACs in Factory): presets set `openwrt-no-bdinfo=1`. The MT7986 boards use
@@ -320,6 +323,31 @@ tools/prepare-nand.sh --nor-nand rutc50 teltonika_rutc50 25.12.5
 tools/prepare-nand.sh --nor-nand openwrt-one openwrt_one 25.12.5
 ./emulator.sh -P openwrt-one            # -o flash=nor: recovery from the NOR
 ```
+
+## MT7621 (MIPS)
+
+MediaTek MT7621A boards run on a second QEMU binary,
+`qemu-system-mipsel`, machine `mt7621-router` (preset key `soc=mt7621`;
+`emulator.sh`, the launcher and `tests/quick.py` pick the binary). The
+boot chain is the real one: the CPU starts in the SPI-NOR mapped at
+`0x1fc00000`; U-Boot's TPL locks the L2 cache and loads the SPL into it,
+the SPL runs MediaTek's DDR init blob in the Frame Engine SRAM, then U-Boot
+and OpenWrt. Emulated: MIPS 1004Kc (one core for now: chip ID MT7621S),
+CM/GIC/CPC, DRAM 128/256/512 MB (above 448 MB at `0x20000000`, as on the
+SoC), SPI controller + SPI-NOR, UART, Frame Engine (QDMA/PDMA, NETSYS v1)
+with the MT7530 switch (MCM), xHCI (USB 3.0 + 2.0), GPIO with buttons and
+LEDs. Not yet: PCIe (Wi-Fi cards), parallel NAND, SD card, the second core.
+
+```bash
+tools/prepare-nand.sh --soc mt7621 zbtlink_zbt-wg3526-16m 25.12.5   # nor-zbt-wg3526-16m
+./emulator.sh -P zbtlink-zbt-wg3526-16m
+```
+
+The flash folder holds `mt7621.mtd0.u-boot.bin` (the OpenWrt U-Boot build
+`u-boot-mt7621_zbtlink_zbt-wg3526-16m/u-boot-mt7621.bin`), `u-boot-env`,
+`factory` (MAC 80:af:ca:11:22:33 at 0xe000: LAN …:33, WAN …:34) and
+`firmware` (the sysupgrade.bin). The OpenWrt image has no
+`kmod-usb-storage`: for a USB stick install it (`apk add kmod-usb-storage`).
 
 ## What is emulated
 

@@ -31,7 +31,11 @@
 #     --nor-mb N      NOR size (default 16)
 #     --soc SOC       mt7981 (default) or mt7986: partition file prefix; an
 #                     MT7986 Factory without a dump gets a minimal Wi-Fi
-#                     EEPROM (OpenWrt has no default one for that chip)
+#                     EEPROM (OpenWrt has no default one for that chip);
+#                     mt7621: ramips/mt7621 SPI-NOR board with an OpenWrt
+#                     U-Boot build (u-boot-mt7621_PROFILE/u-boot-mt7621.bin,
+#                     e.g. zbtlink_zbt-wg3526-16m): u-boot, u-boot-env,
+#                     factory (MAC at 0xe000), firmware = sysupgrade.bin
 #     --parts SPEC    own flash layout for mknand.py, "label:size,...",
 #                     size "-" = rest (e.g. Xiaomi boards: BL2, Nvram, Bdata,
 #                     Factory, FIP, ..., ubi); BL2, Factory, bdinfo, FIP and
@@ -102,13 +106,15 @@ done
 P=${1:?usage: tools/prepare-nand.sh [--stock DIR] [--flash-mb N] PROFILE [VERSION] [OUTDIR]}
 V=${2:-snapshot}
 NAME=${P#*_}; NAME=${NAME%-v1}
-OUT=${3:-$([ -n "$NOR$NORNAND" ] && echo nor || { [ -n "$EMMC" ] && echo emmc; } || echo nand)-$NAME}
+OUT=${3:-$([ -n "$NOR$NORNAND" ] || [ "$SOC" = mt7621 ] && echo nor || { [ -n "$EMMC" ] && echo emmc; } || echo nand)-$NAME}
+TGT=mediatek/filogic
+[ "$SOC" = mt7621 ] && TGT=ramips/mt7621
 if [ "$V" = snapshot ]; then
-    URL=https://downloads.openwrt.org/snapshots/targets/mediatek/filogic
-    BASE=openwrt-mediatek-filogic-$P
+    URL=https://downloads.openwrt.org/snapshots/targets/$TGT
+    BASE=openwrt-${TGT/\//-}-$P
 else
-    URL=https://downloads.openwrt.org/releases/$V/targets/mediatek/filogic
-    BASE=openwrt-$V-mediatek-filogic-$P
+    URL=https://downloads.openwrt.org/releases/$V/targets/$TGT
+    BASE=openwrt-$V-${TGT/\//-}-$P
 fi
 DL=firmware/$V; mkdir -p "$DL"
 # a Factory dump only for its own Wi-Fi chip: the EEPROM starts with the
@@ -221,6 +227,23 @@ else
         done
         [ "$2" = optional ] || { echo "no $b-{${1// /,}} in $URL (wrong profile, or no OpenWrt U-Boot build for it)" >&2; exit 1; }
     }
+fi
+if [ "$SOC" = mt7621 ]; then
+    # one U-Boot image (TPL + SPL with the DDR init blob + U-Boot) at 0
+    f=u-boot-mt7621_$P/u-boot-mt7621.bin
+    grep -q -- " \*$f\$" "$DL/sha256sums" || { echo "no $f in $URL (no OpenWrt U-Boot build for $P)" >&2; exit 1; }
+    mkdir -p "$DL/u-boot-mt7621_$P"
+    ok() { (cd "$DL" && grep -- " \*$f\$" sha256sums | sha256sum -c --quiet) >/dev/null 2>&1; }
+    ok || wget -q -O "$DL/$f" "$URL/$f"
+    ok || { echo "$DL/$f: sha256 mismatch" >&2; exit 1; }
+    SYS=$(pick "squashfs-sysupgrade.bin")
+    [ -n "$SYS" ] || exit 1
+    echo "$P: $f, $(basename "$SYS")"
+    MK=(python3 tools/mknand.py --prefix mt7621)
+    "${MK[@]}" nor -o "$OUT/" --size-mb "$NORMB" --bl2 "$DL/$f" --sysupgrade "$SYS" \
+        --parts u-boot:0x30000,u-boot-env:0x10000,factory:0x10000,firmware:- \
+        --mac-part factory --mac-off 0xe000 --mac 80:af:ca:11:22:33
+    exit 0
 fi
 if [ "$NORNAND" = rutc50 ]; then
     BL2=$(pick "nor-preloader.bin" "" mediatek_mt7981-rfb)

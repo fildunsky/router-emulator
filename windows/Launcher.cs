@@ -556,11 +556,11 @@ namespace RouterEmulator
 
         void Start(int resetHoldMs)
         {
-            string exe = Path.Combine(root, "qemu", "qemu-system-aarch64.exe");
-            if (!File.Exists(exe)) { Error(L.F("err.not_found", "Not found: {0}", exe)); return; }
-            if (!Directory.Exists(nand.Text)) { Error(L.F("err.no_nand", "Flash folder does not exist:\n{0}", nand.Text)); return; }
             var b = board.SelectedItem as Preset;
             if (b == null) { Error(L.T("err.no_preset", "Select or create a board preset first.")); return; }
+            string exe = Path.Combine(root, "qemu", b.QemuExe);
+            if (!File.Exists(exe)) { Error(L.F("err.not_found", "Not found: {0}", exe)); return; }
+            if (!Directory.Exists(nand.Text)) { Error(L.F("err.no_nand", "Flash folder does not exist:\n{0}", nand.Text)); return; }
             var w = (NetChoice)wan.SelectedItem;
             var l = (NetChoice)lan.SelectedItem;
             if (w.Kind == "pcap" && l.Kind == "pcap" && w.Device == l.Device &&

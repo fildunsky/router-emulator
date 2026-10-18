@@ -52,10 +52,16 @@ namespace RouterEmulator
         {
             get {
                 string s = Get("soc", "mt7981");
-                return s == "mt7986" || s == "mt7987" || s == "mt7988" ? s : "mt7981";
+                return s == "mt7986" || s == "mt7987" || s == "mt7988" || s == "mt7621" ? s : "mt7981";
             }
         }
         public string Machine { get { return Soc + "-router"; } }
+        // MT7621 (MIPS) boards run on the second QEMU binary
+        public string QemuExe { get { return Soc == "mt7621" ? "qemu-system-mipsel.exe" : "qemu-system-aarch64.exe"; } }
+        // machine options of the MT7621 machine (the editor writes the
+        // Filogic ones, e.g. gmac0/nand, for every preset)
+        static readonly string[] Mt7621Keys = { "ports", "ddr", "usb-port", "reset-gpio", "wps-gpio",
+            "reset-active-high", "wps-active-high" };   // + led1..ledN
 
         // LAN1 "This PC only": router LAN address and port forwards
         // "pcport:routerport,..." from 127.0.0.1 to the router
@@ -128,6 +134,7 @@ namespace RouterEmulator
                     || kv.Key.StartsWith("lan-")       // LAN1 "This PC only" network
                     || kv.Key.StartsWith("openwrt"))   // used by the package build only
                     continue;
+                if (Soc == "mt7621" && Array.IndexOf(Mt7621Keys, kv.Key) < 0 && !LedDef.IsKey(kv.Key)) continue;
                 string v = kv.Value;
                 // a relative eFuse dump path is relative to the program folder
                 if (kv.Key == "efuse" && baseDir != null && v.Length > 0 && !Path.IsPathRooted(v))
@@ -293,7 +300,8 @@ namespace RouterEmulator
                 new Choice("mt7981", "MediaTek MT7981B (Filogic 820)"),
                 new Choice("mt7986", "MediaTek MT7986A/B (Filogic 830)"),
                 new Choice("mt7987", "MediaTek MT7987A/B (Filogic 850)"),
-                new Choice("mt7988", "MediaTek MT7988A/D (Filogic 880/860)"));
+                new Choice("mt7988", "MediaTek MT7988A/D (Filogic 880/860)"),
+                new Choice("mt7621", "MediaTek MT7621A (MIPS)"));
             ddr = Combo(mem, L.T("ed.ram_type", "RAM type:"), ref gy,
                 new Choice("ddr4", "DDR4"), new Choice("ddr3", "DDR3"));
             string mb = L.T("ed.mb", "MB"), gb = L.T("ed.gb", "GB");

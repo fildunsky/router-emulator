@@ -418,9 +418,13 @@ def cmd_nor(args):
         off += size
     if off > total:
         sys.exit("NOR partitions exceed the flash size")
-    files = {"BL2": args.bl2, "FIP": args.fip, "Factory": args.factory,
+    # --bl2: the first-stage bootloader (BL2, or "u-boot" on MT7621
+    # boards, where one image holds TPL, SPL and U-Boot)
+    files = {"BL2": args.bl2, "u-boot": args.bl2, "FIP": args.fip,
+             "Factory": args.factory, "factory": args.factory,
              "bdinfo": args.bdinfo}
-    if not args.raw and not (args.bl2 and args.fip):
+    labels = [p[0] for p in parts]
+    if not args.raw and not (args.bl2 and (args.fip or "FIP" not in labels)):
         sys.exit("nor: --bl2 and --fip, or --raw")
     raw = open(args.raw, "rb").read() if args.raw else None
     env = [l.rstrip("\n") for l in open(args.env) if l.strip()
@@ -445,7 +449,7 @@ def cmd_nor(args):
         elif label == "bdinfo" or label == args.mac_part:
             mac = args.mac or "80:af:ca:%02x:%02x:%02x" % tuple(
                 random.randrange(256) for _ in range(3))
-            at = 0xde00 if label == "bdinfo" else 0
+            at = 0xde00 if label == "bdinfo" else args.mac_off
             data[at:at + 6] = bytes(int(x, 16) for x in mac.split(":"))
             print(f"base MAC: {mac}")
         elif label == "u-boot-env" and env and not args.env_ubi:
@@ -642,6 +646,9 @@ def main():
     n.add_argument("--mac-part", metavar="LABEL",
                    help="partition holding the base MAC at offset 0 (binary, "
                         "e.g. Teltonika 'config'; generated like bdinfo's)")
+    n.add_argument("--mac-off", type=parse_int, default=0,
+                   help="offset of the MAC in --mac-part (default 0; "
+                        "MT7621 boards: 0xe000 of 'factory')")
     n.add_argument("--env", metavar="FILE",
                    help="U-Boot environment (one name=value per line) for "
                         "'u-boot-env'")

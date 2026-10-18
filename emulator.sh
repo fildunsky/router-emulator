@@ -1,6 +1,7 @@
 #!/bin/bash
 # Router Emulator: run a board described by a preset (presets/*.ini).
-# MT7981 and MT7986 boards (preset key soc=mt7986: machine mt7986-router).
+# MT7981 and MT7986 boards (preset key soc=mt7986: machine mt7986-router);
+# MT7621 boards (soc=mt7621) run on qemu-system-mipsel.
 #
 #   ./emulator.sh [options] [-- extra qemu args]
 #
@@ -159,6 +160,13 @@ for kv in "${ov[@]}"; do
     esac
 done
 [ -n "$NAND" ] || NAND=$(readlink -f "$ROOT/${PNAND:-nand}")
+# MT7621 boards (MIPS): the second QEMU binary next to the first one
+if [ "$SOC" = mt7621 ]; then
+    QEMU=$(dirname "$QEMU")/qemu-system-mipsel
+    [ -x "$QEMU" ] || { echo "$QEMU not built: run ./build.sh" >&2; exit 1; }
+    QRUN=("$QEMU")
+    [ -x "$LDSO" ] && QRUN=("$LDSO" --library-path "$(dirname "$QEMU")/lib" "$QEMU")
+fi
 echo "Router Emulator $EMU_VERSION" >&2
 echo "preset: $(ini_get "$PF" name) - $(ini_get "$PF" description)" >&2
 case "$MOPTS," in *usb-port=none,*) [ "$USBDIR" = "$ROOT/usb" ] && USBDIR=none ;; esac

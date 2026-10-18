@@ -57,14 +57,17 @@ def preset_args(name, nand):
             "-m", ram + "M"]
 
 port = 46000 + os.getpid() % 1000
+margs = ["-M", a.M] if a.M else preset_args(a.P, a.n)
+# MT7621 boards (MIPS) run on the second QEMU binary
+qname = "qemu-system-mipsel" if margs[1].startswith("mt7621-") else "qemu-system-aarch64"
 if a.win:
-    cmd = ["wine", os.environ.get("QEXE", ROOT + "/work/winpkg/Router-Emulator/qemu/qemu-system-aarch64.exe")]
+    cmd = ["wine", os.environ.get("QEXE", ROOT + "/work/winpkg/Router-Emulator/qemu/" + qname + ".exe")]
 else:
-    own = ROOT + "/src/qemu/build/qemu-system-aarch64"
+    own = ROOT + "/src/qemu/build/" + qname
     if not os.path.exists(own):                 # Linux package layout
-        own = ROOT + "/qemu/qemu-system-aarch64"
+        own = ROOT + "/qemu/" + qname
     cmd = [os.environ.get("QEMU_BIN", own)]
-cmd += (["-M", a.M] if a.M else preset_args(a.P, a.n)) + ["-display", "none",
+cmd += margs + ["-display", "none",
         "-chardev", f"socket,id=con,mux=on,host=127.0.0.1,port={port},server=on,wait=on",
         "-serial", "chardev:con", "-mon", "chardev=con"] + shlex.split(a.qemu)
 err = open(a.log + ".err", "w")
