@@ -140,7 +140,7 @@ jobs:
           CONFIGURE_ARGS: >-
             --disable-gtk --disable-sdl --disable-opengl --disable-vnc
             --disable-spice --disable-curl --audio-drv-list=
-        run: PGO=1 PGO_NAND=nand-wr3000p ./build.sh
+        run: PGO_NAND=nand-wr3000p ./build.sh
 
       - name: Boot to the console (BL2, U-Boot, kernel, procd)
         if: matrix.target != 'win64'

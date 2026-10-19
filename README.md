@@ -578,8 +578,9 @@ m3000/                    own OpenWrt builds (not in git)
 - The Windows build uses clang (native TLS): MinGW GCC's emulated TLS made
   guest execution ~30 % slower; it is also PGO-optimised (5–17 % on real
   Windows), and the launcher keeps QEMU out of Windows 11 efficiency mode.
-  The released Linux packages are PGO-optimised too (GCC, `PGO=1 ./build.sh`,
-  ~8–10 % on system-call heavy guest work).
+  The released Linux packages are PGO-optimised too (GCC,
+  `PGO_NAND=nand-wr3000p ./build.sh`, ~8–10 % on system-call heavy guest
+  work).
   Profile (`perf`): most time goes to TCG's translation-block lookup, the
   device models are negligible; -O3/LTO gave nothing. QEMU already runs
   each of the two guest CPUs in its own host thread (MTTCG); one guest
