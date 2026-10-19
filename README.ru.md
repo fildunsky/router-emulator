@@ -339,8 +339,10 @@ tools/prepare-nand.sh --nor-nand openwrt-one openwrt_one 25.12.5
 `0x1fc00000`; TPL из U-Boot блокирует L2-кэш и загружает в него SPL, SPL
 запускает blob инициализации DDR от MediaTek в SRAM Frame Engine, дальше
 U-Boot и OpenWrt; NAND-платы грузятся через BootROM для NAND (stage1 с
-инициализацией DDR — в заблокированный L2, затем загрузчик). Эмулируется: MIPS 1004Kc (пока одно ядро: chip ID
-MT7621S), CM/GIC/CPC, DRAM 128/256/512 МБ (выше 448 МБ — по
+инициализацией DDR — в заблокированный L2, затем загрузчик). Эмулируется: MIPS 1004Kc, 2 ядра × 2 VPE (MT ASE: 4 CPU в Linux,
+chip ID MT7621A; `-smp 2` — одно ядро, MT7621S; `-smp 1`), CM/GIC/CPC
+(ядра включает CPC, VPE — код MT ASE; таймеры CP0 — локальные
+прерывания GIC), DRAM 128/256/512 МБ (выше 448 МБ — по
 `0x20000000`, как у SoC), SPI-контроллер + SPI-NOR, UART, Frame Engine
 (QDMA/PDMA, NETSYS v1) с коммутатором MT7530 (MCM), xHCI (USB 3.0 + 2.0),
 GPIO с кнопками и светодиодами, PCIe-хост (три корневых порта,
@@ -355,7 +357,7 @@ EEPROM во флеше получает минимальный из eFuse с MAC
 по умолчанию: Breed выходит некэшируемым memset за конец буфера в заголовок
 malloc и полагается на грязную копию в кэше; включён от сброса до первого
 пользовательского кода ОС, так что OpenWrt работает на полной скорости).
-Пока нет: SD-карты, второго ядра.
+Пока нет: SD-карты.
 
 ```bash
 tools/prepare-nand.sh --soc mt7621 zbtlink_zbt-wg3526-16m 25.12.5   # nor-zbt-wg3526-16m

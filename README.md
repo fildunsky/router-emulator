@@ -337,8 +337,10 @@ boot chain is the real one: the CPU starts in the SPI-NOR mapped at
 `0x1fc00000`; U-Boot's TPL locks the L2 cache and loads the SPL into it,
 the SPL runs MediaTek's DDR init blob in the Frame Engine SRAM, then U-Boot
 and OpenWrt; NAND boards boot through the NAND BootROM (stage1 with the DDR
-init into the locked L2, then the bootloader). Emulated: MIPS 1004Kc (one core for now: chip ID MT7621S),
-CM/GIC/CPC, DRAM 128/256/512 MB (above 448 MB at `0x20000000`, as on the
+init into the locked L2, then the bootloader). Emulated: MIPS 1004Kc, 2 cores × 2 VPEs (MT ASE: 4 CPUs in Linux, chip ID
+MT7621A; `-smp 2`: one core, MT7621S; `-smp 1`), CM/GIC/CPC (cores
+powered up by the CPC, VPEs by MT ASE code; the CP0 timers are GIC local
+interrupts), DRAM 128/256/512 MB (above 448 MB at `0x20000000`, as on the
 SoC), SPI controller + SPI-NOR, UART, Frame Engine (QDMA/PDMA, NETSYS v1)
 with the MT7530 switch (MCM), xHCI (USB 3.0 + 2.0), GPIO with buttons and
 LEDs, the PCIe host (three root ports, `pcie0..2=CARD`) with "radio
@@ -352,7 +354,7 @@ software test engine, so a vendor stage1 that calibrates the DDR itself
 as far as uncached stores go (`dcache=on`, the default: Breed overruns an
 uncached memset into a malloc header and relies on the dirty cached copy;
 on from reset until the OS runs user code, so OpenWrt runs at full
-speed). Not yet: SD card, the second core.
+speed). Not yet: SD card.
 
 ```bash
 tools/prepare-nand.sh --soc mt7621 zbtlink_zbt-wg3526-16m 25.12.5   # nor-zbt-wg3526-16m

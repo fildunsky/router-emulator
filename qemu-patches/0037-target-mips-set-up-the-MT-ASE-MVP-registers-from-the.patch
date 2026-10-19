@@ -1,0 +1,35 @@
+From d7294617134c86cb6419790bce810fbf2211750b Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Mon, 19 Oct 2026 02:18:05 -0400
+Subject: [PATCH 37/38] target/mips: set up the MT ASE MVP registers from the
+ CPU model
+
+mvp_init() runs before the first CPU reset, which is what loads Config3
+from the model, so ase_mt_available() was always false there and every
+MT ASE CPU (34Kf, 1004Kc) got MVPConf0/MVPConf1 = 0: no TCs to address,
+and MTTR/MFTR to TC 1+ were translated as NOPs.  Check the model's
+Config3 instead.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012GbUcwR34gg9RgGTEtNN6J
+---
+ target/mips/cpu-defs.c.inc | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/target/mips/cpu-defs.c.inc b/target/mips/cpu-defs.c.inc
+index 1237f36..80aba3f 100644
+--- a/target/mips/cpu-defs.c.inc
++++ b/target/mips/cpu-defs.c.inc
+@@ -1071,7 +1071,8 @@ static void mvp_init(CPUMIPSState *env)
+ {
+     env->mvp = g_malloc0(sizeof(CPUMIPSMVPContext));
+ 
+-    if (!ase_mt_available(env)) {
++    /* (before the CPU reset, which loads Config3 from the model) */
++    if (!(env->cpu_model->CP0_Config3 & (1 << CP0C3_MT))) {
+         return;
+     }
+ 
+-- 
+2.47.3
+

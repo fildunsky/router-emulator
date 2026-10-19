@@ -1,0 +1,840 @@
+From a77b945247af82b5f7a34fd4dc858f9f9bc620a4 Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Mon, 19 Oct 2026 02:18:05 -0400
+Subject: [PATCH 38/38] target/mips, hw/mips: MT ASE multi-core CPS (MT7621: 2
+ cores x 2 VPEs)
+
+- CPS/GCR/CPC property vp-per-core: MT ASE cores of that many VPEs, the
+  CPUs of a core consecutive.  GCR: PCORES, Cx_CONFIG PVPE, CM2 Cx_OTHER
+  CoreNum, Cx_ID, the reset base per core; CPC: Cx_OTHER, Cx_CMD
+  (PwrUp / Reset: VPE 0 from the reset base, PwrDown), Cx_STAT_CONF
+  SeqState U6 while the core runs (what Linux' smp-cps waits for on CM2)
+- CPU (mt_vpes): MVPConf0 PVPE/PTC, the core's VPEs share its MVP
+  registers, VPE 0 of each core is the master VPE, TCBind CurVPE/CurTC
+  core-local, MTTR/MFTR address the TCs of the own core, DVPE/EVPE act
+  on the own core only and EVPE wakes VPEs set up while disabled
+- GIC timer-routable: the CPUs' CP0 timer interrupts are GIC inputs
+  (local TIMER, Vx_TIMER_MAP, masked at reset) instead of IP7
+- MT7621: -smp 1 / 2 (one core, MT7621S) / 4 (MT7621A, the default);
+  the NAND BootROM stub sends the cores the bootloader powers up into the
+  bootloader once DRAM is up (Breed waits for core 1's coherence)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012GbUcwR34gg9RgGTEtNN6J
+---
+ hw/intc/mips_gic.c                  | 62 ++++++++++++++++++++++++-
+ hw/mips/cps.c                       | 23 +++++++++
+ hw/mips/mt7621.c                    | 64 +++++++++++++++++++------
+ hw/misc/mips_cmgcr.c                | 72 ++++++++++++++++++++++-------
+ hw/misc/mips_cpc.c                  | 68 +++++++++++++++++++++++++++
+ include/hw/intc/mips_gic.h          |  6 +++
+ include/hw/mips/cps.h               |  2 +
+ include/hw/misc/mips_cmgcr.h        |  7 +++
+ include/hw/misc/mips_cpc.h          | 11 +++++
+ target/mips/cpu-defs.c.inc          |  4 ++
+ target/mips/cpu.c                   | 14 ++++--
+ target/mips/cpu.h                   | 12 +++++
+ target/mips/system/cp0_timer.c      |  6 ++-
+ target/mips/tcg/system/cp0_helper.c | 38 +++++++++++++--
+ 14 files changed, 349 insertions(+), 40 deletions(-)
+
+diff --git a/hw/intc/mips_gic.c b/hw/intc/mips_gic.c
+index 0c50ba4..70988fc 100644
+--- a/hw/intc/mips_gic.c
++++ b/hw/intc/mips_gic.c
+@@ -45,6 +45,13 @@ static void mips_gic_set_vp_irq(MIPSGICState *gic, int vp, int pin)
+         ored_level |= (gic->vps[vp].pend & GIC_VP_MASK_CMP_MSK) >>
+                       GIC_VP_MASK_CMP_SHF;
+     }
++    if (gic->timer_routable &&
++        (gic->vps[vp].timer_map & GIC_MAP_TO_PIN_MSK) &&
++        (gic->vps[vp].timer_map & GIC_MAP_MSK) == pin &&
++        (gic->vps[vp].mask & GIC_VP_MASK_TIMER_MSK)) {
++        /* the CPU's own (CP0) timer */
++        ored_level |= !!(gic->vps[vp].pend & GIC_VP_MASK_TIMER_MSK);
++    }
+     if (kvm_enabled())  {
+         kvm_mips_set_ipi_interrupt(env_archcpu(gic->vps[vp].env),
+                                    pin + GIC_CPU_PIN_OFFSET,
+@@ -99,6 +106,8 @@ static uint64_t gic_read_vp(MIPSGICState *gic, uint32_t vp_index, hwaddr addr,
+         return gic->vps[vp_index].mask;
+     case GIC_VP_COMPARE_MAP_OFS:
+         return gic->vps[vp_index].compare_map;
++    case GIC_VP_TIMER_MAP_OFS:
++        return gic->vps[vp_index].timer_map;
+     case GIC_VP_OTHER_ADDR_OFS:
+         return gic->vps[vp_index].other_addr;
+     case GIC_VP_IDENT_OFS:
+@@ -193,6 +202,30 @@ bad_offset:
+     return 0;
+ }
+ 
++/* the pins of a VP's local interrupts, after a change of their state */
++static void gic_update_vp_local(MIPSGICState *gic, int vp)
++{
++    if (gic->vps[vp].compare_map & GIC_MAP_TO_PIN_MSK) {
++        mips_gic_set_vp_irq(gic, vp, gic->vps[vp].compare_map & GIC_MAP_MSK);
++    }
++    if (gic->timer_routable && (gic->vps[vp].timer_map & GIC_MAP_TO_PIN_MSK)) {
++        mips_gic_set_vp_irq(gic, vp, gic->vps[vp].timer_map & GIC_MAP_MSK);
++    }
++}
++
++/* input: the CP0 timer interrupt of VP n */
++static void gic_cpu_timer(void *opaque, int vp, int level)
++{
++    MIPSGICState *gic = opaque;
++
++    if (level) {
++        gic->vps[vp].pend |= 1 << GIC_LOCAL_INT_TIMER;
++    } else {
++        gic->vps[vp].pend &= ~(1 << GIC_LOCAL_INT_TIMER);
++    }
++    gic_update_vp_local(gic, vp);
++}
++
+ static void gic_timer_expire_cb(void *opaque, uint32_t vp_index)
+ {
+     MIPSGICState *gic = opaque;
+@@ -231,9 +264,27 @@ static void gic_write_vp(MIPSGICState *gic, uint32_t vp_index, hwaddr addr,
+     case GIC_VP_RMASK_OFS:
+         gic->vps[vp_index].mask &= ~(data & GIC_VP_SET_RESET_MSK) &
+                                    GIC_VP_SET_RESET_MSK;
++        if (gic->timer_routable) {
++            gic_update_vp_local(gic, vp_index);
++        }
+         break;
+     case GIC_VP_SMASK_OFS:
+         gic->vps[vp_index].mask |= data & GIC_VP_SET_RESET_MSK;
++        if (gic->timer_routable) {
++            gic_update_vp_local(gic, vp_index);
++        }
++        break;
++    case GIC_VP_TIMER_MAP_OFS:
++        if (gic->timer_routable) {
++            uint32_t old = gic->vps[vp_index].timer_map;
++
++            OFFSET_CHECK((data & GIC_MAP_MSK) <= GIC_CPU_INT_MAX);
++            gic->vps[vp_index].timer_map = data & GIC_MAP_TO_PIN_REG_MSK;
++            if (old & GIC_MAP_TO_PIN_MSK) {     /* the pin it left */
++                mips_gic_set_vp_irq(gic, vp_index, old & GIC_MAP_MSK);
++            }
++            gic_update_vp_local(gic, vp_index);
++        }
+         break;
+     case GIC_VP_COMPARE_MAP_OFS:
+         /* EIC isn't supported */
+@@ -363,7 +414,9 @@ static void gic_reset(void *opaque)
+                      (numintrs     << GIC_SH_CONFIG_NUMINTRS_SHF)  |
+                      (gic->num_vps << GIC_SH_CONFIG_PVPS_SHF);
+     for (i = 0; i < gic->num_vps; i++) {
+-        gic->vps[i].ctl         = 0x0;
++        /* Vx_CTL: TIMER_ROUTABLE (bit 1) when the CP0 timers are inputs */
++        gic->vps[i].ctl         = gic->timer_routable ? 0x2 : 0x0;
++        gic->vps[i].timer_map   = GIC_MAP_TO_PIN_MSK;
+         gic->vps[i].pend        = 0x0;
+         /* PERFCNT, TIMER and WD not implemented */
+         gic->vps[i].mask        = 0x32;
+@@ -432,6 +485,12 @@ static void mips_gic_realize(DeviceState *dev, Error **errp)
+     }
+     s->gic_timer = mips_gictimer_init(s, s->num_vps, gic_timer_expire_cb);
+     qdev_init_gpio_in(dev, gic_set_irq, s->num_irq);
++    if (s->timer_routable) {
++        qdev_init_gpio_in_named(dev, gic_cpu_timer, "timer", s->num_vps);
++        for (i = 0; i < s->num_vps; i++) {
++            s->vps[i].env->timer_irq = qdev_get_gpio_in_named(dev, "timer", i);
++        }
++    }
+     for (i = 0; i < s->num_irq; i++) {
+         s->irq_state[i].irq = qdev_get_gpio_in(dev, i);
+     }
+@@ -440,6 +499,7 @@ static void mips_gic_realize(DeviceState *dev, Error **errp)
+ static const Property mips_gic_properties[] = {
+     DEFINE_PROP_UINT32("num-vp", MIPSGICState, num_vps, 1),
+     DEFINE_PROP_UINT32("num-irq", MIPSGICState, num_irq, 256),
++    DEFINE_PROP_BOOL("timer-routable", MIPSGICState, timer_routable, false),
+ };
+ 
+ static void mips_gic_class_init(ObjectClass *klass, const void *data)
+diff --git a/hw/mips/cps.c b/hw/mips/cps.c
+index b091090..b7a844b 100644
+--- a/hw/mips/cps.c
++++ b/hw/mips/cps.c
+@@ -73,10 +73,17 @@ static void mips_cps_realize(DeviceState *dev, Error **errp)
+         return;
+     }
+ 
++    if (s->vp_per_core && s->num_vp % s->vp_per_core) {
++        error_setg(errp, "num-vp %u is not a number of cores of %u VPEs",
++                   s->num_vp, s->vp_per_core);
++        return;
++    }
+     for (int i = 0; i < s->num_vp; i++) {
+         MIPSCPU *cpu = MIPS_CPU(object_new(s->cpu_type));
+         CPUMIPSState *env = &cpu->env;
+ 
++        env->mt_vpes = s->vp_per_core;
++
+         object_property_set_bool(OBJECT(cpu), "big-endian", s->cpu_is_bigendian,
+                                  &error_abort);
+ 
+@@ -101,6 +108,13 @@ static void mips_cps_realize(DeviceState *dev, Error **errp)
+             env->itc_tag = mips_itu_get_tag_region(&s->itu);
+         }
+         qemu_register_reset(main_cpu_reset, cpu);
++        /* the MVP registers are the core's: VPE 0's for all its VPEs */
++        if (s->vp_per_core && i % s->vp_per_core) {
++            MIPSCPU *vpe0 = MIPS_CPU(qemu_get_cpu(i - i % s->vp_per_core));
++
++            g_free(env->mvp);
++            env->mvp = vpe0->env.mvp;
++        }
+     }
+ 
+     /* Inter-Thread Communication Unit */
+@@ -124,6 +138,8 @@ static void mips_cps_realize(DeviceState *dev, Error **errp)
+                             &error_abort);
+     object_property_set_int(OBJECT(&s->cpc), "vp-start-running", 1,
+                             &error_abort);
++    object_property_set_uint(OBJECT(&s->cpc), "vp-per-core", s->vp_per_core,
++                            &error_abort);
+     if (!sysbus_realize(SYS_BUS_DEVICE(&s->cpc), errp)) {
+         return;
+     }
+@@ -137,6 +153,8 @@ static void mips_cps_realize(DeviceState *dev, Error **errp)
+                             &error_abort);
+     object_property_set_uint(OBJECT(&s->gic), "num-irq", MIN(s->num_irq, 128),
+                             &error_abort);
++    object_property_set_bool(OBJECT(&s->gic), "timer-routable",
++                             s->gic_timer_routable, &error_abort);
+     if (!sysbus_realize(SYS_BUS_DEVICE(&s->gic), errp)) {
+         return;
+     }
+@@ -152,6 +170,8 @@ static void mips_cps_realize(DeviceState *dev, Error **errp)
+                             &error_abort);
+     object_property_set_int(OBJECT(&s->gcr), "gcr-rev", s->gcr_rev,
+                             &error_abort);
++    object_property_set_uint(OBJECT(&s->gcr), "vp-per-core", s->vp_per_core,
++                            &error_abort);
+     object_property_set_int(OBJECT(&s->gcr), "gcr-base", gcr_base,
+                             &error_abort);
+     object_property_set_link(OBJECT(&s->gcr), "gic", OBJECT(&s->gic.mr),
+@@ -168,6 +188,9 @@ static void mips_cps_realize(DeviceState *dev, Error **errp)
+ 
+ static const Property mips_cps_properties[] = {
+     DEFINE_PROP_UINT32("num-vp", MIPSCPSState, num_vp, 1),
++    DEFINE_PROP_UINT32("vp-per-core", MIPSCPSState, vp_per_core, 0),
++    DEFINE_PROP_BOOL("gic-timer-routable", MIPSCPSState, gic_timer_routable,
++                     false),
+     DEFINE_PROP_UINT32("num-irq", MIPSCPSState, num_irq, 256),
+     DEFINE_PROP_INT32("gcr-rev", MIPSCPSState, gcr_rev, 0x800),
+     DEFINE_PROP_STRING("cpu-type", MIPSCPSState, cpu_type),
+diff --git a/hw/mips/mt7621.c b/hw/mips/mt7621.c
+index 86afcd2..a15136d 100644
+--- a/hw/mips/mt7621.c
++++ b/hw/mips/mt7621.c
+@@ -390,9 +390,9 @@ static void palmbus_reset(MT7621Board *b)
+     sc[SYSC_CHIP_NAME1 / 4] = 0x20203132;       /* "21  " */
+     /*
+      * ver 1, eco 3; MT7621A (dual core, PKG_ID A) or, with one emulated
+-     * CPU, MT7621S (single core)
++     * core, MT7621S (single core)
+      */
+-    sc[SYSC_CHIP_REV / 4] = (b->machine->smp.cpus > 1 ? 0x00030103
++    sc[SYSC_CHIP_REV / 4] = (b->machine->smp.cpus > 2 ? 0x00030103
+                                                       : 0x00010103);
+     /*
+      * Bootstrap: XTAL 40 MHz (XTAL_MODE_SEL 3), DRAM type (bit 4: DDR2),
+@@ -590,9 +590,11 @@ static void mt7621_cache_hook(CPUMIPSState *env, target_ulong addr,
+  *     the uImage load address in DRAM, 0x7621abcd is stored at 0xbe10ad00
+  *     ("DRAM is up") and the uImage entry point is called.
+  * A stub at the reset vector does the jumps; it calls back into the model
+- * for step 2 by a write to BROM_TRIG.
++ * for step 2 by a write to BROM_TRIG.  Other cores, powered up later by
++ * the bootloader, wait for the mailbox and enter the bootloader as well.
+  */
+ #define BROM_TRIG       0xf00
++#define BROM_SEC        0x100   /* stub of the other cores */
+ #define BROM_MAILBOX    0x1e10ad00ULL
+ #define BROM_MAGIC      0x7621abcd
+ 
+@@ -641,16 +643,34 @@ static void mt7621_brom_nand(MT7621Board *b)
+                         MEMTXATTRS_UNSPECIFIED, mbox, sizeof(mbox));
+ 
+     memset(stub, 0, 0x1000);
+-    stub[0] = cpu_to_le32(0x3c1dbe10);              /* lui sp, 0xbe10 */
+-    stub[1] = cpu_to_le32(0x37bddff0);              /* ori sp, 0xdff0 */
+-    stub[2] = cpu_to_le32(0x3c190000 | (ep >> 16)); /* lui t9 */
+-    stub[3] = cpu_to_le32(0x37390000 | (ep & 0xffff)); /* ori t9 */
+-    stub[4] = cpu_to_le32(0x0320f809);              /* jalr t9 */
+-    stub[5] = 0;
++    /* another core (powered up by the bootloader): see below */
++    stub[0] = cpu_to_le32(0x401a7801);              /* mfc0 k0, EBase */
++    stub[1] = cpu_to_le32(0x335a03ff);              /* andi k0, CPUNum */
++    stub[2] = cpu_to_le32(0x17400000 | (BROM_SEC / 4 - 3)); /* bnez k0 */
++    stub[3] = 0;
++    stub[4] = cpu_to_le32(0x3c1dbe10);              /* lui sp, 0xbe10 */
++    stub[5] = cpu_to_le32(0x37bddff0);              /* ori sp, 0xdff0 */
++    stub[6] = cpu_to_le32(0x3c190000 | (ep >> 16)); /* lui t9 */
++    stub[7] = cpu_to_le32(0x37390000 | (ep & 0xffff)); /* ori t9 */
++    stub[8] = cpu_to_le32(0x0320f809);              /* jalr t9 */
++    stub[9] = 0;
+     /* back from the stage: step 2 in the model, then the image */
+-    stub[6] = cpu_to_le32(0x3c08bfc0);              /* lui t0, 0xbfc0 */
+-    stub[7] = cpu_to_le32(0xad000000 | BROM_TRIG);  /* sw zero, TRIG(t0) */
+-    brom_stub_jump(stub + 8, ldl_be_p(hdr + 0x14));
++    stub[10] = cpu_to_le32(0x3c08bfc0);             /* lui t0, 0xbfc0 */
++    stub[11] = cpu_to_le32(0xad000000 | BROM_TRIG); /* sw zero, TRIG(t0) */
++    brom_stub_jump(stub + 12, ldl_be_p(hdr + 0x14));
++    /*
++     * A core the bootloader powers up starts here as well: it waits for
++     * "DRAM is up" in the mailbox and enters the bootloader too (whose
++     * start code tells the cores apart; Breed: core 1 sets up its own
++     * coherence, which core 0 waits for)
++     */
++    stub[BROM_SEC / 4 + 0] = cpu_to_le32(0x3c1bbe11);   /* lui k1, 0xbe11 */
++    stub[BROM_SEC / 4 + 1] = cpu_to_le32(0x8f7aad00);   /* lw k0, MBOX(k1) */
++    stub[BROM_SEC / 4 + 2] = cpu_to_le32(0x3c087621);   /* lui t0, 0x7621 */
++    stub[BROM_SEC / 4 + 3] = cpu_to_le32(0x3508abcd);   /* ori t0, 0xabcd */
++    stub[BROM_SEC / 4 + 4] = cpu_to_le32(0x1748fffc);   /* bne k0, t0, lw */
++    stub[BROM_SEC / 4 + 5] = 0;
++    brom_stub_jump(stub + BROM_SEC / 4 + 6, ldl_be_p(hdr + 0x14));
+ }
+ 
+ /* step 2: the bootloader to its load address, "DRAM is up" */
+@@ -953,8 +973,26 @@ static void mt7621_init(MachineState *machine)
+     object_initialize_child(OBJECT(machine), "cps", &b->cps, TYPE_MIPS_CPS);
+     object_property_set_str(OBJECT(&b->cps), "cpu-type", machine->cpu_type,
+                             &error_fatal);
++    /*
++     * MT7621A: 2 cores x 2 VPEs (MT ASE); -smp 2: one core (MT7621S),
++     * -smp 1: its first VPE only
++     */
++    if (machine->smp.cpus != 1 && machine->smp.cpus != 2 &&
++        machine->smp.cpus != 4) {
++        error_report("mt7621-router: -smp 1, 2 (one core) or 4 (two cores)");
++        exit(1);
++    }
+     object_property_set_uint(OBJECT(&b->cps), "num-vp", machine->smp.cpus,
+                              &error_fatal);
++    object_property_set_uint(OBJECT(&b->cps), "vp-per-core",
++                             machine->smp.cpus > 1 ? 2 : 0, &error_fatal);
++    /*
++     * the 1004K timer interrupts are GIC local interrupts (masked until
++     * Linux maps them), not wired to IP7: Linux unmasks IP2..7 on the
++     * secondary VPEs, whose CP0 Compare it never sets
++     */
++    object_property_set_bool(OBJECT(&b->cps), "gic-timer-routable", true,
++                             &error_fatal);
+     object_property_set_int(OBJECT(&b->cps), "gcr-rev", 0x600, &error_fatal);
+     /* 64 shared interrupts (Breed checks GIC_SH_CONFIG) */
+     object_property_set_uint(OBJECT(&b->cps), "num-irq", 64, &error_fatal);
+@@ -1263,7 +1301,7 @@ static void mt7621_machine_class_init(ObjectClass *oc, const void *data)
+     mc->default_ram_size = 256 * MiB;
+     mc->default_ram_id = "mt7621.dram";
+     mc->max_cpus = 4;
+-    mc->default_cpus = 1;
++    mc->default_cpus = 4;       /* MT7621A: 2 cores x 2 VPEs */
+ 
+     object_class_property_add_str(oc, "nand-dir", mt7621_get_flash_dir,
+                                   mt7621_set_flash_dir);
+diff --git a/hw/misc/mips_cmgcr.c b/hw/misc/mips_cmgcr.c
+index d90b2ea..06435b7 100644
+--- a/hw/misc/mips_cmgcr.c
++++ b/hw/misc/mips_cmgcr.c
+@@ -70,17 +70,53 @@ static inline void update_gic_base(MIPSGCRState *gcr, uint64_t val)
+ }
+ 
+ /* Read GCR registers */
++/* the core-local block of the running CPU: its VP's, or its core's */
++static int gcr_current(MIPSGCRState *gcr)
++{
++    return gcr->vp_per_core ? current_cpu->cpu_index / gcr->vp_per_core
++                            : current_cpu->cpu_index;
++}
++
++/* Cx_OTHER: the VP (VP-based), or the core (CM2 CoreNum, bits 31:16) */
++static void gcr_set_other(MIPSGCRState *gcr, MIPSGCRVPState *vps,
++                          uint64_t data)
++{
++    if (gcr->vp_per_core) {
++        uint32_t core = (data >> 16) & 0xffff;
++
++        if (core < gcr->num_vps / gcr->vp_per_core) {
++            vps->other = core;
++        }
++    } else if ((data & GCR_CL_OTHER_MSK) < gcr->num_vps) {
++        vps->other = data & GCR_CL_OTHER_MSK;
++    }
++}
++
++/* a core's reset base applies to all its VPs */
++static void gcr_set_exception_base(MIPSGCRState *gcr, int idx,
++                                   target_ulong base)
++{
++    if (!gcr->vp_per_core) {
++        cpu_set_exception_base(idx, base);
++        return;
++    }
++    for (int v = 0; v < gcr->vp_per_core; v++) {
++        cpu_set_exception_base(idx * gcr->vp_per_core + v, base);
++    }
++}
++
+ static uint64_t gcr_read(void *opaque, hwaddr addr, unsigned size)
+ {
+     MIPSGCRState *gcr = (MIPSGCRState *) opaque;
+-    MIPSGCRVPState *current_vps = &gcr->vps[current_cpu->cpu_index];
++    int cur = gcr_current(gcr);
++    MIPSGCRVPState *current_vps = &gcr->vps[cur];
+     MIPSGCRVPState *other_vps = &gcr->vps[current_vps->other];
+ 
+     switch (addr) {
+     /* Global Control Block Register */
+     case GCR_CONFIG_OFS:
+-        /* Set PCORES to 0 */
+-        return 0;
++        /* PCORES: cores - 1 (VP-based: 0) */
++        return gcr->vp_per_core ? gcr->num_vps / gcr->vp_per_core - 1 : 0;
+     case GCR_BASE_OFS:
+         return gcr->gcr_base;
+     case GCR_REV_OFS:
+@@ -99,8 +135,8 @@ static uint64_t gcr_read(void *opaque, hwaddr addr, unsigned size)
+         /* Core-Local and Core-Other Control Blocks */
+     case MIPS_CLCB_OFS + GCR_CL_CONFIG_OFS:
+     case MIPS_COCB_OFS + GCR_CL_CONFIG_OFS:
+-        /* Set PVP to # of VPs - 1 */
+-        return gcr->num_vps - 1;
++        /* Set PVP to # of VPs - 1 (MT cores: PVPE, VPEs of the core - 1) */
++        return gcr->vp_per_core ? gcr->vp_per_core - 1 : gcr->num_vps - 1;
+     case MIPS_CLCB_OFS + GCR_CL_COHERENCE_OFS:
+         return current_vps->coherence;
+     case MIPS_COCB_OFS + GCR_CL_COHERENCE_OFS:
+@@ -110,9 +146,14 @@ static uint64_t gcr_read(void *opaque, hwaddr addr, unsigned size)
+     case MIPS_COCB_OFS + GCR_CL_RESETBASE_OFS:
+         return other_vps->reset_base;
+     case MIPS_CLCB_OFS + GCR_CL_OTHER_OFS:
+-        return current_vps->other;
++        return current_vps->other << (gcr->vp_per_core ? 16 : 0);
+     case MIPS_COCB_OFS + GCR_CL_OTHER_OFS:
+-        return other_vps->other;
++        return other_vps->other << (gcr->vp_per_core ? 16 : 0);
++    case MIPS_CLCB_OFS + GCR_CL_ID_OFS:
++        if (gcr->vp_per_core) {
++            return cur;
++        }
++        /* fall through */
+     default:
+         qemu_log_mask(LOG_UNIMP, "Read %d bytes at GCR offset 0x%" HWADDR_PRIx
+                       "\n", size, addr);
+@@ -131,7 +172,8 @@ static inline target_ulong get_exception_base(MIPSGCRVPState *vps)
+ static void gcr_write(void *opaque, hwaddr addr, uint64_t data, unsigned size)
+ {
+     MIPSGCRState *gcr = (MIPSGCRState *)opaque;
+-    MIPSGCRVPState *current_vps = &gcr->vps[current_cpu->cpu_index];
++    int cur = gcr_current(gcr);
++    MIPSGCRVPState *current_vps = &gcr->vps[cur];
+     MIPSGCRVPState *other_vps = &gcr->vps[current_vps->other];
+ 
+     switch (addr) {
+@@ -152,23 +194,18 @@ static void gcr_write(void *opaque, hwaddr addr, uint64_t data, unsigned size)
+         break;
+     case MIPS_CLCB_OFS + GCR_CL_RESETBASE_OFS:
+         current_vps->reset_base = data & GCR_CL_RESET_BASE_MSK;
+-        cpu_set_exception_base(current_cpu->cpu_index,
+-                               get_exception_base(current_vps));
++        gcr_set_exception_base(gcr, cur, get_exception_base(current_vps));
+         break;
+     case MIPS_COCB_OFS + GCR_CL_RESETBASE_OFS:
+         other_vps->reset_base = data & GCR_CL_RESET_BASE_MSK;
+-        cpu_set_exception_base(current_vps->other,
++        gcr_set_exception_base(gcr, current_vps->other,
+                                get_exception_base(other_vps));
+         break;
+     case MIPS_CLCB_OFS + GCR_CL_OTHER_OFS:
+-        if ((data & GCR_CL_OTHER_MSK) < gcr->num_vps) {
+-            current_vps->other = data & GCR_CL_OTHER_MSK;
+-        }
++        gcr_set_other(gcr, current_vps, data);
+         break;
+     case MIPS_COCB_OFS + GCR_CL_OTHER_OFS:
+-        if ((data & GCR_CL_OTHER_MSK) < gcr->num_vps) {
+-            other_vps->other = data & GCR_CL_OTHER_MSK;
+-        }
++        gcr_set_other(gcr, other_vps, data);
+         break;
+     default:
+         qemu_log_mask(LOG_UNIMP, "Write %d bytes at GCR offset 0x%" HWADDR_PRIx
+@@ -224,6 +261,7 @@ static const VMStateDescription vmstate_mips_gcr = {
+ 
+ static const Property mips_gcr_properties[] = {
+     DEFINE_PROP_UINT32("num-vp", MIPSGCRState, num_vps, 1),
++    DEFINE_PROP_UINT32("vp-per-core", MIPSGCRState, vp_per_core, 0),
+     DEFINE_PROP_INT32("gcr-rev", MIPSGCRState, gcr_rev, 0x800),
+     DEFINE_PROP_UINT64("gcr-base", MIPSGCRState, gcr_base, GCR_BASE_ADDR),
+     DEFINE_PROP_LINK("gic", MIPSGCRState, gic_mr, TYPE_MEMORY_REGION,
+diff --git a/hw/misc/mips_cpc.c b/hw/misc/mips_cpc.c
+index 9bfb7c9..c9f6ee5 100644
+--- a/hw/misc/mips_cpc.c
++++ b/hw/misc/mips_cpc.c
+@@ -73,11 +73,56 @@ static void cpc_stop_vp(MIPSCPCState *cpc, uint64_t vp_stop)
+     }
+ }
+ 
++/* MT ASE cores: the core of the running CPU, and its VPs as a mask */
++static unsigned cpc_cur_core(MIPSCPCState *s)
++{
++    return current_cpu->cpu_index / s->vp_per_core;
++}
++
++static uint64_t cpc_core_vps(MIPSCPCState *s, unsigned core)
++{
++    return ((1ULL << s->vp_per_core) - 1) << (core * s->vp_per_core);
++}
++
++static void cpc_core_cmd(MIPSCPCState *s, unsigned core, uint64_t cmd)
++{
++    if (core >= s->num_vp / s->vp_per_core) {
++        return;
++    }
++    switch (cmd & 0xf) {
++    case 1:                     /* ClockOff */
++    case 2:                     /* PwrDown */
++        cpc_stop_vp(s, cpc_core_vps(s, core));
++        break;
++    case 4:                     /* Reset */
++        cpc_stop_vp(s, cpc_core_vps(s, core));
++        /* fall through */
++    case 3:                     /* PwrUp: VP 0 runs from the reset base */
++        cpc_run_vp(s, 1ULL << (core * s->vp_per_core));
++        break;
++    }
++}
++
+ static void cpc_write(void *opaque, hwaddr offset, uint64_t data,
+                       unsigned size)
+ {
+     MIPSCPCState *s = opaque;
+ 
++    if (s->vp_per_core) {
++        unsigned cur = cpc_cur_core(s);
++
++        switch (offset) {
++        case CPC_CL_BASE_OFS + CPC_CMD_OFS:
++            cpc_core_cmd(s, cur, data);
++            return;
++        case CPC_CO_BASE_OFS + CPC_CMD_OFS:
++            cpc_core_cmd(s, s->other[cur], data);
++            return;
++        case CPC_CL_BASE_OFS + CPC_OTHER_OFS:
++            s->other[cur] = (data >> 16) & 0xff;
++            return;
++        }
++    }
+     switch (offset) {
+     case CPC_CL_BASE_OFS + CPC_VP_RUN_OFS:
+     case CPC_CO_BASE_OFS + CPC_VP_RUN_OFS:
+@@ -98,6 +143,22 @@ static uint64_t cpc_read(void *opaque, hwaddr offset, unsigned size)
+ {
+     MIPSCPCState *s = opaque;
+ 
++    if (s->vp_per_core) {
++        unsigned cur = cpc_cur_core(s), core;
++
++        switch (offset) {
++        case CPC_CL_BASE_OFS + CPC_STAT_CONF_OFS:
++        case CPC_CO_BASE_OFS + CPC_STAT_CONF_OFS:
++            /* SeqState U6 (coherent execution) while the core runs, D0 */
++            core = offset < CPC_CO_BASE_OFS ? cur : s->other[cur];
++            return s->vp_running & cpc_core_vps(s, core) ? 7 << 19 : 0;
++        case CPC_CL_BASE_OFS + CPC_OTHER_OFS:
++            return s->other[cur] << 16;
++        case CPC_CL_BASE_OFS + CPC_CMD_OFS:
++        case CPC_CO_BASE_OFS + CPC_CMD_OFS:
++            return 0;
++        }
++    }
+     switch (offset) {
+     case CPC_CL_BASE_OFS + CPC_VP_RUNNING_OFS:
+     case CPC_CO_BASE_OFS + CPC_VP_RUNNING_OFS:
+@@ -132,6 +193,12 @@ static void mips_cpc_realize(DeviceState *dev, Error **errp)
+ {
+     MIPSCPCState *s = MIPS_CPC(dev);
+ 
++    if (s->vp_per_core && (s->num_vp % s->vp_per_core ||
++                           s->num_vp / s->vp_per_core > ARRAY_SIZE(s->other))) {
++        error_setg(errp, "num-vp %u is not a number of cores of %u VPs",
++                   s->num_vp, s->vp_per_core);
++        return;
++    }
+     if (s->vp_start_running > cpc_vp_run_mask(s)) {
+         error_setg(errp,
+                    "incorrect vp_start_running 0x%" PRIx64 " for num_vp = %d",
+@@ -164,6 +231,7 @@ static const VMStateDescription vmstate_mips_cpc = {
+ static const Property mips_cpc_properties[] = {
+     DEFINE_PROP_UINT32("num-vp", MIPSCPCState, num_vp, 0x1),
+     DEFINE_PROP_UINT64("vp-start-running", MIPSCPCState, vp_start_running, 0x1),
++    DEFINE_PROP_UINT32("vp-per-core", MIPSCPCState, vp_per_core, 0),
+ };
+ 
+ static void mips_cpc_class_init(ObjectClass *klass, const void *data)
+diff --git a/include/hw/intc/mips_gic.h b/include/hw/intc/mips_gic.h
+index 5e4c71e..708a11b 100644
+--- a/include/hw/intc/mips_gic.h
++++ b/include/hw/intc/mips_gic.h
+@@ -193,6 +193,7 @@ struct MIPSGICVPState {
+     uint32_t pend;
+     uint32_t mask;
+     uint32_t compare_map;
++    uint32_t timer_map;
+     uint32_t other_addr;
+     CPUMIPSState *env;
+ };
+@@ -213,6 +214,11 @@ struct MIPSGICState {
+ 
+     uint32_t num_vps;
+     uint32_t num_irq;
++    /*
++     * The CPUs' CP0 timer interrupts are GIC inputs (local TIMER, Vx_CTL
++     * TIMER_ROUTABLE, Vx_TIMER_MAP), as in a CPS with a GIC
++     */
++    bool timer_routable;
+ };
+ 
+ #endif /* MIPS_GIC_H */
+diff --git a/include/hw/mips/cps.h b/include/hw/mips/cps.h
+index 9ff0a98..6e972d1 100644
+--- a/include/hw/mips/cps.h
++++ b/include/hw/mips/cps.h
+@@ -36,6 +36,8 @@ struct MIPSCPSState {
+     SysBusDevice parent_obj;
+ 
+     uint32_t num_vp;
++    uint32_t vp_per_core;       /* MT ASE cores of that many VPEs, 0: VPs */
++    bool gic_timer_routable;    /* CP0 timer interrupts through the GIC */
+     int32_t gcr_rev;
+     uint32_t num_irq;
+     char *cpu_type;
+diff --git a/include/hw/misc/mips_cmgcr.h b/include/hw/misc/mips_cmgcr.h
+index 7492a9d..9885066 100644
+--- a/include/hw/misc/mips_cmgcr.h
++++ b/include/hw/misc/mips_cmgcr.h
+@@ -40,6 +40,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(MIPSGCRState, MIPS_GCR)
+ #define GCR_CL_CONFIG_OFS   0x0010
+ #define GCR_CL_OTHER_OFS    0x0018
+ #define GCR_CL_RESETBASE_OFS 0x0020
++#define GCR_CL_ID_OFS       0x0028
+ 
+ /* GCR_L2_CONFIG register fields */
+ #define GCR_L2_CONFIG_BYPASS_SHF    20
+@@ -78,6 +79,12 @@ struct MIPSGCRState {
+ 
+     int32_t gcr_rev;
+     uint32_t num_vps;
++    /*
++     * 0: VP-based CM (one VP a "core", as the I6400 in QEMU); else MT ASE
++     * cores of that many VPs (VPs of a core consecutive): the core-local
++     * and core-other blocks are per core, Cx_OTHER takes a CM2 CoreNum
++     */
++    uint32_t vp_per_core;
+     hwaddr gcr_base;
+     MemoryRegion iomem;
+     MemoryRegion *cpc_mr;
+diff --git a/include/hw/misc/mips_cpc.h b/include/hw/misc/mips_cpc.h
+index fcafbd5..5de4244 100644
+--- a/include/hw/misc/mips_cpc.h
++++ b/include/hw/misc/mips_cpc.h
+@@ -30,6 +30,9 @@
+ #define CPC_CO_BASE_OFS     0x4000
+ 
+ /* CPC register offsets relative to block offsets */
++#define CPC_CMD_OFS         0x00  /* core-local / -other, MT ASE cores */
++#define CPC_STAT_CONF_OFS   0x08
++#define CPC_OTHER_OFS       0x10
+ #define CPC_VP_STOP_OFS     0x20
+ #define CPC_VP_RUN_OFS      0x28
+ #define CPC_VP_RUNNING_OFS  0x30
+@@ -42,6 +45,14 @@ struct MIPSCPCState {
+ 
+     uint32_t num_vp;
+     uint64_t vp_start_running; /* VPs running from restart */
++    /*
++     * 0: VP-based (VP_RUN / VP_STOP); else MT ASE cores of that many VPs
++     * (VPs of a core consecutive): Cx_CMD powers a core up (its VP 0
++     * from the reset base; the other VPs are started by MT ASE code),
++     * Cx_STAT_CONF tells its sequencer state, Cx_OTHER picks the core
++     */
++    uint32_t vp_per_core;
++    uint8_t other[16];          /* per core: Cx_OTHER CoreNum */
+ 
+     MemoryRegion mr;
+     uint64_t vp_running; /* Indicates which VPs are in the run state */
+diff --git a/target/mips/cpu-defs.c.inc b/target/mips/cpu-defs.c.inc
+index 80aba3f..74ef205 100644
+--- a/target/mips/cpu-defs.c.inc
++++ b/target/mips/cpu-defs.c.inc
+@@ -1091,6 +1091,10 @@ static void mvp_init(CPUMIPSState *env)
+     /* Usermode has no TLB support */
+     env->mvp->CP0_MVPConf0 |= (env->tlb->nb_tlb << CP0MVPC0_PTLBE);
+ #endif
++    if (env->mt_vpes > 1) {     /* VPEs (and TCs: one each) of the core */
++        env->mvp->CP0_MVPConf0 |= ((env->mt_vpes - 1) << CP0MVPC0_PVPE) |
++                                  ((env->mt_vpes - 1) << CP0MVPC0_PTC);
++    }
+ 
+     /* Allocatable CP1 have media extensions, allocatable CP1 have FP support,
+        no UDI implemented, no CP2 implemented, 1 CP1 implemented. */
+diff --git a/target/mips/cpu.c b/target/mips/cpu.c
+index 1f6c41f..7facb12 100644
+--- a/target/mips/cpu.c
++++ b/target/mips/cpu.c
+@@ -329,15 +329,23 @@ static void mips_cpu_reset_hold(Object *obj, ResetType type)
+     if (ase_mt_available(env)) {
+         int i;
+ 
+-        /* Only TC0 on VPE 0 starts as active.  */
++        /*
++         * Only TC0 on VPE 0 starts as active (with mt_vpes: VPE 0 of each
++         * core, its TC n being VPE n's)
++         */
++        int vpe = env->mt_vpes ? cs->cpu_index % env->mt_vpes : cs->cpu_index;
++        uint32_t bind = (vpe << CP0TCBd_CurVPE) |
++                        (env->mt_vpes ? vpe << CP0TCBd_CurTC : 0);
++
+         for (i = 0; i < ARRAY_SIZE(env->tcs); i++) {
+-            env->tcs[i].CP0_TCBind = cs->cpu_index << CP0TCBd_CurVPE;
++            env->tcs[i].CP0_TCBind = bind;
+             env->tcs[i].CP0_TCHalt = 1;
+         }
++        env->active_tc.CP0_TCBind = bind;
+         env->active_tc.CP0_TCHalt = 1;
+         cs->halted = 1;
+ 
+-        if (cs->cpu_index == 0) {
++        if (vpe == 0) {
+             /* VPE0 starts up enabled.  */
+             env->mvp->CP0_MVPControl |= (1 << CP0MVPCo_EVP);
+             env->CP0_VPEConf0 |= (1 << CP0VPEC0_MVP) | (1 << CP0VPEC0_VPA);
+diff --git a/target/mips/cpu.h b/target/mips/cpu.h
+index 94cd6a4..2d15b26 100644
+--- a/target/mips/cpu.h
++++ b/target/mips/cpu.h
+@@ -1175,6 +1175,18 @@ typedef struct CPUArchState {
+ 
+     /* Fields from here on are preserved across CPU reset. */
+     CPUMIPSMVPContext *mvp;
++    /*
++     * MT ASE cores of several VPEs with one TC each (1004K, 34K in a CPS):
++     * VPEs per core, the CPUs of a core being consecutive (VPE n of core c
++     * = CPU c * mt_vpes + n), sharing their core's mvp.  0: the legacy
++     * model (TCs of a VPE are thread contexts of one CPU).
++     */
++    uint8_t mt_vpes;
++    /*
++     * The CP0 timer interrupt as an input of a GIC (local TIMER, routable)
++     * instead of the IP that IntCtl.IPTI names; NULL: that IP
++     */
++    qemu_irq timer_irq;
+ #if !defined(CONFIG_USER_ONLY)
+     CPUMIPSTLBContext *tlb;
+     qemu_irq irq[8];
+diff --git a/target/mips/system/cp0_timer.c b/target/mips/system/cp0_timer.c
+index ca16945..00287d4 100644
+--- a/target/mips/system/cp0_timer.c
++++ b/target/mips/system/cp0_timer.c
+@@ -57,7 +57,8 @@ static void cpu_mips_timer_expire(CPUMIPSState *env)
+     if (env->insn_flags & ISA_MIPS_R2) {
+         env->CP0_Cause |= 1 << CP0Ca_TI;
+     }
+-    qemu_irq_raise(env->irq[(env->CP0_IntCtl >> CP0IntCtl_IPTI) & 0x7]);
++    qemu_irq_raise(env->timer_irq ? env->timer_irq
++                   : env->irq[(env->CP0_IntCtl >> CP0IntCtl_IPTI) & 0x7]);
+ }
+ 
+ uint32_t cpu_mips_get_count(CPUMIPSState *env)
+@@ -105,7 +106,8 @@ void cpu_mips_store_compare(CPUMIPSState *env, uint32_t value)
+     if (env->insn_flags & ISA_MIPS_R2) {
+         env->CP0_Cause &= ~(1 << CP0Ca_TI);
+     }
+-    qemu_irq_lower(env->irq[(env->CP0_IntCtl >> CP0IntCtl_IPTI) & 0x7]);
++    qemu_irq_lower(env->timer_irq ? env->timer_irq
++                   : env->irq[(env->CP0_IntCtl >> CP0IntCtl_IPTI) & 0x7]);
+ }
+ 
+ void cpu_mips_start_count(CPUMIPSState *env)
+diff --git a/target/mips/tcg/system/cp0_helper.c b/target/mips/tcg/system/cp0_helper.c
+index b69e70d..5786c21 100644
+--- a/target/mips/tcg/system/cp0_helper.c
++++ b/target/mips/tcg/system/cp0_helper.c
+@@ -125,6 +125,21 @@ static CPUMIPSState *mips_cpu_map_tc(CPUMIPSState *env, int *tc)
+     }
+ 
+     cs = env_cpu(env);
++    if (env->mt_vpes) {         /* TC n of the core: VPE n's only TC */
++        if (tc_idx >= env->mt_vpes) {
++            *tc = env->current_tc;
++            return env;
++        }
++        other_cs = qemu_get_cpu(cs->cpu_index / env->mt_vpes * env->mt_vpes +
++                                tc_idx);
++        if (other_cs == NULL) {
++            *tc = env->current_tc;
++            return env;
++        }
++        cpu = MIPS_CPU(other_cs);
++        *tc = cpu->env.current_tc;
++        return &cpu->env;
++    }
+     vpe_idx = tc_idx / cs->nr_threads;
+     *tc = tc_idx % cs->nr_threads;
+     other_cs = qemu_get_cpu(vpe_idx);
+@@ -1545,6 +1560,14 @@ void helper_mttdsp(CPUMIPSState *env, target_ulong arg1)
+ }
+ 
+ /* MIPS MT functions */
++/* with mt_vpes: is @c a VPE of @env's core (else: any CPU) */
++static bool mips_same_core(CPUMIPSState *env, MIPSCPU *c)
++{
++    return !env->mt_vpes ||
++           env_cpu(env)->cpu_index / env->mt_vpes ==
++           CPU(c)->cpu_index / env->mt_vpes;
++}
++
+ target_ulong helper_dmt(void)
+ {
+     /* TODO */
+@@ -1566,7 +1589,7 @@ target_ulong helper_dvpe(CPUMIPSState *env)
+         CPU_FOREACH(other_cs) {
+             MIPSCPU *other_cpu = MIPS_CPU(other_cs);
+             /* Turn off all VPEs except the one executing the dvpe.  */
+-            if (&other_cpu->env != env) {
++            if (&other_cpu->env != env && mips_same_core(env, other_cpu)) {
+                 other_cpu->env.mvp->CP0_MVPControl &= ~(1 << CP0MVPCo_EVP);
+                 mips_vpe_sleep(other_cpu);
+             }
+@@ -1581,12 +1604,19 @@ target_ulong helper_evpe(CPUMIPSState *env)
+     target_ulong prev = env->mvp->CP0_MVPControl;
+ 
+     if (env->CP0_VPEConf0 & (1 << CP0VPEC0_MVP)) {
++        if (env->mt_vpes) {     /* MVPControl is the core's */
++            env->mvp->CP0_MVPControl |= (1 << CP0MVPCo_EVP);
++        }
+         CPU_FOREACH(other_cs) {
+             MIPSCPU *other_cpu = MIPS_CPU(other_cs);
+ 
+-            if (&other_cpu->env != env
+-                /* If the VPE is WFI, don't disturb its sleep.  */
+-                && !mips_vpe_is_wfi(other_cpu)) {
++            if (&other_cpu->env != env && mips_same_core(env, other_cpu)
++                /*
++                 * If the VPE is WFI, don't disturb its sleep (MT cores: a
++                 * VPE that was set up while disabled sleeps since reset;
++                 * WAIT may return early)
++                 */
++                && (env->mt_vpes || !mips_vpe_is_wfi(other_cpu))) {
+                 /* Enable the VPE.  */
+                 other_cpu->env.mvp->CP0_MVPControl |= (1 << CP0MVPCo_EVP);
+                 mips_vpe_wake(other_cpu); /* And wake it up.  */
+-- 
+2.47.3
+
