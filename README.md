@@ -173,6 +173,7 @@ routers use; saving from the editor drops `;` comments).
 | Zbtlink ZBT-WG3526 (16M) (**MT7621A**, MIPS) | 5×1G MT7530 (WAN = port 4); Wi-Fi MT7603E + MT7612E on PCIe (radio silent) | DDR3 512 MB (448 MB usable) | **SPI-NOR 16 MB** | 3.0 | OpenWrt |
 | Xiaomi Mi Router 3G (stock U-Boot) (**MT7621A**, MIPS) | 1G WAN + 2×1G LAN MT7530; Wi-Fi MT7603E + MT7612E on PCIe (radio silent) | DDR3 256 MB | **parallel NAND 128 MB** (Xiaomi layout) | 3.0 | stock Xiaomi U-Boot 1.1.3 + OpenWrt |
 | Xiaomi Mi Router 3G (Breed) (**MT7621A**, MIPS) | as above | DDR3 256 MB | **parallel NAND 128 MB** (Xiaomi layout) | 3.0 | Breed 1.2 + OpenWrt |
+| Xiaomi Mi Router 4 (stock U-Boot) (**MT7621A**, MIPS) | 1G WAN (MT7530 PHY 4 muxed to GMAC1) + 2×1G LAN MT7530; Wi-Fi MT7603E + MT7612E on PCIe (radio silent) | DDR3 128 MB | **parallel NAND 128 MB** (Xiaomi layout) | 3.2 | stock Xiaomi U-Boot 1.1.3 + OpenWrt |
 
 Netis boards have no bdinfo partition (FIP at 0x380000, ubi at 0x580000;
 MACs in Factory): presets set `openwrt-no-bdinfo=1`. The MT7986 boards use
@@ -381,6 +382,13 @@ its `factory` (the Wi-Fi calibration; the MACs are replaced by
 tools/prepare-nand.sh --soc mt7621 --stock DIR xiaomi_mi-router-3g 25.12.5 nand-mi-router-3g-uboot
 ./emulator.sh -P xiaomi-mi-router-3g-uboot     # or -breed
 ```
+
+**Xiaomi Mi Router 4** is built the same way (`xiaomi_mi-router-4`, folder
+`nand-mi-router-4`, preset `xiaomi-mi-router-4`); its WAN is the MT7530's
+PHY 4 wired through port 5 straight to GMAC1 (PHY muxing), which the
+emulator follows from the switch's MTRAP register. Only `Bootloader` and
+`factory` are needed: `Config` (the stock U-Boot's environment) and
+`Bdata` hold the router's serial number, MAC and passwords, leave them out.
 
 The folder (`tools/mknand.py mt7621-nand`) holds the stock partitions,
 OpenWrt's `kernel1.bin` in `kernel` (0x600000, "System 2") and

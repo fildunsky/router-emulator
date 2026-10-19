@@ -177,6 +177,7 @@ WS2812B, 74HC595, PWM), GPIO
 | Zbtlink ZBT-WG3526 (16M) (**MT7621A**, MIPS) | 5×1G MT7530 (WAN = порт 4); Wi-Fi MT7603E + MT7612E на PCIe («радиомолчащие») | DDR3 512 МБ (доступно 448 МБ) | **SPI-NOR 16 МБ** | 3.0 | OpenWrt |
 | Xiaomi Mi Router 3G (стоковый U-Boot) (**MT7621A**, MIPS) | 1G WAN + 2×1G LAN MT7530; Wi-Fi MT7603E + MT7612E на PCIe («радиомолчащие») | DDR3 256 МБ | **параллельный NAND 128 МБ** (разметка Xiaomi) | 3.0 | стоковый U-Boot 1.1.3 Xiaomi + OpenWrt |
 | Xiaomi Mi Router 3G (Breed) (**MT7621A**, MIPS) | так же | DDR3 256 МБ | **параллельный NAND 128 МБ** (разметка Xiaomi) | 3.0 | Breed 1.2 + OpenWrt |
+| Xiaomi Mi Router 4 (стоковый U-Boot) (**MT7621A**, MIPS) | 1G WAN (PHY 4 MT7530 напрямую на GMAC1) + 2×1G LAN MT7530; Wi-Fi MT7603E + MT7612E на PCIe («радиомолчащие») | DDR3 128 МБ | **параллельный NAND 128 МБ** (разметка Xiaomi) | 3.2 | стоковый U-Boot 1.1.3 Xiaomi + OpenWrt |
 
 У плат Netis нет раздела bdinfo (FIP с 0x380000, ubi с 0x580000; MAC — в
 Factory): в пресетах стоит `openwrt-no-bdinfo=1`. У плат на MT7986 та же
@@ -385,6 +386,13 @@ WAN …:33, LAN …:34, Wi-Fi …:35 / …:36):
 tools/prepare-nand.sh --soc mt7621 --stock DIR xiaomi_mi-router-3g 25.12.5 nand-mi-router-3g-uboot
 ./emulator.sh -P xiaomi-mi-router-3g-uboot     # или -breed
 ```
+
+**Xiaomi Mi Router 4** собирается так же (`xiaomi_mi-router-4`, папка
+`nand-mi-router-4`, пресет `xiaomi-mi-router-4`); его WAN — PHY 4
+коммутатора MT7530, подключённый через порт 5 прямо к GMAC1 (PHY muxing),
+эмулятор следует регистру MTRAP коммутатора. Нужны только `Bootloader` и
+`factory`: в `Config` (переменные стокового U-Boot) и `Bdata` лежат
+серийный номер, MAC и пароли роутера, их не кладите.
 
 В папке (`tools/mknand.py mt7621-nand`) — стоковые разделы, `kernel1.bin`
 OpenWrt в `kernel` (0x600000, «System 2») и `rootfs0.bin` в `ubi`;

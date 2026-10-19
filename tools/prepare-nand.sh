@@ -37,7 +37,7 @@
 #                     e.g. zbtlink_zbt-wg3526-16m): u-boot, u-boot-env,
 #                     factory (MAC at 0xe000), firmware = sysupgrade.bin;
 #                     with --stock DIR: Xiaomi-layout parallel NAND board
-#                     (e.g. xiaomi_mi-router-3g, machine option
+#                     (e.g. xiaomi_mi-router-3g / -4, machine option
 #                     flash=nand): DIR holds the bootloader (*mtd0*.bin or
 #                     *Bootloader*.bin: stock U-Boot or Breed) and may hold
 #                     a factory dump (*factory*.bin, Wi-Fi calibration; its

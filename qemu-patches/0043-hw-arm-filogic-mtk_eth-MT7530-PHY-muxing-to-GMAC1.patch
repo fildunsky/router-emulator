@@ -1,0 +1,92 @@
+From 9b222f2686670ea7b24297d7fda0e4198c6b0ee3 Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Mon, 19 Oct 2026 11:07:39 -0400
+Subject: [PATCH] hw/arm/filogic/mtk_eth: MT7530 PHY muxing to GMAC1
+
+MT7621 boards with the WAN on GMAC1 (e.g. Xiaomi Mi Router 4) wire the
+MT7530's PHY 4 (P5_PHY0_SEL: PHY 0) through port 5 straight to GMAC1:
+MTRAP P5_MAC_SEL and P5_DIS clear.  Frames of that PHY's port then go to
+and come from GMAC1, out of the switch.  Only once software has written
+MTRAP (Linux sets P5_DIS when port 5 is unused), MT7530 only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012GbUcwR34gg9RgGTEtNN6J
+---
+ hw/arm/filogic/mtk_eth.c | 38 ++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 36 insertions(+), 2 deletions(-)
+
+diff --git a/hw/arm/filogic/mtk_eth.c b/hw/arm/filogic/mtk_eth.c
+index 051a054..59ed55d 100644
+--- a/hw/arm/filogic/mtk_eth.c
++++ b/hw/arm/filogic/mtk_eth.c
+@@ -246,6 +246,28 @@ static void ht_set(GHashTable *h, uint32_t a, uint32_t v)
+     g_hash_table_insert(h, GUINT_TO_POINTER(a), GUINT_TO_POINTER(v));
+ }
+ 
++/*
++ * MT7530 PHY muxing (MT7621 boards with WAN on GMAC1, e.g. Xiaomi Mi Router
++ * 4): MTRAP P5_MAC_SEL and P5_DIS clear wire PHY 4 (P5_PHY0_SEL: PHY 0)
++ * through port 5 straight to GMAC1, out of the switch.  Only once software
++ * has written MTRAP: Linux sets P5_DIS when port 5 is unused.  The PHY's
++ * port, or -1.
++ */
++static int sw_p5_mux(MtkEthState *s)
++{
++    uint32_t v;
++
++    if (s->switch_model != 3 ||
++        !g_hash_table_contains(s->sw, GUINT_TO_POINTER(0x7804))) {
++        return -1;
++    }
++    v = ht_get(s->sw, 0x7804, 0);
++    if (v & (BIT(13) | BIT(6))) {
++        return -1;
++    }
++    return v & BIT(20) ? 0 : 4;
++}
++
+ static bool port_link(MtkEthState *s, int idx)
+ {
+     NICState *nic = s->ports[idx].nic;
+@@ -1357,7 +1379,8 @@ static void sw_egress(MtkEthState *s, int src, int dst,
+         }
+         return;
+     }
+-    if (dst < SW_NPHY && s->gphy[dst].link && s->ports[dst].nic) {
++    if (dst < SW_NPHY && s->gphy[dst].link && s->ports[dst].nic &&
++        dst != sw_p5_mux(s)) {
+         s->frames[dst]++;
+         qemu_send_packet(qemu_get_queue(s->ports[dst].nic), buf, len);
+     } else if (dst == 5 && s->p5phy_type && s->p5phy.link && s->ports[7].nic) {
+@@ -1635,8 +1658,15 @@ static void sw_cpu_deliver(MtkEthState *s, int mask, uint8_t *f,
+ 
+ static void gmac_out(MtkEthState *s, int gdm, uint8_t *f, size_t len)
+ {
++    int mux = gdm == 1 ? sw_p5_mux(s) : -1;
++
+     if (gdm == 0 && s->has_switch) {
+         sw_cpu_deliver(s, s->tx_mask, f, len);
++    } else if (mux >= 0) {
++        if (s->gphy[mux].link && s->ports[mux].nic) {
++            s->frames[mux]++;
++            qemu_send_packet(qemu_get_queue(s->ports[mux].nic), f, len);
++        }
+     } else if (s->dphy_type[gdm] && s->dphy[gdm].link && s->ports[5 + gdm].nic) {
+         s->frames[5 + gdm]++;
+         qemu_send_packet(qemu_get_queue(s->ports[5 + gdm].nic), f, len);
+@@ -2153,7 +2183,11 @@ static ssize_t port_receive(NetClientState *nc, const uint8_t *buf,
+             gdm_rx(s, p->index - 5, buf, size);
+         }
+     } else if (s->gphy[p->index].link) {
+-        sw_forward(s, p->index, buf, size);
++        if (p->index == sw_p5_mux(s)) {
++            gdm_rx(s, 1, buf, size);
++        } else {
++            sw_forward(s, p->index, buf, size);
++        }
+     }
+     return size;
+ }
+-- 
+2.47.3
+
