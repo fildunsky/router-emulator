@@ -140,32 +140,32 @@ routers use; saving from the editor drops `;` comments).
 
 | Preset | Ethernet | RAM | NAND | USB | Bootloader |
 |---|---|---|---|---|---|
-| Cudy WR3000P v1 | 2.5G WAN RTL8221B + 4×1G MT7531 | DDR4 512 MB | 128 MB | 2.0 | OpenWrt |
-| Cudy WR3000H v1 | 2.5G WAN RTL8221B + 4×1G MT7531 | DDR3 512 MB | 128 MB | – | OpenWrt |
-| Cudy WR3000S v1, WR3000E v1 | 5×1G MT7531 (WAN = port 0) | DDR3 256 MB | 128 MB | – | OpenWrt |
-| Cudy WBR3000UAX v1 | 5×1G MT7531 (WAN = port 0) | DDR3 256 MB | 128 MB | 3.0 | OpenWrt |
+| Cudy WR3000P v1 | 2.5G WAN RTL8221B + 4×1G MT7531 | DDR4 512 MB | 128 MB | 2.0 | OpenWrt (U-Boot layout) |
+| Cudy WR3000H v1 | 2.5G WAN RTL8221B + 4×1G MT7531 | DDR3 512 MB | 128 MB | – | OpenWrt (U-Boot layout) |
+| Cudy WR3000S v1, WR3000E v1 | 5×1G MT7531 (WAN = port 0) | DDR3 256 MB | 128 MB | – | OpenWrt (U-Boot layout) |
+| Cudy WBR3000UAX v1 | 5×1G MT7531 (WAN = port 0) | DDR3 256 MB | 128 MB | 3.0 | OpenWrt (U-Boot layout) |
 | Cudy WR3000U v1 | 5×1G MT7531 (WAN = port 0) | DDR3 256 MB | 256 MB | – | vendor (NMBM) |
-| Cudy TR3000 v1 | 2.5G WAN RTL8221B on GMAC0 + 1G LAN built-in PHY | DDR3 512 MB | 128 MB | 3.0 | OpenWrt |
+| Cudy TR3000 v1 | 2.5G WAN RTL8221B on GMAC0 + 1G LAN built-in PHY | DDR3 512 MB | 128 MB | 3.0 | OpenWrt (U-Boot layout) |
 | Cudy TR3000 256MB v1 | same, no switch | DDR3 512 MB | 256 MB | 3.0 | vendor (NMBM) |
-| Cudy M3000 v1 / v2 (RTL8221B) | 2.5G WAN RTL8221B + 1G LAN built-in PHY | DDR3 256 MB | 128 MB | – | OpenWrt (own build) |
-| Cudy M3000 v2 (YT8821) | 2.5G WAN Motorcomm YT8821 + 1G LAN built-in PHY | DDR3 256 MB | 128 MB | – | OpenWrt (own build) |
+| Cudy M3000 v1 / v2 (RTL8221B) | 2.5G WAN RTL8221B + 1G LAN built-in PHY | DDR3 256 MB | 128 MB | – | OpenWrt (own build, U-Boot layout) |
+| Cudy M3000 v2 (YT8821) | 2.5G WAN Motorcomm YT8821 + 1G LAN built-in PHY | DDR3 256 MB | 128 MB | – | OpenWrt (own build, U-Boot layout) |
 | Netis NX30 V2, NX31 | 1G WAN built-in PHY + 3×1G LAN MT7531 | DDR3 256 MB | 128 MB | – | OpenWrt |
 | Netis NX32U | 4×1G MT7531 (WAN = port 0) | DDR3 256 MB | 128 MB | 3.0 | OpenWrt |
 | Cudy WR3000 v1 | 4×1G MT7531 (WAN = port 0) | DDR3 256 MB | **SPI-NOR 16 MB** (XM25QH128C) | – | vendor |
-| Xiaomi Mi Router AX3000T | 4×1G MT7531 (WAN = port 0) | DDR3 256 MB | 128 MB, Xiaomi layout | – | OpenWrt |
+| Xiaomi Mi Router AX3000T | 4×1G MT7531 (WAN = port 0) | DDR3 256 MB | 128 MB, Xiaomi layout | – | OpenWrt (U-Boot layout) |
 | Huasifei WH3000 Pro NAND | 2.5G LAN RTL8221B + 1G WAN built-in PHY, no switch | DDR4 1 GB | 256 MB, no bdinfo | 3.0 | vendor (NMBM) |
 | Huasifei WH3000R NAND | 1G WAN built-in PHY + 3×1G LAN MT7531 | DDR3 512 MB | 256 MB, no bdinfo | 3.0 | vendor (NMBM) |
 | Keenetic KN-1012 | 1G WAN built-in PHY + 4×1G LAN MT7531 (SFP not emulated) | DDR4 512 MB | 256 MB | 3.0 | vendor (NMBM) |
-| Xiaomi Redmi AX6000 (MT7986A) | 4×1G MT7531 (WAN = port 4) | DDR4 512 MB | 128 MB | – | OpenWrt |
+| Xiaomi Redmi AX6000 (MT7986A) | 4×1G MT7531 (WAN = port 4) | DDR4 512 MB | 128 MB | – | OpenWrt (U-Boot layout) |
 | Netcore N60 (MT7986A) | 2.5G WAN RTL8221B + 4×1G MT7531 | DDR3 256 MB | 128 MB | – | OpenWrt |
 | Netcore N60 Pro (MT7986A) | 2.5G WAN GPY211 + 2.5G LAN GPY211 on switch port 5 + 3×1G MT7531 | DDR4 512 MB | 128 MB | 3.0 | OpenWrt |
 | Bananapi BPi-R4 Lite (MT7987A) | 2.5G WAN internal PHY + 4×1G MT7531 (SFP cage not emulated); Wi-Fi 7 MT7992 card on PCIe — for Wi-Fi install `kmod-mt7996e kmod-mt7992-firmware` | DDR4 2 GB | 256 MB on SPI2, FIP in UBI | 3.0 | OpenWrt |
 | GL.iNet GL-MT6000 (MT7986A) | 2.5G WAN RTL8221B + 2.5G LAN RTL8221B on switch port 5 + 4×1G MT7531 | DDR4 1 GB | **eMMC** | 3.0 | OpenWrt |
 | Huasifei WH3000 Pro eMMC | 2.5G LAN RTL8221B + 1G WAN built-in PHY, no switch | DDR4 1 GB | **eMMC**, vendor layout | 3.0 | OpenWrt (RAX3000M eMMC DDR4 build) |
-| Routerich AX3000 | 3×1G LAN + WAN MT7531 (WAN = port 4) | DDR3 256 MB | 128 MB, no bdinfo | 2.0 | OpenWrt (ubootmod) |
+| Routerich AX3000 | 3×1G LAN + WAN MT7531 (WAN = port 4) | DDR3 256 MB | 128 MB, no bdinfo | 2.0 | OpenWrt (U-Boot layout) |
 | Routerich AX3000 v1 | 1G WAN built-in PHY + 3×1G LAN MT7531 | DDR3 256 MB | 128 MB, no bdinfo | 2.0 | vendor (own dumps needed) |
 | Routerich BE7200 (MT7987A) | 2.5G WAN internal PHY + 3×1G LAN **Airoha AN8855**; Wi-Fi 7 MT7992 on PCIe | DDR4 1 GB | **512 MB** (W25N04KV) | 3.0 | OpenWrt |
-| Asus ZenWiFi BT8 (MT7988D, Filogic 860) | 2.5G WAN internal PHY + 2×1G LAN built-in switch (lan3 on GMAC2 and the MT7996 Wi-Fi not emulated) | DDR4 1 GB | 128 MB, FIP and Factory in UBI | 3.0 | OpenWrt (ubootmod) |
+| Asus ZenWiFi BT8 (MT7988D, Filogic 860) | 2.5G WAN internal PHY + 2×1G LAN built-in switch (lan3 on GMAC2 and the MT7996 Wi-Fi not emulated) | DDR4 1 GB | 128 MB, FIP and Factory in UBI | 3.0 | OpenWrt (U-Boot layout) |
 | TP-Link TL-7DR7230 v1 (MT7988D, Filogic 860) | 2.5G WAN internal PHY + 4×1G LAN built-in switch | DDR4 1 GB | 128 MB, TP-Link layout | – | OpenWrt **snapshot** (no LuCI) |
 | Bananapi BPi-R4 (MT7988A, Filogic 880) | WAN + 3×1G LAN built-in switch (SFP+ cages not emulated) | DDR4 2 GB (real: 4 GB) | **eMMC** (`bpi-r4` layout) | 3.0 | OpenWrt |
 | Teltonika RUTC50 | 1G WAN built-in PHY + 4×1G LAN MT7531 (the mobile modem is not emulated); LEDs on a **74HC595** | DDR3 256 MB | **SPI-NOR 16 MB boot + SPI-NAND 512 MB** (rutos-a / rutos-b) | 3.0 | OpenWrt RFB BL2 + own U-Boot ([`tools/uboot-rutc50`](tools/uboot-rutc50)) |
@@ -174,6 +174,7 @@ routers use; saving from the editor drops `;` comments).
 | Xiaomi Mi Router 3G (stock U-Boot) (**MT7621A**, MIPS) | 1G WAN + 2×1G LAN MT7530; Wi-Fi MT7603E + MT7612E on PCIe (radio silent) | DDR3 256 MB | **parallel NAND 128 MB** (Xiaomi layout) | 3.0 | stock Xiaomi U-Boot 1.1.3 + OpenWrt |
 | Xiaomi Mi Router 3G (Breed) (**MT7621A**, MIPS) | as above | DDR3 256 MB | **parallel NAND 128 MB** (Xiaomi layout) | 3.0 | Breed 1.2 + OpenWrt |
 | Xiaomi Mi Router 4 (stock U-Boot) (**MT7621A**, MIPS) | 1G WAN (MT7530 PHY 4 muxed to GMAC1) + 2×1G LAN MT7530; Wi-Fi MT7603E + MT7612E on PCIe (radio silent) | DDR3 128 MB | **parallel NAND 128 MB** (Xiaomi layout) | 3.2 | stock Xiaomi U-Boot 1.1.3 + OpenWrt |
+| Cudy WR1300S (**MT7621A**, MIPS) | 1G WAN (MT7530 PHY 0 muxed to GMAC1) + 4×1G LAN MT7530; Wi-Fi MT7603E on PCIe (radio silent; the MT7663 5 GHz card is not emulated) | DDR3 128 MB | **SPI-NOR 16 MB** | 3.3 | stock Cudy U-Boot 1.1.3 + OpenWrt 25.12.5 (third-party build, the board is not in OpenWrt yet) |
 
 Netis boards have no bdinfo partition (FIP at 0x380000, ubi at 0x580000;
 MACs in Factory): presets set `openwrt-no-bdinfo=1`. The MT7986 boards use
@@ -389,6 +390,20 @@ PHY 4 wired through port 5 straight to GMAC1 (PHY muxing), which the
 emulator follows from the switch's MTRAP register. Only `Bootloader` and
 `factory` are needed: `Config` (the stock U-Boot's environment) and
 `Bdata` hold the router's serial number, MAC and passwords, leave them out.
+
+**Cudy WR1300S** (SPI-NOR, stock Cudy U-Boot 1.1.3): not in OpenWrt yet
+([PR #22365](https://github.com/openwrt/openwrt/pull/22365)), so the folder
+takes an OpenWrt 25.12.5 build for it. The stock U-Boot reads the kernel
+through the flash's memory-mapped window at 0x1c000000 and talks to the
+SPI controller with automatic chip select, both emulated. Its `bdinfo` holds
+the board data (encrypted) and the MAC: it is generated (MAC
+80:af:ca:11:22:33), only `u-boot` and `factory` come from the router:
+
+```bash
+# DIR: *mtd0*.bin or *u-boot*.bin, *factory*.bin, the *sysupgrade.bin
+tools/prepare-nand.sh --soc mt7621 --nor --stock DIR cudy_wr1300s 25.12.5 nor-wr1300s
+./emulator.sh -P cudy-wr1300s
+```
 
 The folder (`tools/mknand.py mt7621-nand`) holds the stock partitions,
 OpenWrt's `kernel1.bin` in `kernel` (0x600000, "System 2") and

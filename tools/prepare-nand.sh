@@ -43,6 +43,11 @@
 #                     a factory dump (*factory*.bin, Wi-Fi calibration; its
 #                     MACs are replaced); OpenWrt squashfs-kernel1.bin and
 #                     squashfs-rootfs0.bin go to "kernel" / "ubi"
+#                     with --stock DIR --nor: NOR board with its vendor
+#                     U-Boot (e.g. cudy_wr1300s): DIR holds u-boot
+#                     (*mtd0*.bin or *u-boot*.bin), factory and may hold
+#                     the OpenWrt *sysupgrade.bin (e.g. a third-party build);
+#                     bdinfo is generated (MAC at 0xde00)
 #     --parts SPEC    own flash layout for mknand.py, "label:size,...",
 #                     size "-" = rest (e.g. Xiaomi boards: BL2, Nvram, Bdata,
 #                     Factory, FIP, ..., ubi); BL2, Factory, bdinfo, FIP and
@@ -97,7 +102,7 @@ while [ $# -gt 0 ]; do
     --local) LOCAL=$2; shift 2 ;;
     --no-bdinfo) LAYOUT=--no-bdinfo; shift ;;
     --nor) NOR=1; shift ;;
-    --nor-mb) NORMB=$2; shift 2 ;;
+    --nor-mb) NORMB=${2:-16}; shift 2 ;;    # empty: preset without nor=
     --soc) SOC=$2; shift 2 ;;
     --emmc) EMMC=1; shift ;;
     --emmc-layout) ELAYOUT=$2; shift 2 ;;
@@ -106,7 +111,7 @@ while [ $# -gt 0 ]; do
     --ubi-fip) LAYOUT="--parts BL2:0x200000,ubi:-"; UBIFIP=--fip-in-ubi; shift ;;
     --ubi-factory) UBIFAC="--factory-volume $2"; shift 2 ;;
     --parts) LAYOUT="--parts $2"; shift 2 ;;
-    -h|--help) sed -n '2,56p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,83p' "$0"; exit 0 ;;
     *) break ;;
     esac
 done
@@ -234,6 +239,23 @@ else
         done
         [ "$2" = optional ] || { echo "no $b-{${1// /,}} in $URL (wrong profile, or no OpenWrt U-Boot build for it)" >&2; exit 1; }
     }
+fi
+if [ "$SOC" = mt7621 ] && [ -n "$STOCK" ] && [ -n "$NOR" ]; then
+    # SPI-NOR board with its vendor U-Boot (e.g. Cudy WR1300S): u-boot,
+    # factory and an OpenWrt sysupgrade.bin (also a third-party build for a
+    # board OpenWrt does not have yet) from DIR, bdinfo generated
+    BL=$(ls "$STOCK"/*mtd0*.bin "$STOCK"/*u-boot*.bin 2>/dev/null | head -1)
+    F=$(ls "$STOCK"/*[Ff]actory*.bin 2>/dev/null | head -1)
+    SYS=$(ls "$STOCK"/*sysupgrade.bin 2>/dev/null | head -1)
+    [ -n "$BL" ] || { echo "need $STOCK/*mtd0*.bin or *u-boot*.bin (vendor U-Boot)" >&2; exit 1; }
+    [ -n "$SYS" ] || SYS=$(pick "squashfs-sysupgrade.bin")
+    [ -n "$SYS" ] || exit 1
+    echo "$P (vendor bootloader): $BL + $(basename "$SYS")"
+    python3 tools/mknand.py --prefix mt7621 nor -o "$OUT/" --size-mb "$NORMB" \
+        --bl2 "$BL" ${F:+--factory "$F"} --sysupgrade "$SYS" \
+        ${LAYOUT:---parts u-boot:0x30000,u-boot-env:0x10000,factory:0x10000,firmware:0xfa0000,bdinfo:0x10000} \
+        --mac 80:af:ca:11:22:33
+    exit 0
 fi
 if [ "$SOC" = mt7621 ] && [ -n "$STOCK" ]; then
     BL=$(ls "$STOCK"/*mtd0*.bin "$STOCK"/*[Bb]ootloader*.bin 2>/dev/null | head -1)

@@ -1,0 +1,158 @@
+From 05494b49b2cd00a692f98611669c4cde6bc2c316 Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Mon, 19 Oct 2026 12:18:00 -0400
+Subject: [PATCH] hw/mips/mt7621: stock MediaTek U-Boot on SPI-NOR boards
+
+The stock U-Boot 1.1.3 of MT7621 NOR boards (e.g. Cudy WR1300S) reads
+the flash ID in the SPI controller's legacy mode and leaves the chip
+select to the controller (no POLAR writes), and boots the kernel image
+straight from the flash's memory-mapped window at 0x1c000000.  Model the
+legacy transfers (TRANS[3:0] bytes out of OPCODE, TRANS[7:4] back into
+DATA), an automatic chip select 0 when software does not drive it, and
+the whole flash at 0x1c000000 (the reset vector window is now an alias
+of it).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012GbUcwR34gg9RgGTEtNN6J
+---
+ hw/mips/mt7621.c | 71 +++++++++++++++++++++++++++++++++++++++---------
+ 1 file changed, 58 insertions(+), 13 deletions(-)
+
+diff --git a/hw/mips/mt7621.c b/hw/mips/mt7621.c
+index ad09a05..e687988 100644
+--- a/hw/mips/mt7621.c
++++ b/hw/mips/mt7621.c
+@@ -63,6 +63,8 @@
+ #define MT7621_FE_SRAM_SIZE     0x6000
+ #define MT7621_FLASH_MMAP_BASE  0x1fc00000ULL
+ #define MT7621_FLASH_MMAP_SIZE  0x00400000ULL
++#define MT7621_FLASH_DIRECT_BASE 0x1c000000ULL  /* the whole flash, read */
++#define MT7621_FLASH_DIRECT_SIZE 0x02000000ULL
+ 
+ #define MT7621_CPU_HZ           880000000
+ /* locked L2 lines: page-granular overlay outside the SoC's address map */
+@@ -90,7 +92,9 @@
+  * SPI controller in "more buffer" mode, as the U-Boot and Linux drivers
+  * use it: OPCODE holds up to 4 command bytes (MSB first), DATA0..7 up to
+  * 32 bytes out or in (LSB first), MOREBUF the bit counts; TRANS bit 8
+- * starts the transfer, which completes at once.  Chip select: POLAR.
++ * starts the transfer, which completes at once.  Also the legacy mode the
++ * stock MediaTek U-Boot reads the flash ID with.  Chip select: POLAR, or
++ * by itself for the transfer when software does not drive it.
+  */
+ #define TYPE_MT7621_SPI "mt7621-spi"
+ OBJECT_DECLARE_SIMPLE_TYPE(MT7621SpiState, MT7621_SPI)
+@@ -111,23 +115,51 @@ struct MT7621SpiState {
+     uint32_t regs[SPI_NREGS];
+ };
+ 
+-static void mt7621_spi_xfer(MT7621SpiState *s)
++static void mt7621_spi_xfer(MT7621SpiState *s, uint32_t trans)
+ {
+     uint32_t mb = s->regs[SPI_MOREBUF / 4];
++    uint32_t op = s->regs[SPI_OPCODE / 4];
+     unsigned cmd = ((mb >> 24) & 0x3f) / 8;
+     unsigned mosi = (mb & 0x1ff) / 8;
+     unsigned miso = ((mb >> 12) & 0x1ff) / 8;
+     uint8_t *data = (uint8_t *)&s->regs[SPI_DATA0 / 4];
++    /*
++     * the chip select goes active by itself for the transfer unless
++     * software drives it with POLAR (Linux, OpenWrt U-Boot); the stock
++     * MediaTek U-Boot leaves it to the controller
++     */
++    bool auto_cs = !(s->regs[SPI_POLAR / 4] & 1);
++    uint8_t out[4];
+ 
+     if (!(s->regs[SPI_MASTER / 4] & 4)) {
+-        return;         /* legacy mode: only used to idle the bus */
++        /*
++         * legacy mode: TRANS[3:0] bytes out of OPCODE (the opcode in
++         * [7:0], then a 24-bit address in [31:8], high byte first),
++         * TRANS[7:4] bytes back into DATA0..
++         */
++        out[0] = op;
++        out[1] = op >> 24;
++        out[2] = op >> 16;
++        out[3] = op >> 8;
++        cmd = MIN(trans & 0xf, 4);
++        mosi = 0;
++        miso = MIN((trans >> 4) & 0xf, 8);
++    } else {
++        cmd = MIN(cmd, 4);
++        for (unsigned i = 0; i < cmd; i++) {
++            out[i] = op >> (8 * (cmd - 1 - i));
++        }
++        mosi = MIN(mosi, 32);
++        miso = MIN(miso, 32);
++    }
++    if (!cmd && !mosi && !miso) {
++        return;         /* e.g. legacy mode only used to idle the bus */
++    }
++    if (auto_cs) {
++        qemu_set_irq(s->cs[0], 0);
+     }
+-    cmd = MIN(cmd, 4);
+-    mosi = MIN(mosi, 32);
+-    miso = MIN(miso, 32);
+     for (unsigned i = 0; i < cmd; i++) {
+-        ssi_transfer(s->bus, (s->regs[SPI_OPCODE / 4] >> (8 * (cmd - 1 - i)))
+-                             & 0xff);
++        ssi_transfer(s->bus, out[i]);
+     }
+     for (unsigned i = 0; i < mosi; i++) {
+         ssi_transfer(s->bus, data[i ^ (HOST_BIG_ENDIAN ? 3 : 0)]);
+@@ -135,6 +167,9 @@ static void mt7621_spi_xfer(MT7621SpiState *s)
+     for (unsigned i = 0; i < miso; i++) {
+         data[i ^ (HOST_BIG_ENDIAN ? 3 : 0)] = ssi_transfer(s->bus, 0);
+     }
++    if (auto_cs) {
++        qemu_set_irq(s->cs[0], 1);
++    }
+ }
+ 
+ static uint64_t mt7621_spi_read(void *opaque, hwaddr addr, unsigned size)
+@@ -153,7 +188,7 @@ static void mt7621_spi_write(void *opaque, hwaddr addr, uint64_t val,
+     case SPI_TRANS:
+         s->regs[0] = val & ~((1u << 8) | (1u << 16));   /* never busy */
+         if (val & (1u << 8)) {
+-            mt7621_spi_xfer(s);
++            mt7621_spi_xfer(s, val);
+         }
+         return;
+     case SPI_POLAR:
+@@ -251,6 +286,7 @@ typedef struct MT7621Board {
+     MemoryRegion lowmem;
+     MemoryRegion highmem;
+     MemoryRegion flash_mmap;
++    MemoryRegion flash_direct;
+ 
+     DeviceState *spi;
+     SpiNorState *nor;
+@@ -817,11 +853,20 @@ static void mt7621_create_flash(MT7621Board *b)
+                        qdev_get_gpio_in_named(dev, SSI_GPIO_CS, 0));
+     b->nor = MTK_SPINOR(dev);
+ 
+-    /* memory-mapped read window at the reset vector */
++    /*
++     * memory-mapped read windows: the whole flash at 0x1c000000 (where the
++     * stock MediaTek U-Boot 1.1.3 of NOR boards, e.g. Cudy, reads the
++     * kernel image from) and its start at the reset vector
++     */
+     data = spinor_storage(b->nor, &size);
+-    memory_region_init_ram_ptr(&b->flash_mmap, NULL, "mt7621.flash-mmap",
+-                               MIN(size, MT7621_FLASH_MMAP_SIZE), data);
+-    memory_region_set_readonly(&b->flash_mmap, true);
++    memory_region_init_ram_ptr(&b->flash_direct, NULL, "mt7621.flash-direct",
++                               MIN(size, MT7621_FLASH_DIRECT_SIZE), data);
++    memory_region_set_readonly(&b->flash_direct, true);
++    memory_region_add_subregion(get_system_memory(), MT7621_FLASH_DIRECT_BASE,
++                                &b->flash_direct);
++    memory_region_init_alias(&b->flash_mmap, NULL, "mt7621.flash-mmap",
++                             &b->flash_direct, 0,
++                             MIN(size, MT7621_FLASH_MMAP_SIZE));
+     memory_region_add_subregion(get_system_memory(), MT7621_FLASH_MMAP_BASE,
+                                 &b->flash_mmap);
+ }
+-- 
+2.47.3
+
