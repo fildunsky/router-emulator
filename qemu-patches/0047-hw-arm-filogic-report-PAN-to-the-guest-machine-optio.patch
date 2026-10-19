@@ -1,0 +1,87 @@
+From feaa789532d6e335d2c2f6a152fb72c58f483186 Mon Sep 17 00:00:00 2001
+From: Fil Dunsky <filipp.dunsky@gmail.com>
+Date: Tue, 20 Oct 2026 01:01:40 +0300
+Subject: [PATCH] hw/arm/filogic: report PAN to the guest (machine option pan,
+ default on)
+
+Cortex-A53 / A73 are ARMv8.0 cores without FEAT_PAN, so an arm64 Linux
+built with CONFIG_ARM64_SW_TTBR0_PAN (OpenWrt's filogic kernels) emulates
+it: every kernel entry and exit switches TTBR0, and under TCG each switch
+flushes the whole TLB.  Setting ID_AA64MMFR1.PAN lets the kernel use the
+hardware PAN that TCG implements anyway: system-call heavy guest work
+(ubus, uci, fork) gets about 2.5x faster and booting OpenWrt needs ~40 %
+less host CPU.  pan=off keeps the cores' own ID registers.
+---
+ hw/arm/filogic/filogic_router.c | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/hw/arm/filogic/filogic_router.c b/hw/arm/filogic/filogic_router.c
+index 47140ec..b61e229 100644
+--- a/hw/arm/filogic/filogic_router.c
++++ b/hw/arm/filogic/filogic_router.c
+@@ -280,6 +280,7 @@ struct RouterState {
+     char *usb_host;             /* passed through host devices VID:PID;... */
+     uint32_t reset_gpio, wps_gpio;
+     bool reset_active_high, wps_active_high;
++    bool pan;                   /* report FEAT_PAN in ID_AA64MMFR1 */
+ 
+     /* front panel LEDs (filogic_leds.c) */
+     char *led_def[MAX_LEDS];
+@@ -317,6 +318,16 @@ static void router_set_wps_ah(Object *obj, bool v, Error **errp)
+     ROUTER_MACHINE(obj)->wps_active_high = v;
+ }
+ 
++static bool router_get_pan(Object *obj, Error **errp)
++{
++    return ROUTER_MACHINE(obj)->pan;
++}
++
++static void router_set_pan(Object *obj, bool v, Error **errp)
++{
++    ROUTER_MACHINE(obj)->pan = v;
++}
++
+ static void router_get_reset_hold(Object *obj, Visitor *v, const char *name,
+                                    void *opaque, Error **errp)
+ {
+@@ -938,6 +949,17 @@ static void router_init(MachineState *machine)
+         }
+         object_property_set_link(cpuobj, "memory", OBJECT(sysmem),
+                                  &error_abort);
++        /*
++         * Cortex-A53 / A73 are ARMv8.0 cores without PAN, so an arm64 Linux
++         * built with CONFIG_ARM64_SW_TTBR0_PAN emulates it: every kernel
++         * entry and exit switches TTBR0, which under TCG flushes the TLB.
++         * Reporting FEAT_PAN lets the kernel use the hardware PAN that TCG
++         * implements anyway; guest system calls get several times faster.
++         */
++        if (b->pan &&
++            FIELD_EX64_IDREG(&ARM_CPU(cpuobj)->isar, ID_AA64MMFR1, PAN) == 0) {
++            FIELD_DP64_IDREG(&ARM_CPU(cpuobj)->isar, ID_AA64MMFR1, PAN, 1);
++        }
+         qdev_realize(DEVICE(cpuobj), NULL, &error_fatal);
+         b->cpus[i] = ARM_CPU(cpuobj);
+         qemu_register_reset(cpu_reset_handler, b->cpus[i]);
+@@ -1470,6 +1492,7 @@ static void router_instance_init(Object *obj)
+     b->port5_addr = 5;
+     b->port5_reset_gpio = -1;
+     b->ports = g_strdup("lan1:lan2:lan3:lan4");
++    b->pan = true;
+     b->nand_mb = 128;
+     b->nor_mb = 16;
+     b->emmc_boot_mb = 4;
+@@ -1673,6 +1696,11 @@ static void router_class_init(ObjectClass *oc, const void *data)
+                                    router_set_wps_ah);
+     object_class_property_set_description(oc, "wps-active-high",
+         "WPS button reads 1 when pressed (default: active low)");
++    object_class_property_add_bool(oc, "pan", router_get_pan, router_set_pan);
++    object_class_property_set_description(oc, "pan",
++        "Report FEAT_PAN (Privileged Access Never) to the guest, so Linux "
++        "does not emulate it by switching TTBR0 on every kernel entry, "
++        "which is slow under TCG (default: on)");
+ }
+ 
+ static void router_soc_class_init(ObjectClass *oc, const void *data)
+-- 
+2.53.0
+
