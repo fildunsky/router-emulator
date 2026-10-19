@@ -212,9 +212,10 @@ namespace RouterEmulator
         // MT7621 boards: Wi-Fi cards in the three PCIe slots, data cache model
         ComboBox[] pcieSlot = new ComboBox[3];
         CheckBox dcache;
-        // the MT7621 tab is shown for that SoC only (after "Buttons")
+        // the MT7621 tab for that SoC only, the chip identity one (eFuse,
+        // SPI-NAND UID) for the Filogic SoCs only; both after "Buttons"
         TabControl tabs;
-        TabPage mipsPage, buttonsPage;
+        TabPage mipsPage, idPage, buttonsPage;
         ComboBox[] swPort = new ComboBox[5];
         NumericUpDown gmac0Rst, gmac1Rst, port5Rst, port5Addr, resetGpio, wpsGpio;
         CheckBox resetHigh, wpsHigh;
@@ -408,6 +409,7 @@ namespace RouterEmulator
                      + "only active until the operating system starts, so it costs no speed there.") });
             // chip identity: eFuse dump / per-chip block, SPI-NAND unique ID
             var idg = Page(tabs, L.T("ed.tab_identity", "Chip identity"));
+            idPage = idg;
             idg.Controls.Add(new Label { Left = 10, Top = 3, Width = 590, Height = 16, ForeColor = Color.DimGray,
                 Text = L.T("ed.identity", "Chip identity (empty = default)") });
             idg.Controls.Add(new Label { Left = 10, Top = 25, Width = 130, Text = L.T("ed.efuse", "eFuse dump:") });
@@ -685,11 +687,19 @@ namespace RouterEmulator
             }
             foreach (var c in pcieSlot) c.Enabled = m;
             dcache.Enabled = m;
-            if (m && !tabs.TabPages.Contains(mipsPage))
-                tabs.TabPages.Insert(tabs.TabPages.IndexOf(buttonsPage) + 1, mipsPage);
-            else if (!m && tabs.TabPages.Contains(mipsPage))
-                tabs.TabPages.Remove(mipsPage);
+            ShowTab(mipsPage, m);
+            ShowTab(idPage, !m);
+            poweroff.Enabled = !m;      // a Filogic machine option
             UpdateDesc();
+        }
+
+        // a tab shown or not, in its place right after "Buttons"
+        void ShowTab(TabPage page, bool show)
+        {
+            if (show && !tabs.TabPages.Contains(page))
+                tabs.TabPages.Insert(tabs.TabPages.IndexOf(buttonsPage) + 1, page);
+            else if (!show && tabs.TabPages.Contains(page))
+                tabs.TabPages.Remove(page);
         }
 
         // another SoC: choices that only exist on one side are replaced
