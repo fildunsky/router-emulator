@@ -383,13 +383,13 @@ The folder (`tools/mknand.py mt7621-nand`) holds the stock partitions,
 OpenWrt's `kernel1.bin` in `kernel` (0x600000, "System 2") and
 `rootfs0.bin` in `ubi`; `kernel_stock` (System 1, the stock firmware's
 kernel) stays erased, so the stock U-Boot falls back to System 2 as on a
-router with OpenWrt; Breed boots that kernel too. `mt7621.mtd10.bbt.bin`
-is the MediaTek U-Boot's factory bad block table in the last 4 blocks,
-outside every partition (on the router it is written at the first boot,
-so partition dumps lack it): all blocks good, signed `mtknand` in the
-spare, which lives in `mt7621.mtd10.bbt.bin.oob` (any dump `X` may have an
-`X.oob`, 64 bytes a page). Without it the stock U-Boot scans the used
-flash for bad block marks, takes data for marks and skips the kernel.
+router with OpenWrt; Breed boots that kernel too. The MediaTek U-Boot
+keeps a factory bad block table in the last 4 blocks, outside every
+partition (written at the first boot, so partition dumps lack it; without
+it the stock U-Boot scans the used flash for bad block marks, takes data
+for marks and skips the kernel): when no dump holds those blocks, the
+emulator puts an all-good table there.
+Any dump `X` may come with an `X.oob` (its spare area, 64 bytes a page).
 
 ## What is emulated
 

@@ -478,12 +478,9 @@ def cmd_mt7621_nand(args):
     """MT7621 parallel NAND folder (machine option flash=nand): one data
     file per partition, the bootloader in the first, the OpenWrt kernel
     (kernel1.bin) and UBI (rootfs0.bin) in "kernel" / "ubi", everything
-    else erased.  The last BBT_BLOCKS blocks (outside all partitions) get
-    the factory bad block table of the MediaTek U-Boot: on the chip it is
-    written at the first boot, when the flash is still virgin; here every
-    block is good.  Its signature ("mtknand" at spare bytes 1..7 of the
-    first page of each copy) is in the spare, i.e. in the .oob file next
-    to the data file.  factory: MAC at 0xe000 (WAN), +1 at 0xe006 (GMAC);
+    else erased.  (The MediaTek U-Boot's factory bad block table in the
+    last blocks, outside all partitions, is put there by the emulator.)
+    factory: MAC at 0xe000 (WAN), +1 at 0xe006 (GMAC);
     the Wi-Fi EEPROMs at 0 and 0x8000 (if present) get +2 and +3."""
     total = args.size_mb << 20
     parts, off = [], 0
@@ -525,15 +522,6 @@ def cmd_mt7621_nand(args):
                 data[at:at + 6] = ((mac + d) & 0xffffffffffff).to_bytes(6, "big")
             print(f"base MAC: {args.mac}")
         put(i, label, poff, data)
-    # factory BBT: 2 bits a block (0 = good), one copy per block
-    nblocks = total // BLOCK
-    data = bytearray(b"\xff" * BBT_BLOCKS * BLOCK)
-    oob = bytearray(b"\xff" * BBT_BLOCKS * PPB * OOB)
-    for b in range(BBT_BLOCKS):
-        data[b * BLOCK:b * BLOCK + nblocks // 4] = bytes(nblocks // 4)
-        oob[b * PPB * OOB + 1:b * PPB * OOB + 8] = b"mtknand"
-    fn = put(len(parts), "bbt", total - BBT_BLOCKS * BLOCK, data)
-    open(fn + ".oob", "wb").write(bytes(oob))
     print(f"wrote {args.output}")
 
 

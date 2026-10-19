@@ -1,0 +1,113 @@
+From 4166fad6fad6e27ddb9a231855c743adf0499e28 Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Mon, 19 Oct 2026 06:49:34 -0400
+Subject: [PATCH] hw/mips/mt7621_nand: an all-good factory BBT in the last
+ blocks
+
+MediaTek's U-Boot keeps a factory bad block table in the last 4 blocks,
+outside every partition, so partition dumps lack it and the U-Boot then
+scans the used flash for bad block marks.  When no dump holds those
+blocks and they are erased, put an all-good table there ("mtknand" in
+the spare), in memory only; device property factory-bbt.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012GbUcwR34gg9RgGTEtNN6J
+---
+ hw/mips/mt7621_nand.c | 53 +++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 51 insertions(+), 2 deletions(-)
+
+diff --git a/hw/mips/mt7621_nand.c b/hw/mips/mt7621_nand.c
+index 3c95921..c22dee2 100644
+--- a/hw/mips/mt7621_nand.c
++++ b/hw/mips/mt7621_nand.c
+@@ -9,7 +9,8 @@
+  * model keeps data and spare apart (data = what a "cat /dev/mtdN" dump
+  * holds), so partition dumps without OOB are the backing store; the spare
+  * of a dump "X" comes from an optional "X.oob" (64 bytes a page, written
+- * back), else it reads as erased.
++ * back), else it reads as erased.  An all-good MediaTek factory bad block
++ * table goes into the last blocks when no dump holds them (factory-bbt).
+  *
+  * NFI: commands (CMD), address cycles (COLADDR/ROWADDR/ADDRNOB), data by
+  * PIO (DATAR/DATAW, 1 or 4 bytes); with AUTO_FMT the spare bytes of each
+@@ -82,6 +83,7 @@ struct MT7621NandState {
+     uint8_t chip_id[8];
+     int id_len;
+     uint32_t size_mb;
++    bool factory_bbt;           /* factory-bbt: one in the last blocks */
+     NandSegment *segs;
+     int nsegs;
+     uint8_t *data;              /* page_size bytes per page */
+@@ -599,6 +601,47 @@ static bool load_dir(MT7621NandState *s, Error **errp)
+     return true;
+ }
+ 
++/*
++ * MediaTek's (Ralink SDK) U-Boot keeps a factory bad block table in the
++ * last BBT_BLOCKS blocks, outside every partition: written at the first
++ * boot (on the still virgin chip), loaded since; marked by "mtknand" in
++ * spare bytes 1..7 of the first page of each copy, 2 bits a block (0 =
++ * good).  Dumps of the partitions lack it, and a U-Boot that finds none
++ * scans the used flash for bad block marks, takes data for marks and
++ * skips those blocks.  So when no dump covers these blocks and they are
++ * erased, put an all-good table there (in memory only).
++ */
++#define BBT_BLOCKS      4
++
++static void factory_bbt(MT7621NandState *s)
++{
++    uint32_t nblocks = s->pages / PAGES_PER_BLOCK;
++    uint32_t first = s->pages - BBT_BLOCKS * PAGES_PER_BLOCK;
++    uint64_t start = (uint64_t)first * PAGE_SIZE_;
++
++    if (s->pages < 2 * BBT_BLOCKS * PAGES_PER_BLOCK) {
++        return;
++    }
++    for (int i = 0; i < s->nsegs; i++) {
++        if (s->segs[i].start + s->segs[i].len > start) {
++            return;             /* a dump holds these blocks */
++        }
++    }
++    for (uint32_t p = first; p < s->pages; p++) {
++        for (int c = 0; c < PAGE_SIZE_; c++) {
++            if (s->data[(uint64_t)p * PAGE_SIZE_ + c] != 0xff) {
++                return;
++            }
++        }
++    }
++    for (int b = 0; b < BBT_BLOCKS; b++) {
++        uint32_t p = first + b * PAGES_PER_BLOCK;
++
++        memset(s->data + (uint64_t)p * PAGE_SIZE_, 0, nblocks / 4);
++        memcpy(s->oob + (uint64_t)p * OOB_SIZE + 1, "mtknand", 7);
++    }
++}
++
+ static void mt7621_nand_realize(DeviceState *dev, Error **errp)
+ {
+     MT7621NandState *s = MT7621_NAND(dev);
+@@ -621,7 +664,12 @@ static void mt7621_nand_realize(DeviceState *dev, Error **errp)
+     memset(s->data, 0xff, size);
+     memset(s->oob, 0xff, (uint64_t)s->pages * OOB_SIZE);
+     if (s->dir) {
+-        load_dir(s, errp);
++        if (!load_dir(s, errp)) {
++            return;
++        }
++    }
++    if (s->factory_bbt) {
++        factory_bbt(s);
+     }
+ }
+ 
+@@ -652,6 +700,7 @@ static const Property mt7621_nand_props[] = {
+     DEFINE_PROP_STRING("dir", MT7621NandState, dir),
+     DEFINE_PROP_STRING("id", MT7621NandState, id_hex),
+     DEFINE_PROP_UINT32("size-mb", MT7621NandState, size_mb, 128),
++    DEFINE_PROP_BOOL("factory-bbt", MT7621NandState, factory_bbt, true),
+ };
+ 
+ static void mt7621_nand_class_init(ObjectClass *oc, const void *data)
+-- 
+2.47.3
+
