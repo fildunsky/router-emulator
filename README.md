@@ -66,7 +66,8 @@ Amlogic S905 box (4x Cortex-A53, 1 GB) boots the WR3000S to LuCI in about
 ## Board hardware (machine options)
 
 `-M mt7981-router,nand-dir=DIR,<options>` (or `mt7986-router`) and
-`-m <RAM size>`:
+`-m <RAM size>` (128M, 256M, 512M, 1G or 2G; 128 MB is untested: there is
+no BL2 for it to try, reports welcome):
 
 | Option | Values | Meaning |
 |---|---|---|

@@ -315,7 +315,8 @@ namespace RouterEmulator
                 new Choice("ddr4", "DDR4"), new Choice("ddr3", "DDR3"));
             string mb = L.T("ed.mb", "MB"), gb = L.T("ed.gb", "GB");
             ram = Combo(mem, L.T("ed.ram_size", "RAM size:"), ref gy,
-                new Choice("256", "256 " + mb), new Choice("512", "512 " + mb), new Choice("1024", "1 " + gb),
+                new Choice("128", "128 " + mb), new Choice("256", "256 " + mb), new Choice("512", "512 " + mb),
+                new Choice("1024", "1 " + gb),
                 new Choice("2048", "2 " + gb));
             // (boot flash list follows)
             // value: "nand:<MB>" or "nor:<MB>:<JEDEC ID>"
@@ -910,6 +911,8 @@ namespace RouterEmulator
                 err = L.T("ed.no_i2p5ge", "Only the MT7987 and MT7988 have an internal 2.5G PHY.");
             if (err == null && p.Soc == "mt7621" && (Val(nandSize).StartsWith("nand") || Val(nandSize).StartsWith("emmc")))
                 err = L.T("ed.mt7621_flash", "The MT7621 boots from a SPI-NOR or a parallel NAND.");
+            if (err == null && p.Soc == "mt7621" && Int(Val(ram), 0) > 512)
+                err = L.T("ed.mt7621_ram", "The MT7621 has at most 512 MB of RAM.");
             if (err == null && p.Soc != "mt7621" && Val(gmac0) == "mt7530")
                 err = L.T("ed.mt7530_only", "The MT7530 switch is the MT7621's: choose another GMAC0 device.");
             if (err == null && p.Soc != "mt7621" && Val(nandSize).StartsWith("pnand"))
