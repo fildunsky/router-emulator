@@ -8,6 +8,13 @@
 # Environment:
 #   JOBS=N                parallel build jobs (default: ninja's choice)
 #   CONFIGURE_ARGS="..."  extra arguments for QEMU's configure
+#   PGO=1                 profile-guided optimisation (GCC): an instrumented
+#                         qemu-system-aarch64 (src/qemu/build-pgo-gen) boots
+#                         the flash folder PGO_NAND (default nand-wr3000p,
+#                         tools/prepare-nand.sh cudy_wr3000p-v1 ...) through
+#                         tools/pgo-train.py, then src/qemu/build is rebuilt
+#                         with that profile; later runs without PGO=1 keep
+#                         it (rm -rf src/qemu/build drops it)
 #
 # libslirp and libfdt are taken from the system when their development
 # files are installed; otherwise QEMU's own meson subprojects (libslirp,
@@ -54,11 +61,36 @@ if [ "$have" -lt ${#patches[@]} ]; then
     git checkout -q mt7981
     git -c user.name=build -c user.email=build@localhost am "${patches[@]:$have}"
 fi
-mkdir -p build && cd build
-# --enable-fdt=enabled: system libfdt if found, else the bundled dtc;
-# a build directory from before the MT7621 machine is configured again
-grep -qs mipsel-softmmu build.ninja ||
-    ../configure --target-list=aarch64-softmmu,mipsel-softmmu --enable-slirp \
-        --enable-fdt=enabled --disable-docs --disable-werror $CONFIGURE_ARGS
+# --enable-fdt=enabled: system libfdt if found, else the bundled dtc
+CONF=(--enable-slirp --enable-fdt=enabled --disable-docs --disable-werror
+      $CONFIGURE_ARGS)
+if [ "${PGO:-0}" = 1 ]; then
+    cc -v 2>&1 | grep -q '^gcc version' || { echo "PGO=1 needs GCC as cc" >&2; exit 1; }
+    NAND=$(readlink -f "${PGO_NAND:-$ROOT/nand-wr3000p}")
+    [ -f "$NAND/mt7981.mtd0.BL2.bin" ] ||
+        { echo "PGO=1: no flash folder $NAND (tools/prepare-nand.sh cudy_wr3000p-v1 25.12.5)" >&2; exit 1; }
+    # gcda files are named after the object paths relative to the build
+    # directory (-fprofile-prefix-path), so the profile of build-pgo-gen
+    # fits build; atomic counters: QEMU runs the guest CPUs in threads
+    rm -rf pgo-prof pgo-nand build-pgo-gen && mkdir build-pgo-gen && cd build-pgo-gen
+    ../configure --target-list=aarch64-softmmu "${CONF[@]}" \
+        --extra-cflags="-fprofile-generate=$PWD/../pgo-prof -fprofile-prefix-path=$PWD -fprofile-update=prefer-atomic" \
+        --extra-ldflags="-fprofile-generate=$PWD/../pgo-prof" >configure.out
+    ninja ${JOBS:+-j "$JOBS"} qemu-system-aarch64
+    cd .. && cp -r "$NAND" pgo-nand
+    echo "PGO: training run"
+    timeout 1800 python3 "$ROOT/tools/pgo-train.py" build-pgo-gen/qemu-system-aarch64 pgo-nand
+    rm -rf pgo-nand build-pgo-gen
+    # a fresh build directory (configure keeps old options in an existing
+    # one); qemu-system-mipsel code without a profile is optimised as usual
+    rm -rf build && mkdir build && cd build
+    ../configure --target-list=aarch64-softmmu,mipsel-softmmu "${CONF[@]}" \
+        --extra-cflags="-fprofile-use=$PWD/../pgo-prof -fprofile-prefix-path=$PWD -fprofile-partial-training -Wno-missing-profile -Wno-coverage-mismatch"
+else
+    mkdir -p build && cd build
+    # a build directory from before the MT7621 machine is configured again
+    grep -qs mipsel-softmmu build.ninja ||
+        ../configure --target-list=aarch64-softmmu,mipsel-softmmu "${CONF[@]}"
+fi
 ninja ${JOBS:+-j "$JOBS"} qemu-system-aarch64 qemu-system-mipsel
 echo "built: $PWD/qemu-system-aarch64 $PWD/qemu-system-mipsel"

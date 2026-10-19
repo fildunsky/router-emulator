@@ -72,6 +72,16 @@ What [`build.sh`](build.sh) does:
 4. builds `qemu-system-aarch64` with `ninja` (`JOBS=N` limits the jobs,
    `CONFIGURE_ARGS` adds configure options).
 
+`PGO=1 ./build.sh` builds with profile-guided optimisation (GCC, as the
+released packages; ~8–10 % faster on system-call heavy guest work): an
+instrumented `qemu-system-aarch64` boots OpenWrt from a WR3000P flash folder
+(`PGO_NAND=DIR`, default `nand-wr3000p`, see [Flash images](#3-flash-images))
+and runs some shell / ubus / uci work in it
+([`tools/pgo-train.py`](tools/pgo-train.py), on a copy of the folder), then
+`src/qemu/build` is built again from scratch with that profile (about three
+times the time of a plain build). Later `./build.sh` runs keep the profile;
+`rm -rf src/qemu/build` returns to a plain build.
+
 Result: `src/qemu/build/qemu-system-aarch64`. Check:
 
 ```bash
