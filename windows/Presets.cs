@@ -62,7 +62,7 @@ namespace RouterEmulator
         // Filogic ones, e.g. gmac0/nand, for every preset)
         static readonly string[] Mt7621Keys = { "ports", "ddr", "usb-port", "reset-gpio", "wps-gpio",
             "reset-active-high", "wps-active-high", "pcie0", "pcie1", "pcie2", "flash", "nand-id",
-            "dcache" };   // + led1..ledN
+            "dcache", "poweroff" };   // + led1..ledN
 
         // LAN1 "This PC only": router LAN address and port forwards
         // "pcport:routerport,..." from 127.0.0.1 to the router
@@ -386,7 +386,9 @@ namespace RouterEmulator
             int py = 54;
             poweroff = Combo(adv, L.T("ed.poweroff", "On \"poweroff\":"), ref py,
                 new Choice("stop", L.T("ed.poweroff_stop", "Turn the emulator off")),
-                new Choice("reboot", L.T("ed.poweroff_reboot", "Reboot (like a real board)")));
+                new Choice("reboot", L.T("ed.poweroff_reboot", "Reboot (like a real board)")),
+                // MT7621: no power-off and no reset on it, the CPU just stops
+                new Choice("halt", L.T("ed.poweroff_halt", "Stay halted (like a real MT7621)")));
             poweroff.Left = 140;
             // MT7621 boards: PCIe Wi-Fi cards and the data cache model
             var mips = Page(tabs, "MT7621");
@@ -689,7 +691,7 @@ namespace RouterEmulator
             dcache.Enabled = m;
             ShowTab(mipsPage, m);
             ShowTab(idPage, !m);
-            poweroff.Enabled = !m;      // a Filogic machine option
+
             UpdateDesc();
         }
 
@@ -712,6 +714,8 @@ namespace RouterEmulator
             string f = Val(nandSize);
             if (m && (f.StartsWith("nand") || f.StartsWith("emmc"))) SelectValue(nandSize, "nor:16:ef4018");
             if (!m && f.StartsWith("pnand")) SelectValue(nandSize, "nand:128");
+            if (m && Val(poweroff) == "reboot") SelectValue(poweroff, "halt");
+            if (!m && Val(poweroff) == "halt") SelectValue(poweroff, "reboot");
             UpdateEnabled();
         }
 
@@ -877,8 +881,8 @@ namespace RouterEmulator
             if (wpsHigh.Checked) p.Set("wps-active-high", "on");
             p.Set("lan-ip", lanIp.Text.Trim());
             p.Set("lan-forwards", lanFwd.Text.Trim().Replace(" ", ""));
+            p.Set("poweroff", Val(poweroff));
             if (!m) {           // Filogic machines only
-                p.Set("poweroff", Val(poweroff));
                 if (efuseFile.Text.Trim().Length > 0) p.Set("efuse", efuseFile.Text.Trim());
                 if (efuseUid.Text.Trim().Length > 0) p.Set("efuse-uid", efuseUid.Text.Trim().ToLowerInvariant());
                 if (nandUid.Text.Trim().Length > 0) p.Set("nand-uid", nandUid.Text.Trim().ToLowerInvariant());
@@ -921,6 +925,10 @@ namespace RouterEmulator
                 err = L.T("ed.no_i2p5ge", "Only the MT7987 and MT7988 have an internal 2.5G PHY.");
             if (err == null && p.Soc == "mt7621" && (Val(nandSize).StartsWith("nand") || Val(nandSize).StartsWith("emmc")))
                 err = L.T("ed.mt7621_flash", "The MT7621 boots from a SPI-NOR or a parallel NAND.");
+            if (err == null && (p.Soc == "mt7621") != (Val(poweroff) == "halt") && Val(poweroff) != "stop")
+                err = p.Soc == "mt7621"
+                    ? L.T("ed.poweroff_mt7621", "The MT7621 cannot reboot itself on poweroff: choose \"Stay halted\".")
+                    : L.T("ed.poweroff_filogic", "\"Stay halted\" is the MT7621's: Filogic boards reboot.");
             if (err == null && p.Soc == "mt7621" && Int(Val(ram), 0) > 512)
                 err = L.T("ed.mt7621_ram", "The MT7621 has at most 512 MB of RAM.");
             if (err == null && p.Soc != "mt7621" && Val(gmac0) == "mt7530")

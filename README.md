@@ -351,8 +351,10 @@ runs, nothing goes on the air; a card without an EEPROM in flash gets a
 minimal one from its eFuse with the MAC 80:af:ca:11:22:35 + slot; the
 parallel NAND (NFI + ECC, PIO, `flash=nand`, `nand-id=`); the DRAMC's
 software test engine, so a vendor stage1 that calibrates the DDR itself
-(stock Xiaomi U-Boot) finds its pass windows; the write-back L1 data cache
-as far as uncached stores go (`dcache=on`, the default: Breed overruns an
+(stock Xiaomi U-Boot) finds its pass windows; `poweroff=stop|halt`
+(Linux's `poweroff` / `halt` end the emulator, or it stays halted like the
+chip, which cannot switch itself off); the write-back L1 data cache as far
+as uncached stores go (`dcache=on`, the default: Breed overruns an
 uncached memset into a malloc header and relies on the dirty cached copy;
 on from reset until the OS runs user code, so OpenWrt runs at full
 speed). Not yet: SD card.
