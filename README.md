@@ -339,8 +339,8 @@ the SPL runs MediaTek's DDR init blob in the Frame Engine SRAM, then U-Boot
 and OpenWrt; NAND boards boot through the NAND BootROM (stage1 with the DDR
 init into the locked L2, then the bootloader). Emulated: MIPS 1004Kc, 2 cores × 2 VPEs (MT ASE: 4 CPUs in Linux, chip ID
 MT7621A; `-smp 2`: one core, MT7621S; `-smp 1`), CM/GIC/CPC (cores
-powered up by the CPC, VPEs by MT ASE code; the CP0 timers are GIC local
-interrupts), DRAM 128/256/512 MB (above 448 MB at `0x20000000`, as on the
+powered up by the CPC, VPEs by MT ASE code; the first VPE's CP0 timer on its IP7, the
+others' via the GIC), DRAM 128/256/512 MB (above 448 MB at `0x20000000`, as on the
 SoC), SPI controller + SPI-NOR, UART, Frame Engine (QDMA/PDMA, NETSYS v1)
 with the MT7530 switch (MCM), xHCI (USB 3.0 + 2.0), GPIO with buttons and
 LEDs, the PCIe host (three root ports, `pcie0..2=CARD`) with "radio

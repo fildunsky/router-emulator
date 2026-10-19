@@ -1,0 +1,180 @@
+From f8591a0228d66b1defaf44285c359b72f97375cd Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Mon, 19 Oct 2026 07:40:11 -0400
+Subject: [PATCH] hw/intc/mips_gic, hw/mips/mt7621: GIC timer routing per VP;
+ CPU0's timer on IP7
+
+timer-routable / gic-timer-routable become a mask of the VPs whose CP0
+timer interrupt is a GIC input.  MT7621: VP 0's goes to its IP7 as
+before SMP (Breed's scheduler needs it: its web console did not answer),
+the other VPs' through the GIC, masked until an OS maps them: on the chip
+Linux sees no IP7 timer interrupts on its secondary CPUs (only the GIC
+local timer), although it unmasks IP2..7 there and never sets Compare.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012GbUcwR34gg9RgGTEtNN6J
+---
+ hw/intc/mips_gic.c         | 21 +++++++++++----------
+ hw/mips/cps.c              |  6 +++---
+ hw/mips/mt7621.c           | 11 +++++++----
+ include/hw/intc/mips_gic.h |  6 +++---
+ include/hw/mips/cps.h      |  2 +-
+ 5 files changed, 25 insertions(+), 21 deletions(-)
+
+diff --git a/hw/intc/mips_gic.c b/hw/intc/mips_gic.c
+index 70988fc..eaaf709 100644
+--- a/hw/intc/mips_gic.c
++++ b/hw/intc/mips_gic.c
+@@ -45,7 +45,7 @@ static void mips_gic_set_vp_irq(MIPSGICState *gic, int vp, int pin)
+         ored_level |= (gic->vps[vp].pend & GIC_VP_MASK_CMP_MSK) >>
+                       GIC_VP_MASK_CMP_SHF;
+     }
+-    if (gic->timer_routable &&
++    if ((gic->timer_routable & BIT(vp)) &&
+         (gic->vps[vp].timer_map & GIC_MAP_TO_PIN_MSK) &&
+         (gic->vps[vp].timer_map & GIC_MAP_MSK) == pin &&
+         (gic->vps[vp].mask & GIC_VP_MASK_TIMER_MSK)) {
+@@ -208,7 +208,8 @@ static void gic_update_vp_local(MIPSGICState *gic, int vp)
+     if (gic->vps[vp].compare_map & GIC_MAP_TO_PIN_MSK) {
+         mips_gic_set_vp_irq(gic, vp, gic->vps[vp].compare_map & GIC_MAP_MSK);
+     }
+-    if (gic->timer_routable && (gic->vps[vp].timer_map & GIC_MAP_TO_PIN_MSK)) {
++    if ((gic->timer_routable & BIT(vp)) &&
++        (gic->vps[vp].timer_map & GIC_MAP_TO_PIN_MSK)) {
+         mips_gic_set_vp_irq(gic, vp, gic->vps[vp].timer_map & GIC_MAP_MSK);
+     }
+ }
+@@ -264,18 +265,18 @@ static void gic_write_vp(MIPSGICState *gic, uint32_t vp_index, hwaddr addr,
+     case GIC_VP_RMASK_OFS:
+         gic->vps[vp_index].mask &= ~(data & GIC_VP_SET_RESET_MSK) &
+                                    GIC_VP_SET_RESET_MSK;
+-        if (gic->timer_routable) {
++        if (gic->timer_routable & BIT(vp_index)) {
+             gic_update_vp_local(gic, vp_index);
+         }
+         break;
+     case GIC_VP_SMASK_OFS:
+         gic->vps[vp_index].mask |= data & GIC_VP_SET_RESET_MSK;
+-        if (gic->timer_routable) {
++        if (gic->timer_routable & BIT(vp_index)) {
+             gic_update_vp_local(gic, vp_index);
+         }
+         break;
+     case GIC_VP_TIMER_MAP_OFS:
+-        if (gic->timer_routable) {
++        if (gic->timer_routable & BIT(vp_index)) {
+             uint32_t old = gic->vps[vp_index].timer_map;
+ 
+             OFFSET_CHECK((data & GIC_MAP_MSK) <= GIC_CPU_INT_MAX);
+@@ -415,7 +416,7 @@ static void gic_reset(void *opaque)
+                      (gic->num_vps << GIC_SH_CONFIG_PVPS_SHF);
+     for (i = 0; i < gic->num_vps; i++) {
+         /* Vx_CTL: TIMER_ROUTABLE (bit 1) when the CP0 timers are inputs */
+-        gic->vps[i].ctl         = gic->timer_routable ? 0x2 : 0x0;
++        gic->vps[i].ctl         = gic->timer_routable & BIT(i) ? 0x2 : 0x0;
+         gic->vps[i].timer_map   = GIC_MAP_TO_PIN_MSK;
+         gic->vps[i].pend        = 0x0;
+         /* PERFCNT, TIMER and WD not implemented */
+@@ -485,9 +486,9 @@ static void mips_gic_realize(DeviceState *dev, Error **errp)
+     }
+     s->gic_timer = mips_gictimer_init(s, s->num_vps, gic_timer_expire_cb);
+     qdev_init_gpio_in(dev, gic_set_irq, s->num_irq);
+-    if (s->timer_routable) {
+-        qdev_init_gpio_in_named(dev, gic_cpu_timer, "timer", s->num_vps);
+-        for (i = 0; i < s->num_vps; i++) {
++    qdev_init_gpio_in_named(dev, gic_cpu_timer, "timer", s->num_vps);
++    for (i = 0; i < s->num_vps; i++) {
++        if (s->timer_routable & BIT(i)) {
+             s->vps[i].env->timer_irq = qdev_get_gpio_in_named(dev, "timer", i);
+         }
+     }
+@@ -499,7 +500,7 @@ static void mips_gic_realize(DeviceState *dev, Error **errp)
+ static const Property mips_gic_properties[] = {
+     DEFINE_PROP_UINT32("num-vp", MIPSGICState, num_vps, 1),
+     DEFINE_PROP_UINT32("num-irq", MIPSGICState, num_irq, 256),
+-    DEFINE_PROP_BOOL("timer-routable", MIPSGICState, timer_routable, false),
++    DEFINE_PROP_UINT32("timer-routable", MIPSGICState, timer_routable, 0),
+ };
+ 
+ static void mips_gic_class_init(ObjectClass *klass, const void *data)
+diff --git a/hw/mips/cps.c b/hw/mips/cps.c
+index b7a844b..c72b74c 100644
+--- a/hw/mips/cps.c
++++ b/hw/mips/cps.c
+@@ -153,7 +153,7 @@ static void mips_cps_realize(DeviceState *dev, Error **errp)
+                             &error_abort);
+     object_property_set_uint(OBJECT(&s->gic), "num-irq", MIN(s->num_irq, 128),
+                             &error_abort);
+-    object_property_set_bool(OBJECT(&s->gic), "timer-routable",
++    object_property_set_uint(OBJECT(&s->gic), "timer-routable",
+                              s->gic_timer_routable, &error_abort);
+     if (!sysbus_realize(SYS_BUS_DEVICE(&s->gic), errp)) {
+         return;
+@@ -189,8 +189,8 @@ static void mips_cps_realize(DeviceState *dev, Error **errp)
+ static const Property mips_cps_properties[] = {
+     DEFINE_PROP_UINT32("num-vp", MIPSCPSState, num_vp, 1),
+     DEFINE_PROP_UINT32("vp-per-core", MIPSCPSState, vp_per_core, 0),
+-    DEFINE_PROP_BOOL("gic-timer-routable", MIPSCPSState, gic_timer_routable,
+-                     false),
++    DEFINE_PROP_UINT32("gic-timer-routable", MIPSCPSState, gic_timer_routable,
++                       0),
+     DEFINE_PROP_UINT32("num-irq", MIPSCPSState, num_irq, 256),
+     DEFINE_PROP_INT32("gcr-rev", MIPSCPSState, gcr_rev, 0x800),
+     DEFINE_PROP_STRING("cpu-type", MIPSCPSState, cpu_type),
+diff --git a/hw/mips/mt7621.c b/hw/mips/mt7621.c
+index a15136d..5572222 100644
+--- a/hw/mips/mt7621.c
++++ b/hw/mips/mt7621.c
+@@ -987,11 +987,14 @@ static void mt7621_init(MachineState *machine)
+     object_property_set_uint(OBJECT(&b->cps), "vp-per-core",
+                              machine->smp.cpus > 1 ? 2 : 0, &error_fatal);
+     /*
+-     * the 1004K timer interrupts are GIC local interrupts (masked until
+-     * Linux maps them), not wired to IP7: Linux unmasks IP2..7 on the
+-     * secondary VPEs, whose CP0 Compare it never sets
++     * The CP0 timer of the first VPE is wired to its IP7 (bootloaders use
++     * it: Breed's scheduler), those of the others are GIC local interrupts
++     * (masked until an OS maps them): on the chip Linux gets no IP7 timer
++     * interrupts on its secondary CPUs, though it unmasks IP2..7 there and
++     * never sets their Compare
+      */
+-    object_property_set_bool(OBJECT(&b->cps), "gic-timer-routable", true,
++    object_property_set_uint(OBJECT(&b->cps), "gic-timer-routable",
++                             ((1u << machine->smp.cpus) - 1) & ~1u,
+                              &error_fatal);
+     object_property_set_int(OBJECT(&b->cps), "gcr-rev", 0x600, &error_fatal);
+     /* 64 shared interrupts (Breed checks GIC_SH_CONFIG) */
+diff --git a/include/hw/intc/mips_gic.h b/include/hw/intc/mips_gic.h
+index 708a11b..31db277 100644
+--- a/include/hw/intc/mips_gic.h
++++ b/include/hw/intc/mips_gic.h
+@@ -215,10 +215,10 @@ struct MIPSGICState {
+     uint32_t num_vps;
+     uint32_t num_irq;
+     /*
+-     * The CPUs' CP0 timer interrupts are GIC inputs (local TIMER, Vx_CTL
+-     * TIMER_ROUTABLE, Vx_TIMER_MAP), as in a CPS with a GIC
++     * VPs (bit mask) whose CP0 timer interrupt is a GIC input (local TIMER,
++     * Vx_CTL TIMER_ROUTABLE, Vx_TIMER_MAP) instead of their IP[IPTI]
+      */
+-    bool timer_routable;
++    uint32_t timer_routable;
+ };
+ 
+ #endif /* MIPS_GIC_H */
+diff --git a/include/hw/mips/cps.h b/include/hw/mips/cps.h
+index 6e972d1..1f0763b 100644
+--- a/include/hw/mips/cps.h
++++ b/include/hw/mips/cps.h
+@@ -37,7 +37,7 @@ struct MIPSCPSState {
+ 
+     uint32_t num_vp;
+     uint32_t vp_per_core;       /* MT ASE cores of that many VPEs, 0: VPs */
+-    bool gic_timer_routable;    /* CP0 timer interrupts through the GIC */
++    uint32_t gic_timer_routable; /* VPs: CP0 timer interrupt via the GIC */
+     int32_t gcr_rev;
+     uint32_t num_irq;
+     char *cpu_type;
+-- 
+2.47.3
+

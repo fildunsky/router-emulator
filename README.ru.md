@@ -341,8 +341,8 @@ tools/prepare-nand.sh --nor-nand openwrt-one openwrt_one 25.12.5
 U-Boot и OpenWrt; NAND-платы грузятся через BootROM для NAND (stage1 с
 инициализацией DDR — в заблокированный L2, затем загрузчик). Эмулируется: MIPS 1004Kc, 2 ядра × 2 VPE (MT ASE: 4 CPU в Linux,
 chip ID MT7621A; `-smp 2` — одно ядро, MT7621S; `-smp 1`), CM/GIC/CPC
-(ядра включает CPC, VPE — код MT ASE; таймеры CP0 — локальные
-прерывания GIC), DRAM 128/256/512 МБ (выше 448 МБ — по
+(ядра включает CPC, VPE — код MT ASE; таймер CP0 первого VPE —
+на его IP7, остальных — через GIC), DRAM 128/256/512 МБ (выше 448 МБ — по
 `0x20000000`, как у SoC), SPI-контроллер + SPI-NOR, UART, Frame Engine
 (QDMA/PDMA, NETSYS v1) с коммутатором MT7530 (MCM), xHCI (USB 3.0 + 2.0),
 GPIO с кнопками и светодиодами, PCIe-хост (три корневых порта,
