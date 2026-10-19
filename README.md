@@ -174,7 +174,7 @@ routers use; saving from the editor drops `;` comments).
 | Xiaomi Mi Router 3G (stock U-Boot) (**MT7621A**, MIPS) | 1G WAN + 2×1G LAN MT7530; Wi-Fi MT7603E + MT7612E on PCIe (radio silent) | DDR3 256 MB | **parallel NAND 128 MB** (Xiaomi layout) | 3.0 | stock Xiaomi U-Boot 1.1.3 + OpenWrt |
 | Xiaomi Mi Router 3G (Breed) (**MT7621A**, MIPS) | as above | DDR3 256 MB | **parallel NAND 128 MB** (Xiaomi layout) | 3.0 | Breed 1.2 + OpenWrt |
 | Xiaomi Mi Router 4 (stock U-Boot) (**MT7621A**, MIPS) | 1G WAN (MT7530 PHY 4 muxed to GMAC1) + 2×1G LAN MT7530; Wi-Fi MT7603E + MT7612E on PCIe (radio silent) | DDR3 128 MB | **parallel NAND 128 MB** (Xiaomi layout) | 3.2 | stock Xiaomi U-Boot 1.1.3 + OpenWrt |
-| Cudy WR1300S (**MT7621A**, MIPS) | 1G WAN (MT7530 PHY 0 muxed to GMAC1) + 4×1G LAN MT7530; Wi-Fi MT7603E on PCIe (radio silent; the MT7663 5 GHz card is not emulated) | DDR3 128 MB | **SPI-NOR 16 MB** | 3.3 | stock Cudy U-Boot 1.1.3 + OpenWrt 25.12.5 (third-party build, the board is not in OpenWrt yet) |
+| Cudy WR1300S (**MT7621A**, MIPS) | 1G WAN (MT7530 PHY 0 muxed to GMAC1) + 4×1G LAN MT7530; Wi-Fi MT7603E + MT7663E (MT7613BE) on PCIe (radio silent) | DDR3 128 MB | **SPI-NOR 16 MB** | 3.3 | stock Cudy U-Boot 1.1.3 + OpenWrt 25.12.5 (third-party build, the board is not in OpenWrt yet) |
 
 Netis boards have no bdinfo partition (FIP at 0x380000, ubi at 0x580000;
 MACs in Factory): presets set `openwrt-no-bdinfo=1`. The MT7986 boards use
@@ -348,7 +348,8 @@ SoC), SPI controller + SPI-NOR, UART, Frame Engine (QDMA/PDMA, NETSYS v1)
 with the MT7530 switch (MCM), xHCI (USB 3.0 + 2.0), GPIO with buttons and
 LEDs, the PCIe host (three root ports, `pcie0..2=CARD`) with "radio
 silent" Wi-Fi cards for the unmodified mt76 drivers: `mt7603e` (MT7603E,
-2.4 GHz) and `mt7612e` (MT7612E, 5 GHz) load their firmware, hostapd
+2.4 GHz), `mt7612e` (MT7612E, 5 GHz) and `mt7663e` (MT7663E / MT7613BE,
+5 GHz, driver mt7615e: ROM patch and N9 firmware) load their firmware, hostapd
 runs, nothing goes on the air; a card without an EEPROM in flash gets a
 minimal one from its eFuse with the MAC 80:af:ca:11:22:35 + slot; the
 parallel NAND (NFI + ECC, PIO, `flash=nand`, `nand-id=`); the DRAMC's

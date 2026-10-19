@@ -1,0 +1,420 @@
+From 5a37868d36a55e3a3199b222f50fe26f23a371fc Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Mon, 19 Oct 2026 12:47:26 -0400
+Subject: [PATCH 46/46] hw/mips: MediaTek MT7663E Wi-Fi card, radio silent
+
+PCIe card model for the unmodified mt7615e driver (MT7663 / MT7613BE,
+2x2 802.11ac, 2.4 / 5 GHz; Cudy WR1300 v2 / v3, WR1300S): chip ID, the
+PCIe remap window, eFuse with a minimal EEPROM, driver / firmware own,
+N9 ready, WPDMA rings with an event for every MCU command (patch
+semaphore taken / released, firmware scatter unanswered).  The ROM patch
+and N9 firmware load, hostapd runs; nothing goes on the air.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012GbUcwR34gg9RgGTEtNN6J
+---
+ hw/mips/meson.build   |   2 +-
+ hw/mips/mt7663_wifi.c | 378 ++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 379 insertions(+), 1 deletion(-)
+ create mode 100644 hw/mips/mt7663_wifi.c
+
+diff --git a/hw/mips/meson.build b/hw/mips/meson.build
+index f350efb..c8cfc8d 100644
+--- a/hw/mips/meson.build
++++ b/hw/mips/meson.build
+@@ -12,7 +12,7 @@ mips_ss.add(when: 'CONFIG_MIPSSIM', if_true: files('mipssim.c'))
+ mips_ss.add(when: 'CONFIG_FULOONG', if_true: files('fuloong2e.c'))
+ mips_ss.add(when: 'CONFIG_MIPS_BOSTON', if_true: files('boston.c'))
+ mips_ss.add(when: 'CONFIG_MT7621_ROUTER', if_true: files('mt7621.c', 'mt7621_nand.c', 'mt7621_pcie.c',
+-  'mt76x2_wifi.c', 'mt7603_wifi.c',
++  'mt76x2_wifi.c', 'mt7603_wifi.c', 'mt7663_wifi.c',
+   '../arm/filogic/spinor.c', '../arm/filogic/mtk_eth.c',
+   '../arm/filogic/mtk_pinctrl.c', '../arm/filogic/filogic_leds.c',
+   '../arm/filogic/ws2812b.c', '../arm/filogic/hc595.c'))
+diff --git a/hw/mips/mt7663_wifi.c b/hw/mips/mt7663_wifi.c
+new file mode 100644
+index 0000000..cd31c75
+--- /dev/null
++++ b/hw/mips/mt7663_wifi.c
+@@ -0,0 +1,378 @@
++/*
++ * MediaTek MT7663E (802.11ac 2x2, 2.4 / 5 GHz) PCIe card - "radio silent"
++ * model, e.g. the MT7613BE of the Cudy WR1300 v2 / v3 and WR1300S.
++ *
++ * Enough of the chip for the unmodified mt7615e driver: chip ID and
++ * revision, the PCIe remap window into the chip address space (a sparse
++ * register file), eFuse (a minimal EEPROM: chip ID, MAC, 2x2, TX power)
++ * for boards without one in flash, driver / firmware ownership and the N9
++ * ready flag, and the WPDMA rings: every MCU command but the firmware
++ * scatter gets an event with its sequence number on RX ring 1 (the patch
++ * semaphore answered as taken / released), firmware start sets "N9
++ * ready", TX frames are completed.  Nothing goes on the air.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qapi/error.h"
++#include "hw/pci/pci_device.h"
++#include "hw/pci/pcie.h"
++#include "hw/qdev-properties.h"
++#include "system/dma.h"
++#include "net/net.h"
++
++#define TYPE_MT7663_WIFI "mt7663e"
++OBJECT_DECLARE_SIMPLE_TYPE(Mt7663State, MT7663_WIFI)
++
++#define BAR0_SIZE       0x100000
++#define R_HW_REV        0x2000
++#define R_HW_CHIPID     0x2008
++#define R_INT_SOURCE    0x4200
++#define R_INT_MASK      0x4204
++#define R_WPDMA_GLO     0x4208
++#define R_WPDMA_RST     0x420c
++#define R_TX_RING       0x4300
++#define R_RX_RING       0x4400
++#define R_LPCTL         0x7000          /* CONN_HIF_ON_LPCTL */
++#define  LPCR_FW_OWN    BIT(0)
++#define  LPCR_DRV_OWN   BIT(1)
++#define R_REMAP_2       0x700c          /* chip address bits 31:16 */
++#define R_WTBL_UPDATE   0x29830
++#define  WTBL_BUSY      BIT(31)
++#define WIN_2           0x90000
++#define WIN_2_SIZE      0x10000
++#define R_CONN_ON_MISC  0xc1140
++#define  FW_N9_RDY      BIT(2)
++
++#define EFUSE_BASE      0x78011000u     /* chip address */
++#define EFUSE_CTRL      0x008
++#define  EFUSE_KICK     BIT(30)
++#define  EFUSE_VALID    BIT(29)
++#define EFUSE_RDATA     0x030
++
++#define NTXQ            16
++#define NRXQ            2
++#define FWDL_TXQ        3
++#define MCU_TXQ         15
++#define MCU_RXQ         1
++#define EEPROM_SIZE     1536
++
++/* MCU TXD (64 bytes: 32 of TXD, then len, pq_id, cid, ..., seq at 39) */
++#define TXD_CID         36
++#define TXD_SEQ         39
++#define TXD_SIZE        64
++/* MCU RXD (28 bytes: 16 of RXD, then len, pkt_type_id, eid, seq, ...) */
++#define RXD_SIZE        28
++
++#define CMD_FW_START    0x02
++#define CMD_PATCH_SEM   0x10
++#define CMD_FW_SCATTER  0xee
++#define EVENT_GENERIC   0x01
++#define PATCH_NOT_DL_SEM_SUCCESS 2
++#define PATCH_REL_SEM_SUCCESS    3
++
++#define DMA_DONE        BIT(31)
++#define LAST_SEC0       BIT(30)
++
++struct Mt7663State {
++    PCIDevice parent_obj;
++
++    MemoryRegion bar0;
++    uint32_t r[BAR0_SIZE / 4];          /* direct registers */
++    GHashTable *chip;                   /* chip address -> value */
++    uint8_t eeprom[EEPROM_SIZE];
++    MACAddr mac;
++};
++
++static void update_irq(Mt7663State *s)
++{
++    pci_set_irq(PCI_DEVICE(s),
++                !!(s->r[R_INT_SOURCE / 4] & s->r[R_INT_MASK / 4]));
++}
++
++static void raise_irq(Mt7663State *s, uint32_t bits)
++{
++    s->r[R_INT_SOURCE / 4] |= bits;
++    update_irq(s);
++}
++
++static void eeprom_init(Mt7663State *s)
++{
++    memset(s->eeprom, 0xff, sizeof(s->eeprom));
++    stw_le_p(s->eeprom + 0x00, 0x7663);
++    stw_le_p(s->eeprom + 0x02, 0x0001);
++    memcpy(s->eeprom + 0x04, s->mac.a, 6);
++    s->eeprom[0x34] = 0x22;             /* NIC_CONF_0: 2 TX, 2 RX paths */
++    s->eeprom[0x35] = 0x00;
++    s->eeprom[0x36] = 0x00;             /* NIC_CONF_1: no TSSI */
++    s->eeprom[0x37] = 0x00;
++    /* TX power: target 0x20 per chain (2 GHz, 5 GHz group 0), offsets 0 */
++    s->eeprom[0x0e3] = 0x20;
++    s->eeprom[0x0e4] = 0x20;
++    memset(s->eeprom + 0x245, 0x20, 8);
++    memset(s->eeprom + 0x2b5, 0x20, 8);
++    memset(s->eeprom + 0x089, 0, 16);
++}
++
++/* BAR0 offset in the remap window -> chip address */
++static uint32_t chip_addr(Mt7663State *s, hwaddr off)
++{
++    return (s->r[R_REMAP_2 / 4] & 0xffff0000) + (off - WIN_2);
++}
++
++static uint32_t chip_get(Mt7663State *s, uint32_t a)
++{
++    return GPOINTER_TO_UINT(g_hash_table_lookup(s->chip,
++                                                GUINT_TO_POINTER(a)));
++}
++
++static void chip_set(Mt7663State *s, uint32_t a, uint32_t v)
++{
++    g_hash_table_insert(s->chip, GUINT_TO_POINTER(a), GUINT_TO_POINTER(v));
++}
++
++static void efuse_kick(Mt7663State *s, uint32_t ctrl)
++{
++    uint32_t a = ((ctrl >> 16) & 0x3ff) & ~0xf;
++
++    /* AIN holds 10 bits: the upper half of the 1536 bytes reads blank */
++    for (int i = 0; i < 4; i++) {
++        chip_set(s, EFUSE_BASE + EFUSE_RDATA + 4 * i,
++                 a + 16 <= EEPROM_SIZE ? ldl_le_p(s->eeprom + a + 4 * i)
++                                       : 0xffffffff);
++    }
++    chip_set(s, EFUSE_BASE + EFUSE_CTRL,
++             (ctrl & ~(EFUSE_KICK | 0x3f)) | EFUSE_VALID);
++}
++
++static uint32_t *ring(Mt7663State *s, hwaddr base, int q)
++{
++    return &s->r[(base + q * 0x10) / 4];
++}
++
++/* event answering MCU command seq: RX descriptor type 7 (RX_EVENT) */
++static void mcu_event(Mt7663State *s, uint8_t seq, uint8_t status,
++                      uint32_t data)
++{
++    uint32_t *rq = ring(s, R_RX_RING, MCU_RXQ);
++    uint32_t size = rq[1], didx = rq[3], desc[4];
++    uint8_t ev[RXD_SIZE + 16] = { 0 };
++    dma_addr_t d;
++
++    if (!rq[0] || !size || didx == rq[2] % size) {
++        return;
++    }
++    stw_le_p(ev + 0, sizeof(ev));
++    stw_le_p(ev + 2, 7 << 13);          /* PKT_TYPE_RX_EVENT */
++    stw_le_p(ev + 16, sizeof(ev) - 16);
++    ev[20] = EVENT_GENERIC;
++    ev[21] = seq;
++    ev[24] = status;                    /* e.g. the patch semaphore */
++    stl_le_p(ev + RXD_SIZE, data);      /* first word of the payload */
++    d = rq[0] + didx * 16;
++    pci_dma_read(PCI_DEVICE(s), d, desc, sizeof(desc));
++    pci_dma_write(PCI_DEVICE(s), le32_to_cpu(desc[0]), ev, sizeof(ev));
++    desc[1] = cpu_to_le32(DMA_DONE | LAST_SEC0 | (sizeof(ev) << 16));
++    desc[3] = 0;
++    pci_dma_write(PCI_DEVICE(s), d, desc, sizeof(desc));
++    rq[3] = (didx + 1) % size;
++    raise_irq(s, BIT(MCU_RXQ));
++}
++
++static void mcu_command(Mt7663State *s, dma_addr_t buf)
++{
++    uint8_t txd[TXD_SIZE + 4];
++    uint8_t status = 0;
++    uint32_t data = 0;
++
++    pci_dma_read(PCI_DEVICE(s), buf, txd, sizeof(txd));
++    switch (txd[TXD_CID]) {
++    case CMD_FW_SCATTER:
++        return;                         /* firmware data: no answer */
++    case CMD_FW_START:
++        s->r[R_CONN_ON_MISC / 4] |= FW_N9_RDY;
++        break;
++    case CMD_PATCH_SEM:
++        /* request: op 1 = get, 0 = release */
++        status = ldl_le_p(txd + TXD_SIZE) ? PATCH_NOT_DL_SEM_SUCCESS
++                                          : PATCH_REL_SEM_SUCCESS;
++        break;
++    }
++    if (txd[TXD_CID] == 0xed && txd[TXD_CID + 5] == 0x2c) {
++        data = 45;                      /* THERMAL_CTRL: 45 degrees C */
++    }
++    mcu_event(s, txd[TXD_SEQ], status, data);
++}
++
++static void tx_kick(Mt7663State *s, int q)
++{
++    uint32_t *tq = ring(s, R_TX_RING, q);
++    uint32_t size = tq[1];
++
++    if (!tq[0] || !size) {
++        return;
++    }
++    while (tq[3] != tq[2] % size) {
++        dma_addr_t d = tq[0] + tq[3] * 16;
++        uint32_t desc[4];
++
++        pci_dma_read(PCI_DEVICE(s), d, desc, sizeof(desc));
++        desc[1] |= cpu_to_le32(DMA_DONE);
++        pci_dma_write(PCI_DEVICE(s), d + 4, &desc[1], 4);
++        if (q == MCU_TXQ || q == FWDL_TXQ) {
++            mcu_command(s, le32_to_cpu(desc[0]));
++        }
++        tq[3] = (tq[3] + 1) % size;
++    }
++    raise_irq(s, BIT(q + 4));
++}
++
++static uint64_t bar0_read(void *opaque, hwaddr off, unsigned size)
++{
++    Mt7663State *s = opaque;
++
++    if (off >= WIN_2 && off < WIN_2 + WIN_2_SIZE) {
++        uint32_t a = chip_addr(s, off);
++
++        if (a == EFUSE_BASE) {
++            return 0;                   /* BASE_CTRL: eFuse not empty */
++        }
++        return chip_get(s, a);
++    }
++    switch (off) {
++    case R_HW_CHIPID:
++        return 0x7663;
++    case R_HW_REV:
++        return 0x11;
++    case R_WPDMA_GLO:
++        return s->r[off / 4] & ~(BIT(1) | BIT(3));      /* never busy */
++    case R_WTBL_UPDATE:
++        return s->r[off / 4] & ~WTBL_BUSY;
++    }
++    return s->r[off / 4];
++}
++
++static void bar0_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
++{
++    Mt7663State *s = opaque;
++    uint32_t v = val;
++
++    if (off >= WIN_2 && off < WIN_2 + WIN_2_SIZE) {
++        uint32_t a = chip_addr(s, off);
++
++        if (a == EFUSE_BASE + EFUSE_CTRL && (v & EFUSE_KICK)) {
++            efuse_kick(s, v);
++            return;
++        }
++        chip_set(s, a, v);
++        return;
++    }
++    switch (off) {
++    case R_INT_SOURCE:
++        s->r[off / 4] &= ~v;
++        update_irq(s);
++        return;
++    case R_INT_MASK:
++        s->r[off / 4] = v;
++        update_irq(s);
++        return;
++    case R_WPDMA_RST:
++        for (int q = 0; q < NTXQ; q++) {
++            if (v & BIT(q)) {
++                ring(s, R_TX_RING, q)[3] = 0;
++            }
++        }
++        for (int q = 0; q < NRXQ; q++) {
++            if (v & BIT(16 + q)) {
++                ring(s, R_RX_RING, q)[3] = 0;
++            }
++        }
++        return;
++    case R_LPCTL:
++        /* driver / firmware own: done at once */
++        if (v & LPCR_DRV_OWN) {
++            s->r[off / 4] &= ~LPCR_FW_OWN;
++        } else if (v & LPCR_FW_OWN) {
++            s->r[off / 4] |= LPCR_FW_OWN;
++        }
++        return;
++    }
++    s->r[off / 4] = v;
++    if (off >= R_TX_RING && off < R_TX_RING + NTXQ * 0x10 &&
++        (off & 0xf) == 8) {
++        tx_kick(s, (off - R_TX_RING) / 0x10);
++    }
++}
++
++static const MemoryRegionOps bar0_ops = {
++    .read = bar0_read,
++    .write = bar0_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 4, .max_access_size = 4 },
++};
++
++static void mt7663_reset(DeviceState *dev)
++{
++    Mt7663State *s = MT7663_WIFI(dev);
++
++    memset(s->r, 0, sizeof(s->r));
++    g_hash_table_remove_all(s->chip);
++    s->r[R_LPCTL / 4] = LPCR_FW_OWN;    /* the firmware owns the chip */
++    update_irq(s);
++}
++
++static void mt7663_realize(PCIDevice *pd, Error **errp)
++{
++    Mt7663State *s = MT7663_WIFI(pd);
++
++    pd->config[PCI_INTERRUPT_PIN] = 1;
++    if (pcie_endpoint_cap_init(pd, 0x80) < 0) {
++        error_setg(errp, "mt7663e: PCIe capability");
++        return;
++    }
++    s->chip = g_hash_table_new(g_direct_hash, g_direct_equal);
++    memory_region_init_io(&s->bar0, OBJECT(s), &bar0_ops, s, "mt7663e",
++                          BAR0_SIZE);
++    pci_register_bar(pd, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bar0);
++    eeprom_init(s);
++}
++
++static const Property mt7663_props[] = {
++    DEFINE_PROP_MACADDR("mac", Mt7663State, mac),
++};
++
++static void mt7663_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
++
++    k->realize = mt7663_realize;
++    k->vendor_id = 0x14c3;
++    k->device_id = 0x7663;
++    k->class_id = PCI_CLASS_NETWORK_OTHER;
++    device_class_set_legacy_reset(dc, mt7663_reset);
++    device_class_set_props(dc, mt7663_props);
++    dc->desc = "MediaTek MT7663E Wi-Fi (radio silent)";
++    set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
++}
++
++static const TypeInfo mt7663_info = {
++    .name = TYPE_MT7663_WIFI,
++    .parent = TYPE_PCI_DEVICE,
++    .instance_size = sizeof(Mt7663State),
++    .class_init = mt7663_class_init,
++    .interfaces = (const InterfaceInfo[]) {
++        { INTERFACE_PCIE_DEVICE },
++        { }
++    },
++};
++
++static void mt7663_register_types(void)
++{
++    type_register_static(&mt7663_info);
++}
++
++type_init(mt7663_register_types)
+-- 
+2.47.3
+

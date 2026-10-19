@@ -1,0 +1,56 @@
+From 9f210a22c953139b24d9c6904643c8e535a887e2 Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Mon, 19 Oct 2026 12:47:26 -0400
+Subject: [PATCH 45/46] hw/mips/mt7621: flush the other CPUs' TLBs in their own
+ thread
+
+l2_flush_tlbs() (L2 lines locked / unlocked by a CACHE op) called
+tlb_flush() on every CPU from the calling CPU's thread.  tlb_flush() is
+for the calling CPU only: on another running CPU it races with that CPU's
+own lookups, and a code fetch then reads a half-cleared TLB entry (addend
+-1): "Bad ram pointer 0x...fff" and an abort, about 1 in 100 boots of the
+OpenWrt U-Boot of the ZBT-WG3526.  Flush the others with
+async_run_on_cpu().
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012GbUcwR34gg9RgGTEtNN6J
+---
+ hw/mips/mt7621.c | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/hw/mips/mt7621.c b/hw/mips/mt7621.c
+index e687988..853e044 100644
+--- a/hw/mips/mt7621.c
++++ b/hw/mips/mt7621.c
+@@ -460,12 +460,27 @@ static int l2_find(MT7621Board *b, uint32_t page)
+     return -1;
+ }
+ 
++static void l2_flush_work(CPUState *cs, run_on_cpu_data data)
++{
++    tlb_flush(cs);
++}
++
++/*
++ * The locked pages changed: every CPU's TLB.  tlb_flush() only for the
++ * calling CPU (or before the CPUs run); the others flush in their own
++ * thread - flushing another running CPU's TLB from here races with its
++ * lookups (a code fetch then reads a half-cleared entry: "Bad ram pointer").
++ */
+ static void l2_flush_tlbs(void)
+ {
+     CPUState *cs;
+ 
+     CPU_FOREACH(cs) {
+-        tlb_flush(cs);
++        if (!current_cpu || cs == current_cpu) {
++            tlb_flush(cs);
++        } else {
++            async_run_on_cpu(cs, l2_flush_work, RUN_ON_CPU_NULL);
++        }
+     }
+ }
+ 
+-- 
+2.47.3
+

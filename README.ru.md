@@ -178,7 +178,7 @@ WS2812B, 74HC595, PWM), GPIO
 | Xiaomi Mi Router 3G (стоковый U-Boot) (**MT7621A**, MIPS) | 1G WAN + 2×1G LAN MT7530; Wi-Fi MT7603E + MT7612E на PCIe («радиомолчащие») | DDR3 256 МБ | **параллельный NAND 128 МБ** (разметка Xiaomi) | 3.0 | стоковый U-Boot 1.1.3 Xiaomi + OpenWrt |
 | Xiaomi Mi Router 3G (Breed) (**MT7621A**, MIPS) | так же | DDR3 256 МБ | **параллельный NAND 128 МБ** (разметка Xiaomi) | 3.0 | Breed 1.2 + OpenWrt |
 | Xiaomi Mi Router 4 (стоковый U-Boot) (**MT7621A**, MIPS) | 1G WAN (PHY 4 MT7530 напрямую на GMAC1) + 2×1G LAN MT7530; Wi-Fi MT7603E + MT7612E на PCIe («радиомолчащие») | DDR3 128 МБ | **параллельный NAND 128 МБ** (разметка Xiaomi) | 3.2 | стоковый U-Boot 1.1.3 Xiaomi + OpenWrt |
-| Cudy WR1300S (**MT7621A**, MIPS) | 1G WAN (PHY 0 MT7530 напрямую на GMAC1) + 4×1G LAN MT7530; Wi-Fi MT7603E на PCIe («радиомолчащая»; карта MT7663 на 5 ГГц не эмулируется) | DDR3 128 МБ | **SPI-NOR 16 МБ** | 3.3 | стоковый U-Boot 1.1.3 Cudy + OpenWrt 25.12.5 (сторонняя сборка, платы ещё нет в OpenWrt) |
+| Cudy WR1300S (**MT7621A**, MIPS) | 1G WAN (PHY 0 MT7530 напрямую на GMAC1) + 4×1G LAN MT7530; Wi-Fi MT7603E + MT7663E (MT7613BE) на PCIe («радиомолчащие») | DDR3 128 МБ | **SPI-NOR 16 МБ** | 3.3 | стоковый U-Boot 1.1.3 Cudy + OpenWrt 25.12.5 (сторонняя сборка, платы ещё нет в OpenWrt) |
 
 У плат Netis нет раздела bdinfo (FIP с 0x380000, ubi с 0x580000; MAC — в
 Factory): в пресетах стоит `openwrt-no-bdinfo=1`. У плат на MT7986 та же
@@ -350,8 +350,9 @@ chip ID MT7621A; `-smp 2` — одно ядро, MT7621S; `-smp 1`), CM/GIC/CPC
 (QDMA/PDMA, NETSYS v1) с коммутатором MT7530 (MCM), xHCI (USB 3.0 + 2.0),
 GPIO с кнопками и светодиодами, PCIe-хост (три корневых порта,
 `pcie0..2=КАРТА`) с «радиомолчащими» Wi-Fi-картами для неизменённых
-драйверов mt76: `mt7603e` (MT7603E, 2,4 ГГц) и `mt7612e` (MT7612E, 5 ГГц)
-загружают прошивку, hostapd работает, в эфир ничего не уходит; карта без
+драйверов mt76: `mt7603e` (MT7603E, 2,4 ГГц), `mt7612e` (MT7612E, 5 ГГц) и
+`mt7663e` (MT7663E / MT7613BE, 5 ГГц, драйвер mt7615e: ROM-патч и прошивка
+N9) загружают прошивку, hostapd работает, в эфир ничего не уходит; карта без
 EEPROM во флеше получает минимальный из eFuse с MAC 80:af:ca:11:22:35 +
 номер слота; параллельный NAND (NFI + ECC, PIO, `flash=nand`,
 `nand-id=`); программный тестовый движок DRAMC, так что вендорский stage1,

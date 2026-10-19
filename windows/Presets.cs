@@ -398,7 +398,8 @@ namespace RouterEmulator
                 pcieSlot[i] = Combo(mips, L.F("ed.pcie_slot", "PCIe slot {0}:", i), ref my,
                     new Choice("none", L.T("ed.none", "None")),
                     new Choice("mt7603e", "MediaTek MT7603E (2.4 GHz)"),
-                    new Choice("mt7612e", "MediaTek MT7612E (5 GHz)"));
+                    new Choice("mt7612e", "MediaTek MT7612E (5 GHz)"),
+                    new Choice("mt7663e", "MediaTek MT7663E / MT7613BE (5 GHz)"));
             mips.Controls.Add(new Label { Left = 140, Top = my - 6, Width = 460, Height = 32, ForeColor = Color.DimGray,
                 Text = L.T("ed.pcie_slot_hint", "Radio silent: the driver, firmware and hostapd run, nothing is on the air. "
                      + "The card's EEPROM comes from the factory partition (or its eFuse).") });
@@ -782,6 +783,7 @@ namespace RouterEmulator
                 foreach (var c in pcieSlot) {
                     if (Val(c) == "mt7603e") cards.Add("MT7603E 2.4 GHz");
                     if (Val(c) == "mt7612e") cards.Add("MT7612E 5 GHz");
+                    if (Val(c) == "mt7663e") cards.Add("MT7663E 5 GHz");
                 }
                 if (cards.Count > 0) parts.Add("Wi-Fi " + string.Join(" + ", cards.ToArray()) + " on PCIe (radio silent)");
             }
