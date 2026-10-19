@@ -8,13 +8,14 @@
 # Environment:
 #   JOBS=N                parallel build jobs (default: ninja's choice)
 #   CONFIGURE_ARGS="..."  extra arguments for QEMU's configure
-#   PGO=1                 profile-guided optimisation (GCC): an instrumented
+#   PGO_NAND=DIR          profile-guided optimisation (GCC): an instrumented
 #                         qemu-system-aarch64 (src/qemu/build-pgo-gen) boots
-#                         the flash folder PGO_NAND (default nand-wr3000p,
+#                         the WR3000P flash folder DIR (e.g. nand-wr3000p from
 #                         tools/prepare-nand.sh cudy_wr3000p-v1 ...) through
 #                         tools/pgo-train.py, then src/qemu/build is rebuilt
-#                         with that profile; later runs without PGO=1 keep
-#                         it (rm -rf src/qemu/build drops it)
+#                         with that profile; later runs without PGO_NAND keep
+#                         it (rm -rf src/qemu/build drops it).  Not PGO=1:
+#                         build-windows.sh uses that for its own PGO step
 #
 # libslirp and libfdt are taken from the system when their development
 # files are installed; otherwise QEMU's own meson subprojects (libslirp,
@@ -48,6 +49,8 @@ if [ ! -d src/qemu/.git ]; then
     mkdir -p src
     git clone --depth 1 --branch v10.1.0 https://gitlab.com/qemu-project/qemu.git src/qemu
 fi
+# the flash folder relative to the directory build.sh was started in
+[ -n "$PGO_NAND" ] && PGO_NAND=$(cd "$OLDPWD" && readlink -f "$PGO_NAND")
 cd src/qemu
 if ! git rev-parse -q --verify mt7981 >/dev/null; then
     git checkout -b mt7981
@@ -64,11 +67,11 @@ fi
 # --enable-fdt=enabled: system libfdt if found, else the bundled dtc
 CONF=(--enable-slirp --enable-fdt=enabled --disable-docs --disable-werror
       $CONFIGURE_ARGS)
-if [ "${PGO:-0}" = 1 ]; then
-    cc -v 2>&1 | grep -q '^gcc version' || { echo "PGO=1 needs GCC as cc" >&2; exit 1; }
-    NAND=$(readlink -f "${PGO_NAND:-$ROOT/nand-wr3000p}")
+if [ -n "$PGO_NAND" ]; then
+    cc -v 2>&1 | grep -q '^gcc version' || { echo "PGO_NAND: PGO needs GCC as cc" >&2; exit 1; }
+    NAND=$PGO_NAND
     [ -f "$NAND/mt7981.mtd0.BL2.bin" ] ||
-        { echo "PGO=1: no flash folder $NAND (tools/prepare-nand.sh cudy_wr3000p-v1 25.12.5)" >&2; exit 1; }
+        { echo "PGO_NAND: no flash folder $NAND (tools/prepare-nand.sh cudy_wr3000p-v1 25.12.5)" >&2; exit 1; }
     # gcda files are named after the object paths relative to the build
     # directory (-fprofile-prefix-path), so the profile of build-pgo-gen
     # fits build; atomic counters: QEMU runs the guest CPUs in threads
