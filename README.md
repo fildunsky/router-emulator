@@ -92,6 +92,7 @@ no BL2 for it to try, reports welcome):
 | `reset-gpio`, `wps-gpio` | GPIO | buttons (QOM `/machine/pinctrl` `reset-button`, `wps-button`) |
 | `reset-active-high`, `wps-active-high` | `on` | button reads 1 when pressed (default: active low) |
 | `reset-hold` | ms | power on with reset held (U-Boot TFTP recovery) |
+| `pan` | `on` (default) · `off` | report PAN (Privileged Access Never) in the CPU ID registers. The A53 / A73 cores have none, so OpenWrt's kernel emulates it by switching TTBR0 on every system call, and under TCG each switch flushes the TLB; with `pan=on` the kernel uses the PAN that QEMU implements anyway, system calls get 2.5–3× faster and booting takes ~40 % less host CPU. `off`: the cores' own ID registers |
 | `poweroff` | `stop` · `reboot` | `stop` (default): the emulator ends when Linux powers off ("reboot: Power down" on UART0); `reboot`: like a real board, whose firmware cannot power down |
 | `gpio-log` | `on` | print GPIO output changes and the LEDs' states |
 | `led1` … `led32` | `NAME: COLOUR SOURCE [+ COLOUR SOURCE…]` | front panel LEDs (see below); `led-state` (QOM `/machine`) returns their states |
