@@ -212,6 +212,9 @@ namespace RouterEmulator
         // MT7621 boards: Wi-Fi cards in the three PCIe slots, data cache model
         ComboBox[] pcieSlot = new ComboBox[3];
         CheckBox dcache;
+        // the MT7621 tab is shown for that SoC only (after "Buttons")
+        TabControl tabs;
+        TabPage mipsPage, buttonsPage;
         ComboBox[] swPort = new ComboBox[5];
         NumericUpDown gmac0Rst, gmac1Rst, port5Rst, port5Addr, resetGpio, wpsGpio;
         CheckBox resetHigh, wpsHigh;
@@ -253,7 +256,7 @@ namespace RouterEmulator
 
             // hardware on tabs, so the window stays small
             // hardware on tabs, the most used settings on the first one
-            var tabs = new TabControl { Left = 10, Top = y, Width = 620, Height = 332 };
+            tabs = new TabControl { Left = 10, Top = y, Width = 620, Height = 332 };
             Controls.Add(tabs);
             var mem = Page(tabs, L.T("ed.tab_general", "General"));
             var eth = Page(tabs, "Ethernet");
@@ -362,6 +365,7 @@ namespace RouterEmulator
             };
             mem.Controls.Add(browse);
             var adv = Page(tabs, L.T("ed.buttons", "Buttons (GPIO numbers)"));
+            buttonsPage = adv;
             adv.Controls.Add(new Label { Left = 10, Top = 25, Width = 60, Text = L.T("ed.reset", "Reset:") });
             resetGpio = new NumericUpDown { Left = 70, Top = 22, Width = 55, Minimum = 0, Maximum = 100 };
             adv.Controls.Add(resetGpio);
@@ -384,6 +388,7 @@ namespace RouterEmulator
             poweroff.Left = 140;
             // MT7621 boards: PCIe Wi-Fi cards and the data cache model
             var mips = Page(tabs, "MT7621");
+            mipsPage = mips;
             int my = 22;
             for (int i = 0; i < 3; i++)
                 pcieSlot[i] = Combo(mips, L.F("ed.pcie_slot", "PCIe slot {0}:", i), ref my,
@@ -679,6 +684,10 @@ namespace RouterEmulator
             }
             foreach (var c in pcieSlot) c.Enabled = m;
             dcache.Enabled = m;
+            if (m && !tabs.TabPages.Contains(mipsPage))
+                tabs.TabPages.Insert(tabs.TabPages.IndexOf(buttonsPage) + 1, mipsPage);
+            else if (!m && tabs.TabPages.Contains(mipsPage))
+                tabs.TabPages.Remove(mipsPage);
             UpdateDesc();
         }
 
