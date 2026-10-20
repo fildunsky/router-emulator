@@ -1,0 +1,41 @@
+From 5548d384b663de2b997261db765cb370e12cf0a8 Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Tue, 20 Oct 2026 05:35:25 -0400
+Subject: [PATCH] hw/arm/filogic/mtk_wmac: WF top IP version 0x02060000 on
+ MT7981 too
+
+The mt7915 driver polls the WF top's IP version (0x184b0010) for
+0x02060000 before it starts the WM CPU and, right after, stores the a-die
+SKU in CONNINFRA_SKU_DEC.  The model answered MT7981 with the CONN_INFRA
+version 0x02090000 (and MT7986 with 0): the poll timed out silently,
+mt7986_wmac_enable() returned before the SKU update, the driver did not
+see the MT7976 a-die, read the TX power from the MT7915 EEPROM offsets
+and got 0: 3 dBm on a Cudy WR3000P.  Now 20 dBm as in its calibration.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hw/arm/filogic/mtk_wmac.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/hw/arm/filogic/mtk_wmac.c b/hw/arm/filogic/mtk_wmac.c
+index 75860dd..0d20af1 100644
+--- a/hw/arm/filogic/mtk_wmac.c
++++ b/hw/arm/filogic/mtk_wmac.c
+@@ -365,7 +365,13 @@ static uint64_t wmac_read(void *opaque, hwaddr addr, unsigned size)
+             v = s->sku ? rget(s->regs, a) : 0x02090000;     /* MT7981 */
+             break;
+         case WF_TOP_CFG_IP_VER:
+-            v = s->sku ? rget(s->regs, a) : 0x02090000;
++            /*
++             * the WF top's own IP version (MT7981 and MT7986 alike): the
++             * driver polls for it before the WM CPU starts and only then
++             * stores the a-die SKU (CONNINFRA_SKU_DEC) that selects the
++             * MT7976 EEPROM layout - with another value TX power reads 0
++             */
++            v = 0x02060000;
+             break;
+         case WF_TOP_ROMCODE_INDEX:
+             v = 0x1d1e;
+-- 
+2.47.3
+

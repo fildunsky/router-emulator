@@ -124,6 +124,8 @@ def wifi_eeprom(chip, mac):
     e[0x190] = (0 << 6) | (4 << 3) | 4
     e[0x191] = (1 << 6) | (4 << 3) | 4
     e[0x192] = e[0x193] = 4 << 5
+    e[0x441:0x445] = bytes([40] * 4)                # 20 dBm, 2.4 GHz
+    e[0x445:0x445 + 4 * 5] = bytes([40] * 20)       # 20 dBm, 5 GHz groups
     return e
 
 

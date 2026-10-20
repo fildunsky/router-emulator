@@ -527,14 +527,19 @@ def cmd_mt7621_nand(args):
 
 def wifi_eeprom(chip, mac):
     """Minimal MediaTek Wi-Fi EEPROM (mt7915 driver layout): chip ID, MAC,
-    band 0 = 2.4 GHz, band 1 = 5 GHz, 4 paths and streams each; no
-    calibration (the emulated radio never transmits)."""
+    band 0 = 2.4 GHz, band 1 = 5 GHz, 4 paths and streams each, a target
+    TX power of 20 dBm per path (MT7976 a-die layout); no calibration (the
+    emulated radio never transmits)."""
     e = bytearray(0x1000)
     e[0:2] = chip.to_bytes(2, "little")
     e[4:10] = mac
     e[0x190] = (0 << 6) | (4 << 3) | 4
     e[0x191] = (1 << 6) | (4 << 3) | 4
     e[0x192] = e[0x193] = 4 << 5
+    # target power, 0.5 dBm units: 2.4 GHz per path, 5 GHz per path and
+    # channel group; without it the driver's power is 0 (shown as 6 dBm)
+    e[0x441:0x445] = bytes([40] * 4)
+    e[0x445:0x445 + 4 * 5] = bytes([40] * 20)
     return bytes(e)
 
 
