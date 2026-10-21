@@ -605,7 +605,10 @@ m3000/                    own OpenWrt builds (not in git)
   by polling drivers).
 - No EIP-97 packet engine; PCIe only on MT7987 (the MT7992 card); PWM/I2C
   are stubs.
-- Speed: ~2× slower than the real 1.3 GHz SoC on a typical PC (TCG).
+- Speed: close to the real router. The kernel of a WR3000P brings its WAN
+  link up about 18 s after start on the real router (MT7981B, 1.3 GHz),
+  about 24 s in the emulator on an i7-12700H (Linux VM) and about as fast
+  as on the real router on a fast Windows PC (3.6, with PGO and PAN; TCG).
 
 ## Releases
 
