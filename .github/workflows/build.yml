@@ -1,6 +1,7 @@
 # Build, test and (on a tag) release the emulator.
 #
-#   push / pull request   build both packages, boot the test presets
+#   push / pull request   (not when only *.md files changed)
+#                         build both packages, boot the test presets
 #                         (TEST_PRESETS) with each on Linux and real Windows,
 #                         keep the packages as workflow artifacts
 #   VERSION changed       push to main with a VERSION that has no tag
@@ -26,7 +27,9 @@ name: Build/release
 
 on:
   push:
+    paths-ignore: ['**.md']
   pull_request:
+    paths-ignore: ['**.md']
   workflow_dispatch:
 
 permissions:
