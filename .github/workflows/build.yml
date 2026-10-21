@@ -11,8 +11,9 @@
 #                         pushed commit)
 #   VERSION X.Y           binary release: the packages + the presets archive
 #   VERSION X.Y.Z         presets-only release (only presets/ changed since
-#                         X.Y): the presets archive alone, no PGO; it is
-#                         unpacked over the X.Y packages
+#                         X.Y): the presets archive alone; no package
+#                         builds and no boot tests; it is unpacked over the
+#                         X.Y packages
 #
 # Packages (no flash folders and no presets, as in the published releases;
 # every release also gets Router-Emulator-<version>-presets.zip,
@@ -105,6 +106,7 @@ jobs:
 
   build:
     needs: version
+    if: needs.version.outputs.presets-only != 'true'
     # linux-aarch64 builds natively on an Arm runner
     runs-on: ${{ matrix.target == 'linux-aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     timeout-minutes: 120
@@ -226,6 +228,8 @@ jobs:
 
   # flash folders of the test presets, from the official OpenWrt images
   flash:
+    needs: version
+    if: needs.version.outputs.presets-only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -396,7 +400,11 @@ jobs:
           if-no-files-found: ignore
 
   release:
-    if: needs.version.outputs.release == 'true'
+    # presets-only: build and the tests are skipped, only the archive is made
+    if: >-
+      !cancelled() && needs.version.outputs.release == 'true' &&
+      (needs.version.outputs.presets-only == 'true' ||
+       (needs.test-linux.result == 'success' && needs.windows-test.result == 'success'))
     needs: [version, build, test-linux, windows-test]
     runs-on: ubuntu-latest
     steps:
@@ -414,7 +422,7 @@ jobs:
       - name: Presets archive
         run: |
           src/tools/package-presets.sh
-          mv src/dist/*-presets.zip dist/
+          mkdir -p dist && mv src/dist/*-presets.zip dist/
 
       - name: Release text
         run: |
