@@ -304,7 +304,7 @@ namespace RouterEmulator
 
         string NoPresetsText()
         {
-            return L.F("main.no_presets", "No presets in {0}: create one with New...", PresetDir);
+            return L.F("main.no_presets", "No presets in {0}: unpack Router-Emulator-<version>-presets.zip of the release over this folder, or create one with New...", PresetDir);
         }
 
         // network lists carry translated labels: rebuild, keep the selection

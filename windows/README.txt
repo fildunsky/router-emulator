@@ -10,6 +10,9 @@ from the emulated flash.
 Quick start
 -----------
 1. Unpack this folder anywhere (path without special characters is best).
+   Board presets are a separate archive of the release,
+   Router-Emulator-<version>-presets.zip: unpack it into the same place
+   (it adds the presets\ folder).
 2. Run emulator.exe, choose a board preset, press "Power on".
 3. A terminal window opens: that is the router's serial port (115200 8N1).
    Press Enter there to get the OpenWrt shell. Arrow keys, Home/End etc.

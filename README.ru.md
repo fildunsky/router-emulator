@@ -2,13 +2,21 @@
 
 [English](README.md) · **Русский** · Сборка: [Linux](README.build.linux.ru.md) · [Windows](README.build.windows.ru.md)
 
+> **С версии 3.6 пресеты плат — отдельный архив.** В пакетах больше нет
+> `presets/`. В каждом релизе рядом с пакетами лежит
+> `Router-Emulator-<версия>-presets.zip` (на GitHub, Google Диске и
+> Яндекс.Диске): распакуйте его поверх пакета. Если меняются только пресеты,
+> выходит релиз только с пресетами `X.Y.Z` (например, 3.6.1) — новый архив
+> пресетов для пакетов X.Y.
+
 **Скачать:** [Router Emulator на Google Диске](https://drive.google.com/drive/folders/173WnINcit9_lMt86FjfKkGMqnZrCZ-Am)
 или [на Яндекс.Диске](https://yadi.sk/d/Re-w1Nm1DBFhOw): пакеты последнего
-релиза и готовые папки флеша, по архиву на папку
+релиза, его архив пресетов (`Router-Emulator-<версия>-presets.zip`)
+и готовые папки флеша, по архиву на папку
 (`Router-Emulator-<папка>.zip`, например `Router-Emulator-nand-wr3000p.zip`),
 для всех пресетов, кроме Keenetic KN-1012 и Routerich AX3000 v1 (им нужны
-дампы собственного роутера, такие папки не собираются). Возьмите папки
-нужных плат и распакуйте их поверх пакета.
+дампы собственного роутера, такие папки не собираются). Распакуйте поверх
+пакета архив пресетов и папки нужных плат.
 
 QEMU-машина `mt7981-router`, эмулирующая плату роутера на MT7981B на
 уровне железа. Железо платы (PHY/коммутатор Ethernet, флеш, тип и размер
@@ -41,7 +49,8 @@ MT7988A/D (Filogic 880 / 860) — на `mt7988-router` (`soc=mt7988`, см.
 
 Linux: [README.build.linux.ru.md](README.build.linux.ru.md) (или
 `Router-Emulator-<версия>-linux-x86_64.tar.gz` из релиза: QEMU со
-своими библиотеками, собирать не нужно), затем
+своими библиотеками, собирать не нужно; распакуйте поверх него
+`Router-Emulator-<версия>-presets.zip` из того же релиза), затем
 
 ```bash
 tools/prepare-nand.sh cudy_wr3000p-v1 25.12.5   # официальные образы -> nand-wr3000p/
@@ -50,8 +59,9 @@ tools/prepare-nand.sh cudy_wr3000p-v1 25.12.5   # официальные обр�
 ```
 
 Windows: скачайте zip из релиза (или соберите сами —
-[README.build.windows.ru.md](README.build.windows.ru.md)), распакуйте,
-запустите `emulator.exe`. Папок NAND в релизе нет: соберите их
+[README.build.windows.ru.md](README.build.windows.ru.md)) и
+`Router-Emulator-<версия>-presets.zip` из того же релиза, распакуйте оба в
+одно место, запустите `emulator.exe`. Папок NAND в релизе нет: соберите их
 `tools/prepare-nand.sh` (Linux или WSL) и положите рядом с `emulator.exe`
 или используйте дампы с настоящего роутера.
 

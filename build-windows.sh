@@ -5,12 +5,14 @@
 # over the package they complete it)
 #   - QEMU (with qemu-patches/) cross-compiled in QEMU's Fedora MinGW image
 #   - emulator.exe launcher (C#, needs mono-mcs)
-#   - board presets (presets/*.ini) and, for every preset with an
-#     openwrt=PROFILE key, a fresh NAND folder for OpenWrt $VERSION
+#   - for every preset (presets/*.ini) with an openwrt=PROFILE key, a
+#     fresh NAND folder for OpenWrt $VERSION
 #     (default 25.12.5)
 #   - QEMU rebuilt with profile-guided optimisation (tools/pgo-windows.sh,
 #     PGO=0 to skip; it trains on nand-wr3000p)
 #   FLASH_PRESETS="cudy-wr3000p-v1 ..." builds only these flash folders
+# No presets in the package: tools/package-presets.sh builds them as
+# Router-Emulator-<version>-presets.zip, published with every release.
 set -e
 cd "$(dirname "$(readlink -f "$0")")"
 ROOT=$PWD
@@ -88,7 +90,7 @@ mcs -nostdlib -noconfig -target:winexe -platform:anycpu -out:"$PKG/emulator.exe"
 cp windows/README.txt LICENSE "$PKG/"
 cp usb/README.txt "$PKG/usb/"
 mkdir -p "$PKG/logs"
-cp -r presets languages "$PKG/"
+cp -r languages "$PKG/"
 # NAND folders: openwrt=PROFILE (OpenWrt U-Boot images) or, with
 # openwrt-stock=DIR, the vendor bootloader dumps in DIR + OpenWrt
 # FLASH_PRESETS="a b": only these presets (file names without .ini; CI),

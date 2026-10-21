@@ -134,8 +134,10 @@ tools/package-linux.sh        # -> dist/Router-Emulator-<version>-linux-x86_64.t
 
 [`tools/package-linux.sh`](tools/package-linux.sh) (needs `patchelf`) packs
 `qemu/qemu-system-aarch64` with the shared libraries it uses (everything
-but glibc, found through `RUNPATH=$ORIGIN`), `emulator.sh`, presets, tools
-and docs; no flash folders. `emulator.sh` and `tests/quick.py` use
+but glibc, found through `RUNPATH=$ORIGIN`), `emulator.sh`, tools
+and docs; no flash folders and no presets
+([`tools/package-presets.sh`](tools/package-presets.sh) builds
+`dist/Router-Emulator-<version>-presets.zip`, published with every release). `emulator.sh` and `tests/quick.py` use
 `qemu/qemu-system-aarch64` when there is no `src/qemu/build`. The package
 runs on distributions with the same or a newer glibc than the build
 machine. For a small dependency set build QEMU without UI and audio first:

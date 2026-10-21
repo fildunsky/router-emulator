@@ -44,7 +44,9 @@ VERSION=snapshot ./build-windows.sh   # другая версия OpenWrt
    `windows/Lang.cs`, `windows/Terminal.cs`, `windows/Leds.cs`, `windows/UsbDevices.cs` и `work/Version.cs`, сгенерированный из [`VERSION`](VERSION))
    **против эталонных сборок .NET Framework 4.8** — в библиотеках Mono есть
    более новые методы, которые на Windows дали бы `MissingMethodException`;
-5. копирует [`presets/`](presets/), [`languages/`](languages/) и для каждого пресета собирает папку NAND
+5. копирует [`languages/`](languages/) (пресеты в пакет не входят:
+   [`tools/package-presets.sh`](tools/package-presets.sh) собирает
+   `Router-Emulator-<версия>-presets.zip`) и для каждого пресета собирает папку NAND
    через [`tools/prepare-nand.sh`](tools/prepare-nand.sh): `openwrt=ПРОФИЛЬ`
    скачивает официальные образы (`openwrt-version=` заменяет `$VERSION`),
    `openwrt-local=ПАПКА` берёт свои сборки, `openwrt-stock=ПАПКА` оставляет
@@ -83,7 +85,7 @@ MinGW GCC реализует потоко-локальные переменны�
 Router-Emulator/
   emulator.exe           лаунчер + редактор пресетов + терминал
   emulator.ini           настройки лаунчера (создаётся при первом запуске)
-  presets/             пресеты плат (*.ini)
+  presets/             пресеты плат (*.ini, из -presets.zip)
   languages/           языки интерфейса (*.ini)
   qemu/                qemu-system-aarch64.exe + DLL
   nand-wr3000p/ ...    папки флеш-памяти (по одной на пресет)

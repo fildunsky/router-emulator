@@ -7,9 +7,11 @@
 #     in qemu/lib/ (all but the C library itself), found through
 #     RUNPATH=$ORIGIN, so the package runs on other distributions with the
 #     same or a newer glibc
-#   - emulator.sh, presets, tools (prepare-nand.sh, mknand.py, host-bridge.sh),
+#   - emulator.sh, tools (prepare-nand.sh, mknand.py, host-bridge.sh),
 #     tests/quick.py, docs
-# No flash folders: they are built with tools/prepare-nand.sh.
+# No flash folders (they are built with tools/prepare-nand.sh) and no
+# presets (tools/package-presets.sh: Router-Emulator-<version>-presets.zip,
+# published with every release).
 #
 # aarch64 (ARCH=aarch64, the default on an aarch64 host) packages the C
 # library and its loader too: emulator.sh starts QEMU through
@@ -76,7 +78,6 @@ patchelf --set-rpath '$ORIGIN/lib' "$PKG/qemu/qemu-system-aarch64" "$PKG/qemu/qe
 
 cp emulator.sh VERSION LICENSE README.md README.ru.md \
    README.build.linux.md README.build.linux.ru.md "$PKG/"
-cp -r presets "$PKG/"
 cp tools/prepare-nand.sh tools/mknand.py tools/mkemmc.py tools/host-bridge.sh "$PKG/tools/"
 # the RUTC50 bootloader (prepare-nand.sh --nor-nand rutc50)
 mkdir -p "$PKG/tools/uboot-rutc50"

@@ -134,7 +134,9 @@ tools/package-linux.sh        # -> dist/Router-Emulator-<версия>-linux-x86
 [`tools/package-linux.sh`](tools/package-linux.sh) (нужен `patchelf`)
 упаковывает `qemu/qemu-system-aarch64` с нужными ему разделяемыми
 библиотеками (всё, кроме glibc, ищется через `RUNPATH=$ORIGIN`),
-`emulator.sh`, пресеты, инструменты и документацию; папок флеша нет.
+`emulator.sh`, инструменты и документацию; папок флеша и пресетов нет
+([`tools/package-presets.sh`](tools/package-presets.sh) собирает
+`dist/Router-Emulator-<версия>-presets.zip`, он выходит с каждым релизом).
 `emulator.sh` и `tests/quick.py` берут `qemu/qemu-system-aarch64`, если нет
 `src/qemu/build`. Пакет работает на дистрибутивах с той же или более новой
 glibc, чем на машине сборки. Чтобы зависимостей было меньше, соберите QEMU

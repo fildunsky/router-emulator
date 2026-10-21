@@ -114,6 +114,12 @@ LDSO=$(dirname "$QEMU")/lib/ld-linux-aarch64.so.1
 
 # --- preset: [preset] key=value lines ---------------------------------
 ini_get() { awk -F= -v k="$2" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$1"; }
+# the packages come without presets: they are the release's -presets.zip
+if ! compgen -G "$ROOT/presets/*.ini" >/dev/null && [ ! -f "$PRESET" ]; then
+    echo "no presets in $ROOT/presets: unpack Router-Emulator-<version>-presets.zip" \
+         "of the release over this folder" >&2
+    exit 1
+fi
 if [ "$PRESET" = list ]; then
     for f in "$ROOT"/presets/*.ini; do
         printf '%-24s %s\n    %s\n' "$(basename "$f" .ini)" \

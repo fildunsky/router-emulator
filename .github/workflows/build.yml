@@ -8,8 +8,14 @@
 #                         with PGO, then publish the packages as GitHub
 #                         Release v<VERSION> (the tag is created on the
 #                         pushed commit)
+#   VERSION X.Y           binary release: the packages + the presets archive
+#   VERSION X.Y.Z         presets-only release (only presets/ changed since
+#                         X.Y): the presets archive alone, no PGO; it is
+#                         unpacked over the X.Y packages
 #
-# Packages (no flash folders, as in the published releases):
+# Packages (no flash folders and no presets, as in the published releases;
+# every release also gets Router-Emulator-<version>-presets.zip,
+# tools/package-presets.sh):
 #   Router-Emulator-<version>-linux-x86_64.tar.gz   tools/package-linux.sh
 #   Router-Emulator-<version>-win64.zip             build-windows.sh
 # The Windows package is cross-built on Linux exactly as build-windows.sh
@@ -61,14 +67,17 @@ env:
     zbtlink-zbt-wg3526-16m
 
 jobs:
-  # release or not: VERSION without its tag on main, or the tag itself
+  # release or not: VERSION without its tag on main, or the tag itself;
+  # binary (X.Y) or presets-only (X.Y.Z)
   version:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
       release: ${{ steps.v.outputs.release }}
+      presets-only: ${{ steps.v.outputs.presets-only }}
+      pgo: ${{ steps.v.outputs.pgo }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: v
         run: |
           V=$(tr -d ' \r\n' < VERSION)
@@ -81,7 +90,15 @@ jobs:
             rel=true
           fi
           echo "release=$rel" >> "$GITHUB_OUTPUT"
-          echo "VERSION $V, release: $rel"
+          case $V in
+            *.*.*) po=true ;;
+            *) po=false ;;
+          esac
+          echo "presets-only=$po" >> "$GITHUB_OUTPUT"
+          # PGO only for the packages of a binary release
+          pgo=false; [ $rel = true ] && [ $po = false ] && pgo=true
+          echo "pgo=$pgo" >> "$GITHUB_OUTPUT"
+          echo "VERSION $V, release: $rel, presets only: $po"
 
   build:
     needs: version
@@ -94,7 +111,7 @@ jobs:
       matrix:
         target: [linux, linux-aarch64, win64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Dependencies
         run: |
@@ -106,7 +123,7 @@ jobs:
           if [ "${{ matrix.target }}" = linux-aarch64 ]; then sudo apt-get install -y bash-static; fi
           if [ "${{ matrix.target }}" = win64 ]; then
             sudo apt-get install -y mono-mcs mono-devel
-            if [ "${{ needs.version.outputs.release }}" = true ]; then sudo apt-get install -y wine wine64; fi
+            if [ "${{ needs.version.outputs.pgo }}" = true ]; then sudo apt-get install -y wine wine64; fi
           fi
 
       # --- Linux ---------------------------------------------------------
@@ -135,7 +152,7 @@ jobs:
       # natively on this flash folder (tools/pgo-train.py); the boot tests
       # below then run the optimised binary
       - name: QEMU with PGO (releases)
-        if: matrix.target != 'win64' && needs.version.outputs.release == 'true'
+        if: matrix.target != 'win64' && needs.version.outputs.pgo == 'true'
         env:
           CONFIGURE_ARGS: >-
             --disable-gtk --disable-sdl --disable-opengl --disable-vnc
@@ -180,13 +197,13 @@ jobs:
         if: matrix.target == 'win64'
         run: |
           # profile-guided optimisation (trained under Wine) for releases
-          if [ "${{ needs.version.outputs.release }}" = true ]; then export PGO=1; else export PGO=0; fi
+          if [ "${{ needs.version.outputs.pgo }}" = true ]; then export PGO=1; else export PGO=0; fi
           # flash folders are not packaged; PGO trains on the WR3000P one
           FLASH_PRESETS=cudy-wr3000p-v1 VERSION="$OPENWRT" ./build-windows.sh
 
       # --- results -------------------------------------------------------
       - name: Upload package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: package-${{ matrix.target }}
           path: |
@@ -196,7 +213,7 @@ jobs:
 
       - name: Logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: logs-${{ matrix.target }}
           path: |
@@ -208,7 +225,7 @@ jobs:
   flash:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Dependencies
         run: sudo apt-get update && sudo apt-get install -y mtd-utils gdisk wget zip python3
       - name: Flash folders
@@ -231,7 +248,7 @@ jobs:
             tools/prepare-nand.sh "$@" "$(get openwrt)" "${ver:-$OPENWRT}" "work/flash/$(get nand-dir)"
           done
           (cd work/flash && zip -qr1 "$GITHUB_WORKSPACE/ci-flash.zip" .)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ci-flash
           path: ci-flash.zip
@@ -266,12 +283,12 @@ jobs:
           - { preset: openwrt-one, wan: 'eth0: Link is Up' }
           - { preset: zbtlink-zbt-wg3526-16m, wan: 'wan: Link is Up', first: 'U-Boot SPL', qemu: qemu-system-mipsel }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: package-linux
           path: dist
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: ci-flash
           path: dist
@@ -279,6 +296,8 @@ jobs:
         run: |
           mkdir -p pkg && tar -C pkg -xzf dist/*-linux-*.tar.gz
           cd pkg/Router-Emulator
+          # presets are not packaged (Router-Emulator-<version>-presets.zip): from the tree
+          cp -r "$GITHUB_WORKSPACE/presets" .
           unzip -q "$GITHUB_WORKSPACE/dist/ci-flash.zip" && mkdir -p work
           env -i PATH=/usr/bin:/bin python3 tests/quick.py --limit 900 \
             -P ${{ matrix.preset }} --qemu="-netdev user,id=wan,restrict=on" \
@@ -286,7 +305,7 @@ jobs:
             '${{ matrix.wan }}@180'
       - name: Logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: logs-linux-${{ matrix.preset }}
           path: pkg/Router-Emulator/work/
@@ -321,14 +340,14 @@ jobs:
           - { preset: openwrt-one, wan: 'eth0: Link is Up' }
           - { preset: zbtlink-zbt-wg3526-16m, wan: 'wan: Link is Up', first: 'U-Boot SPL', qemu: qemu-system-mipsel }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: package-win64
           path: dist
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: ci-flash
           path: dist
@@ -367,7 +386,7 @@ jobs:
 
       - name: Logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: logs-windows-${{ matrix.preset }}
           path: work/
@@ -378,28 +397,60 @@ jobs:
     needs: [version, build, test-linux, windows-test]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
+        if: needs.version.outputs.presets-only != 'true'
         with:
           pattern: package-*
           path: dist
           merge-multiple: true
 
+      # the presets as their own archive, from the released commit
+      - uses: actions/checkout@v7
+        with:
+          path: src
+      - name: Presets archive
+        run: |
+          src/tools/package-presets.sh
+          mv src/dist/*-presets.zip dist/
+
+      - name: Release text
+        run: |
+          V=${{ needs.version.outputs.version }}
+          if [ "${{ needs.version.outputs.presets-only }}" = true ]; then
+            cat > body.md <<EOF
+          **Board presets only**, no new packages: unpack \`Router-Emulator-$V-presets.zip\`
+          over the Router Emulator ${V%.*} package (Windows, Linux x86_64 or aarch64) of
+          [release v${V%.*}](https://github.com/$GITHUB_REPOSITORY/releases/tag/v${V%.*}), replacing its \`presets\` folder.
+          EOF
+            echo "name=Router Emulator $V (presets)" >> "$GITHUB_ENV"
+          else
+            cat > body.md <<'EOF'
+          Packages: `...-win64.zip` (Windows 10/11 x64, run `emulator.exe`) and
+          `...-linux-x86_64.tar.gz` (run `./emulator.sh`), `...-linux-aarch64.tar.gz`
+          (64-bit Arm Linux: Raspberry Pi 4/5, TV boxes with CoreELEC; also with a
+          32-bit userland, run `./bash emulator.sh` where there is no bash).
+          **Board presets are a separate archive**, `...-presets.zip`: unpack it over the
+          package. **No flash images are included**: build them with `tools/prepare-nand.sh`
+          (see README.md / README.ru.md), take ready ones from
+          [Google Drive](https://drive.google.com/drive/folders/173WnINcit9_lMt86FjfKkGMqnZrCZ-Am)
+          or [Yandex Disk](https://yadi.sk/d/Re-w1Nm1DBFhOw), or use dumps of a real router.
+          EOF
+            echo "name=Router Emulator $V" >> "$GITHUB_ENV"
+          fi
+          sed -i 's/^          //' body.md
+          cat body.md
+
       - name: Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ needs.version.outputs.version }}
           target_commitish: ${{ github.sha }}
-          name: Router Emulator ${{ needs.version.outputs.version }}
+          name: ${{ env.name }}
           generate_release_notes: true
-          body: |
-            Packages: `...-win64.zip` (Windows 10/11 x64, run `emulator.exe`) and
-            `...-linux-x86_64.tar.gz` (run `./emulator.sh`), `...-linux-aarch64.tar.gz`
-            (64-bit Arm Linux: Raspberry Pi 4/5, TV boxes with CoreELEC; also with a
-            32-bit userland, run `./bash emulator.sh` where there is no bash). **No flash images are
-            included**: build them with `tools/prepare-nand.sh` (see README.md /
-            README.ru.md), or use dumps of a real router.
+          body_path: body.md
           files: |
             dist/*-linux-*.tar.gz
             dist/*-win64.zip
+            dist/*-presets.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

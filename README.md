@@ -2,13 +2,20 @@
 
 **English** · [Русский](README.ru.md) · Build: [Linux](README.build.linux.md) · [Windows](README.build.windows.md)
 
+> **Board presets are a separate archive since 3.6.** The packages no longer
+> contain `presets/`. Every release has `Router-Emulator-<version>-presets.zip`
+> next to the packages (on GitHub, Google Drive and Yandex Disk): unpack it
+> over the package. When only presets change, a presets-only release
+> `X.Y.Z` (e.g. 3.6.1) brings just a new presets archive for the X.Y packages.
+
 **Download:** [Router Emulator on Google Drive](https://drive.google.com/drive/folders/173WnINcit9_lMt86FjfKkGMqnZrCZ-Am)
 or [on Yandex Disk](https://yadi.sk/d/Re-w1Nm1DBFhOw): the packages of the
-latest release and ready flash folders, one archive per folder
+latest release, its presets archive (`Router-Emulator-<version>-presets.zip`)
+and ready flash folders, one archive per folder
 (`Router-Emulator-<folder>.zip`, e.g. `Router-Emulator-nand-wr3000p.zip`),
 for all presets except Keenetic KN-1012 and Routerich AX3000 v1 (they need
-dumps of your own router, which are not built). Take the folders of the
-boards you need and unpack them over a package.
+dumps of your own router, which are not built). Unpack the presets archive
+and the folders of the boards you need over a package.
 
 A QEMU machine, `mt7981-router`, that emulates an MT7981B router board at
 the hardware level. The board hardware (Ethernet PHYs/switch, flash, RAM
@@ -39,7 +46,8 @@ BL2 with its own DRAM calibration and size detection, see
 
 Linux: [README.build.linux.md](README.build.linux.md) (or the
 `Router-Emulator-<version>-linux-x86_64.tar.gz` of a release: QEMU
-with its libraries, no build needed), then
+with its libraries, no build needed; unpack the release's
+`Router-Emulator-<version>-presets.zip` over it), then
 
 ```bash
 tools/prepare-nand.sh cudy_wr3000p-v1 25.12.5   # official images -> nand-wr3000p/
@@ -48,8 +56,9 @@ tools/prepare-nand.sh cudy_wr3000p-v1 25.12.5   # official images -> nand-wr3000
 ```
 
 Windows: download the release zip (or build it, see
-[README.build.windows.md](README.build.windows.md)), unpack, run `emulator.exe`.
-The release contains no NAND folders: create them with
+[README.build.windows.md](README.build.windows.md)) and the release's
+`Router-Emulator-<version>-presets.zip`, unpack both into the same place, run
+`emulator.exe`. The release contains no NAND folders: create them with
 `tools/prepare-nand.sh` (Linux or WSL) and copy them next to `emulator.exe`,
 or use dumps of a real router.
 

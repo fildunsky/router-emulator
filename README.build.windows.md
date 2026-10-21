@@ -44,7 +44,9 @@ What [`build-windows.sh`](build-windows.sh) does:
    **against the .NET Framework 4.8 reference assemblies** — Mono's own
    libraries contain newer APIs that would fail on Windows with
    `MissingMethodException`;
-5. copies [`presets/`](presets/), [`languages/`](languages/) and builds a NAND folder for every preset
+5. copies [`languages/`](languages/) (the presets are not packaged:
+   [`tools/package-presets.sh`](tools/package-presets.sh) builds
+   `Router-Emulator-<version>-presets.zip`) and builds a NAND folder for every preset
    with [`tools/prepare-nand.sh`](tools/prepare-nand.sh): `openwrt=PROFILE`
    downloads the official images (`openwrt-version=` overrides `$VERSION`),
    `openwrt-local=DIR` uses own builds, `openwrt-stock=DIR` keeps a vendor
@@ -83,7 +85,7 @@ clang. Plain GCC still works: configure with
 Router-Emulator/
   emulator.exe           launcher + preset editor + serial terminal
   emulator.ini           launcher settings (created on first run)
-  presets/             board presets (*.ini)
+  presets/             board presets (*.ini, from the -presets.zip)
   languages/           interface languages (*.ini)
   qemu/                qemu-system-aarch64.exe + DLLs
   nand-wr3000p/ ...    flash folders (one per preset)
