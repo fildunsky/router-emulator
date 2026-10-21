@@ -146,10 +146,10 @@ WS2812B, 74HC595, PWM), GPIO
 | Пресет | Ethernet | RAM | NAND | USB | Загрузчик |
 |---|---|---|---|---|---|
 | Cudy WR3000P v1 | 2.5G WAN RTL8221B + 4×1G MT7531 | DDR4 512 МБ | 128 МБ | 2.0 | OpenWrt (U-Boot layout) |
-| Cudy WR3000H v1 | 2.5G WAN RTL8221B + 4×1G MT7531 | DDR3 512 МБ | 128 МБ | – | OpenWrt (U-Boot layout) |
+| Cudy WR3000H v1 | 2.5G WAN RTL8221B + 4×1G MT7531 | DDR3 256 МБ | 128 МБ | – | OpenWrt (U-Boot layout) |
 | Cudy WR3000S v1, WR3000E v1 | 5×1G MT7531 (WAN = порт 0) | DDR3 256 МБ | 128 МБ | – | OpenWrt (U-Boot layout) |
-| Cudy WBR3000UAX v1 | 5×1G MT7531 (WAN = порт 0) | DDR3 256 МБ | 128 МБ | 3.0 | OpenWrt (U-Boot layout) |
-| Cudy WR3000U v1 | 5×1G MT7531 (WAN = порт 0) | DDR3 256 МБ | 256 МБ | – | стоковый (NMBM) |
+| Cudy WBR3000UAX v1 | 5×1G MT7531 (WAN = порт 0) | DDR3 512 МБ | 128 МБ | 3.0 | OpenWrt (U-Boot layout) |
+| Cudy WR3000U v1 | 5×1G MT7531 (WAN = порт 0) | DDR3 512 МБ | 256 МБ | – | стоковый (NMBM) |
 | Cudy TR3000 v1 | 2.5G WAN RTL8221B на GMAC0 + 1G LAN встроенный PHY | DDR3 512 МБ | 128 МБ | 3.0 | OpenWrt (U-Boot layout) |
 | Cudy TR3000 256MB v1 | то же, без коммутатора | DDR3 512 МБ | 256 МБ | 3.0 | стоковый (NMBM) |
 | Cudy M3000 v1 / v2 (RTL8221B) | 2.5G WAN RTL8221B + 1G LAN встроенный PHY | DDR3 256 МБ | 128 МБ | – | OpenWrt (своя сборка, U-Boot layout) |
@@ -168,12 +168,12 @@ WS2812B, 74HC595, PWM), GPIO
 | GL.iNet GL-MT6000 (MT7986A) | 2.5G WAN RTL8221B + 2.5G LAN RTL8221B на порту 5 коммутатора + 4×1G MT7531 | DDR4 1 ГБ | **eMMC** | 3.0 | OpenWrt |
 | Huasifei WH3000 Pro eMMC | 2.5G LAN RTL8221B + 1G WAN на встроенном PHY, без коммутатора | DDR4 1 ГБ | **eMMC**, разметка производителя | 3.0 | OpenWrt (сборка для RAX3000M eMMC DDR4) |
 | Routerich AX3000 | 3×1G LAN + WAN MT7531 (WAN = порт 4) | DDR3 256 МБ | 128 МБ, без bdinfo | 2.0 | OpenWrt (U-Boot layout) |
-| Routerich AX3000 v1 | 1G WAN на встроенном PHY + 3×1G LAN MT7531 | DDR3 256 МБ | 128 МБ, без bdinfo | 2.0 | производителя (нужны свои дампы) |
+| Routerich AX3000 v1 | 1G WAN на встроенном PHY + 3×1G LAN MT7531 | DDR3 512 МБ | 128 МБ, без bdinfo | 2.0 | производителя (нужны свои дампы) |
 | Routerich BE7200 (MT7987A) | 2.5G WAN внутренний PHY + 3×1G LAN **Airoha AN8855**; Wi-Fi 7 MT7992 по PCIe | DDR4 1 ГБ | **512 МБ** (W25N04KV) | 3.0 | OpenWrt |
 | Asus ZenWiFi BT8 (MT7988D, Filogic 860) | 2.5G WAN внутренний PHY + 2×1G LAN встроенный коммутатор (lan3 на GMAC2 и Wi-Fi MT7996 не эмулируются) | DDR4 1 ГБ | 128 МБ, FIP и Factory в UBI | 3.0 | OpenWrt (U-Boot layout) |
-| TP-Link TL-7DR7230 v1 (MT7988D, Filogic 860) | 2.5G WAN внутренний PHY + 4×1G LAN встроенный коммутатор | DDR4 1 ГБ | 128 МБ, разметка TP-Link | – | OpenWrt **snapshot** (без LuCI) |
+| TP-Link TL-7DR7230 v1 (MT7988D, Filogic 860) | 2.5G WAN внутренний PHY + 4×1G LAN встроенный коммутатор | DDR4 512 МБ | 128 МБ, разметка TP-Link | – | OpenWrt **snapshot** (без LuCI) |
 | Bananapi BPi-R4 (MT7988A, Filogic 880) | WAN + 3×1G LAN встроенный коммутатор (SFP+ не эмулируются) | DDR4 2 ГБ (на плате 4 ГБ) | **eMMC** (разметка `bpi-r4`) | 3.0 | OpenWrt |
-| Teltonika RUTC50 | 1G WAN встроенный PHY + 4×1G LAN MT7531 (мобильный модем не эмулируется); светодиоды на **74HC595** | DDR3 256 МБ | **SPI-NOR 16 МБ (загрузка) + SPI-NAND 512 МБ** (rutos-a / rutos-b) | 3.0 | BL2 OpenWrt RFB + свой U-Boot ([`tools/uboot-rutc50`](tools/uboot-rutc50)) |
+| Teltonika RUTC50 | 1G WAN встроенный PHY + 4×1G LAN MT7531 (мобильный модем не эмулируется); светодиоды на **74HC595** | DDR3 512 МБ | **SPI-NOR 16 МБ (загрузка) + SPI-NAND 512 МБ** (rutos-a / rutos-b) | 2.0 | BL2 OpenWrt RFB + свой U-Boot ([`tools/uboot-rutc50`](tools/uboot-rutc50)) |
 | OpenWrt One | 2.5G WAN **Airoha EN8811H** + 1G LAN встроенный PHY | DDR4 1 ГБ | **SPI-NAND 256 МБ (загрузка) + SPI-NOR 16 МБ** (recovery) | 2.0 | OpenWrt |
 | Zbtlink ZBT-WG3526 (16M) (**MT7621A**, MIPS) | 5×1G MT7530 (WAN = порт 4); Wi-Fi MT7603E + MT7612E на PCIe («радиомолчащие») | DDR3 512 МБ (доступно 448 МБ) | **SPI-NOR 16 МБ** | 3.0 | OpenWrt |
 | Xiaomi Mi Router 3G (стоковый U-Boot) (**MT7621A**, MIPS) | 1G WAN + 2×1G LAN MT7530; Wi-Fi MT7603E + MT7612E на PCIe («радиомолчащие») | DDR3 256 МБ | **параллельный NAND 128 МБ** (разметка Xiaomi) | 3.0 | стоковый U-Boot 1.1.3 Xiaomi + OpenWrt |
