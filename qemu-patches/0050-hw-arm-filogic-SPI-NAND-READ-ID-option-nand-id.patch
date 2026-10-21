@@ -1,0 +1,162 @@
+From a511c4bcb988cd40d743a9535765ee5d858d3735 Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Wed, 21 Oct 2026 10:27:29 -0400
+Subject: [PATCH] hw/arm/filogic: SPI-NAND READ ID option (nand-id)
+
+nand-id=c8017f7f7f makes the SPI-NAND answer READ ID with these bytes
+(repeating after them), e.g. the ESMT F50L1G41LB of the Cudy WR3000P;
+Linux matches C8 01 7F 7F 7F for it.  The parameter page names the chip
+from a table by its ID.  The chip behaves as before.  Stock Cudy
+firmware builds /proc/sys/dev/flash_uuid from the chip ID and the unique
+ID and compares it with fuuid in bdinfo ("C801-..."): with the Winbond
+ID login stayed disabled even with the right nand-uid.
+---
+ hw/arm/filogic/filogic_router.c | 44 +++++++++++++++++++++++++++++++++
+ hw/arm/filogic/spinand.c        | 33 +++++++++++++++++++++----
+ 2 files changed, 72 insertions(+), 5 deletions(-)
+
+diff --git a/hw/arm/filogic/filogic_router.c b/hw/arm/filogic/filogic_router.c
+index 19eba99..48de9b0 100644
+--- a/hw/arm/filogic/filogic_router.c
++++ b/hw/arm/filogic/filogic_router.c
+@@ -249,6 +249,7 @@ struct RouterState {
+     char *nand_dir;
+     char *efuse_file, *efuse_uid;
+     char *nand_uid;
++    char *nand_id;              /* SPI-NAND JEDEC ID override (hex) */
+     char *pcie_wifi;            /* card in the PCIe slot */
+     bool poweroff_reboot;       /* poweroff reboots, as on a real MT7981 */
+     /* UART0 transmit tap: "reboot: Power down" ends the emulation */
+@@ -404,6 +405,18 @@ static void router_set_nand_uid(Object *obj, const char *value, Error **errp)
+     b->nand_uid = g_strdup(value);
+ }
+ 
++static char *router_get_nand_id(Object *obj, Error **errp)
++{
++    return g_strdup(ROUTER_MACHINE(obj)->nand_id);
++}
++
++static void router_set_nand_id(Object *obj, const char *value, Error **errp)
++{
++    RouterState *b = ROUTER_MACHINE(obj);
++    g_free(b->nand_id);
++    b->nand_id = g_strdup(value);
++}
++
+ static char *router_get_efuse(Object *obj, Error **errp)
+ {
+     return g_strdup(ROUTER_MACHINE(obj)->efuse_file);
+@@ -1113,6 +1126,31 @@ static void router_init(MachineState *machine)
+     if (b->nand_uid) {
+         qdev_prop_set_string(dev, "uid", b->nand_uid);
+     }
++    if (b->nand_id) {
++        /*
++         * the chip of the real board, all the bytes it answers to READ ID
++         * (they repeat after that), e.g. c8017f7f7f = ESMT F50L1G41LB:
++         * vendor firmware checks it (Cudy: /proc/sys/dev/flash_uuid =
++         * "C801-" + unique ID, compared with bdinfo); the chip behaves as
++         * before
++         */
++        size_t n = strlen(b->nand_id);
++
++        if (n < 4 || n > 16 || n % 2 ||
++            strspn(b->nand_id, "0123456789abcdefABCDEF") != n) {
++            error_report("nand-id must be 2 to 8 bytes in hex, e.g. "
++                         "c8017f7f7f");
++            exit(1);
++        }
++        n /= 2;
++        for (int i = 0; i < n; i++) {
++            g_autofree char *prop = g_strdup_printf("id%d", i);
++            char h[3] = { b->nand_id[2 * i], b->nand_id[2 * i + 1], 0 };
++
++            qdev_prop_set_uint8(dev, prop, strtoul(h, NULL, 16));
++        }
++        qdev_prop_set_uint32(dev, "id-len", n);
++    }
+     if (b->nand_dir && b->nor_nand) {
+         /* the SPI-NAND next to a SPI-NOR */
+         g_autofree char *d = g_build_filename(b->nand_dir, "nand", NULL);
+@@ -1569,6 +1607,12 @@ static void router_class_init(ObjectClass *oc, const void *data)
+     object_class_property_set_description(oc, "nand-uid",
+             "32 hex digits: SPI-NAND unique ID (OTP page 0; default derived "
+             "from the flash folder)");
++    object_class_property_add_str(oc, "nand-id", router_get_nand_id,
++                                  router_set_nand_id);
++    object_class_property_set_description(oc, "nand-id",
++            "SPI-NAND READ ID bytes in hex, 2 to 8 (default efaa21, Winbond "
++            "W25N01GV), e.g. c8017f7f7f = ESMT F50L1G41LB: the chip of the "
++            "real board, for vendor firmware that checks it");
+     object_class_property_add_str(oc, "efuse", router_get_efuse,
+                                   router_set_efuse);
+     object_class_property_set_description(oc, "efuse",
+diff --git a/hw/arm/filogic/spinand.c b/hw/arm/filogic/spinand.c
+index dbb53e2..b59ccb5 100644
+--- a/hw/arm/filogic/spinand.c
++++ b/hw/arm/filogic/spinand.c
+@@ -74,7 +74,7 @@ struct SpiNandState {
+     uint32_t oob_size;
+     uint32_t pages_per_block;
+     uint32_t blocks;
+-    uint8_t id[4];
++    uint8_t id[8];      /* READ ID bytes (id-len of them, then repeating) */
+     uint32_t id_len;
+     char *uid_hex;      /* unique ID (16 bytes as 32 hex digits) */
+     uint8_t uid[16];
+@@ -310,18 +310,37 @@ static uint16_t onfi_crc16(const uint8_t *p, size_t len)
+     return crc;
+ }
+ 
++/* parameter page names of the chips by their first three ID bytes */
++static const struct {
++    uint8_t id[3];
++    const char *mfr, *model;
++} chip_names[] = {
++    { { 0xef, 0xaa, 0x21 }, "WINBOND", "W25N01GV" },
++    { { 0xef, 0xaa, 0x22 }, "WINBOND", "W25N02KV" },
++    { { 0xef, 0xaa, 0x23 }, "WINBOND", "W25N04KV" },
++    { { 0xc8, 0x01, 0x7f }, "ESMT", "F50L1G41LB" },
++};
++
+ /* ONFI style parameter page (OTP page 1), 3 redundant copies */
+ static void build_param_page(SpiNandState *s, uint8_t *buf)
+ {
+     uint8_t pp[256];
++    const char *mfr = "UNKNOWN", *model = "SPI-NAND";
+ 
+     memset(pp, 0, sizeof(pp));
+     memcpy(pp, "ONFI", 4);
+     stw_le_p(pp + 4, 0x0002);                   /* revision */
+-    memcpy(pp + 32, "WINBOND     ", 12);
+-    memcpy(pp + 44, s->blocks > 2048 ? "W25N04KV            " :
+-                    s->blocks > 1024 ? "W25N02KV            "
+-                                     : "W25N01GV            ", 20);
++
++    for (int i = 0; i < ARRAY_SIZE(chip_names); i++) {
++        if (s->id_len >= 3 && !memcmp(s->id, chip_names[i].id, 3)) {
++            mfr = chip_names[i].mfr;
++            model = chip_names[i].model;
++        }
++    }
++    /* space padded, as in the ONFI parameter page */
++    memset(pp + 32, ' ', 32);
++    memcpy(pp + 32, mfr, strlen(mfr));
++    memcpy(pp + 44, model, strlen(model));
+     pp[64] = s->id[0];
+     stl_le_p(pp + 80, s->page_size);
+     stw_le_p(pp + 84, s->oob_size);
+@@ -667,6 +686,10 @@ static const Property spinand_props[] = {
+     DEFINE_PROP_UINT8("id1", SpiNandState, id[1], 0xaa),
+     DEFINE_PROP_UINT8("id2", SpiNandState, id[2], 0x21),
+     DEFINE_PROP_UINT8("id3", SpiNandState, id[3], 0x00),
++    DEFINE_PROP_UINT8("id4", SpiNandState, id[4], 0x00),
++    DEFINE_PROP_UINT8("id5", SpiNandState, id[5], 0x00),
++    DEFINE_PROP_UINT8("id6", SpiNandState, id[6], 0x00),
++    DEFINE_PROP_UINT8("id7", SpiNandState, id[7], 0x00),
+     DEFINE_PROP_UINT32("id-len", SpiNandState, id_len, 3),
+     DEFINE_PROP_STRING("uid", SpiNandState, uid_hex),
+ };
+-- 
+2.47.3
+

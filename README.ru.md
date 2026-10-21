@@ -87,12 +87,13 @@ BL2, на котором попробовать, — будем рады отз�
 | `ports` | например `wan:lan1:lan2:lan3:lan4` | id netdev портов 0..4 MT7531 и порта 5 при `port5=` (`-` — не используется) |
 | `port5`, `port5-phy-addr`, `port5-reset-gpio` | `rtl8221b` · `yt8821` · `gpy211` · `none`; адрес MDIO (5); GPIO | 2.5G PHY на порту 5 MT7531 (SGMII), например Netcore N60 Pro; его netdev — шестой элемент `ports` |
 | `gmac0-port`, `gmac1-port` | id netdev | порт PHY, подключённого прямо к GMAC |
-| `gmac1` | `rtl8221b` · `yt8821` · `gpy211` · `en8811h` · `gphy` · `i2p5ge` · `none` | GMAC1 (mac@1); `gphy` — встроенный 1G PHY MT7981; `i2p5ge` — внутренний 2.5G PHY MT7987 / MT7988; `gpy211` — MaxLinear GPY211C |
+| `gmac1` | `rtl8221b` · `yt8821` · `gpy211` · `en8811h` · `gphy` · `i2p5ge` · `mt7531-p5` · `none` | GMAC1 (mac@1); `gphy` — встроенный 1G PHY MT7981; `i2p5ge` — внутренний 2.5G PHY MT7987 / MT7988; `gpy211` — MaxLinear GPY211C; `mt7531-p5` — SGMII-связь с портом 5 MT7531 (референсная схема MediaTek, например SNR-CPE-AX2: заводская прошивка ведёт через неё WAN; нужны `gmac0=mt7531` и порт 5 без PHY) |
 | `gmac0-reset-gpio`, `gmac1-reset-gpio` | GPIO, `-1` (по умолчанию) | линия аппаратного сброса 2.5G PHY; по умолчанию не подключена (отсутствие линии безвредно, неверная могла бы держать PHY в сбросе) |
 | `gmac0-phy-addr`, `gmac1-phy-addr` | адрес MDIO | адрес этого PHY (по умолчанию 1 на gmac0, 6 на gmac1) |
 | `flash` | `nand` · `nor` · `emmc` | загрузочный флеш: SPI-NAND на SPI0 (по умолчанию), SPI-NOR на SPI2 (MT7986: SPI0) или eMMC (см. ниже) |
 | `nor-nand` | `on` | SPI-NOR **и** SPI-NAND (Teltonika RUTC50, OpenWrt One): в папке флеша файлы разделов NOR, в её подпапке `nand` — файлы NAND; `flash=nor` / `flash=nand` выбирает загрузочный флеш (см. [SPI-NOR + SPI-NAND](#spi-nor--spi-nand-teltonika-rutc50-openwrt-one)) |
 | `nand` | `128` · `256` · `512` | SPI-NAND W25N01GV / W25N02KV / W25N04KV |
+| `nand-id` | от 2 до 8 байт в hex | байты, которыми SPI-NAND отвечает на READ ID, дальше они повторяются (по умолчанию ID Winbond, например `efaa21`); `c8017f7f7f` — ESMT F50L1G41LB, микросхема, например, Cudy WR3000P / WR3000E. Работает микросхема как эмулируемая; заводская прошивка может проверять ID (MT7621: READ ID параллельной NAND, см. ниже) |
 | `nand-spi` | `0` (по умолчанию) · `1` · `2` | контроллер SPI, на котором SPI-NAND (BPI-R4 Lite: 2) |
 | `switch-irq-gpio` | GPIO | EINT прерывания MT7531 (по умолчанию 38 / 66 / 41 для MT7981 / MT7986 / MT7987) |
 | `flash=emmc`, `emmc-boot` | МБ (4) | вместо этого eMMC на MSDC0: один образ (первый `*.img` в папке флеша или `-drive if=sd`) = boot0 + boot1 (по `emmc-boot` МБ) + пользовательская область, размер — степень двойки |
@@ -110,7 +111,7 @@ BL2, на котором попробовать, — будем рады отз�
 | `led1` … `led32` | `ИМЯ: ЦВЕТ ИСТОЧНИК [+ ЦВЕТ ИСТОЧНИК…]` | светодиоды передней панели (см. ниже); `led-state` (QOM `/machine`) отдаёт их состояние |
 | `efuse` | файл | загрузить содержимое eFuse из дампа настоящей платы (до 4 КБ, как читается из `/sys/bus/nvmem/devices/nvmem0/nvmem`), чтобы калибровки и данные чипа совпадали с этой платой |
 | `efuse-uid` | 32 hex-цифры | задать уникальный блок чипа, чтобы несколько эмулированных плат не были одинаковыми |
-| `nand-uid` | 32 hex-цифры | уникальный ID SPI-NAND (по умолчанию выводится из имени папки флеша); стоковая прошивка Cudy проверяет уникальный ID NAND, без него вход в веб-интерфейс закрыт |
+| `nand-uid` | 32 hex-цифры | уникальный ID SPI-NAND (по умолчанию выводится из имени папки флеша); стоковая прошивка Cudy сверяет ID микросхемы и уникальный ID (`/proc/sys/dev/flash_uuid`) с `fuuid` из bdinfo (`C801-` + уникальный ID + его дополнение), без совпадения вход закрыт («Invalid board info!»): задайте `nand-id=c8017f7f7f` и в `nand-uid=` 32 hex-цифры после `C801-` |
 
 Светодиоды передней панели: `led1=Status: red gpio:11:low + white gpio:10:low` —
 одна лампа двух цветов, у каждого цвета свой GPIO (`:low` = GPIO_ACTIVE_LOW).
@@ -155,7 +156,7 @@ WS2812B, 74HC595, PWM), GPIO
 
 | Пресет | Ethernet | RAM | NAND | USB | Загрузчик |
 |---|---|---|---|---|---|
-| Cudy WR3000P v1 | 2.5G WAN RTL8221B + 4×1G MT7531 | DDR4 512 МБ | 128 МБ | 2.0 | OpenWrt (U-Boot layout) |
+| Cudy WR3000P v1 | 2.5G WAN RTL8221B + 4×1G MT7531 | DDR4 512 МБ | 128 МБ (ESMT F50L1G41LB) | 2.0 | OpenWrt (U-Boot layout) |
 | Cudy WR3000H v1 | 2.5G WAN RTL8221B + 4×1G MT7531 | DDR3 256 МБ | 128 МБ | – | OpenWrt (U-Boot layout) |
 | Cudy WR3000S v1, WR3000E v1 | 5×1G MT7531 (WAN = порт 0) | DDR3 256 МБ | 128 МБ | – | OpenWrt (U-Boot layout) |
 | Cudy WBR3000UAX v1 | 5×1G MT7531 (WAN = порт 0) | DDR3 512 МБ | 128 МБ | 3.0 | OpenWrt (U-Boot layout) |
@@ -168,6 +169,7 @@ WS2812B, 74HC595, PWM), GPIO
 | Netis NX32U | 4×1G MT7531 (WAN = порт 0) | DDR3 256 МБ | 128 МБ | 3.0 | OpenWrt |
 | Cudy WR3000 v1 | 4×1G MT7531 (WAN = порт 0) | DDR3 256 МБ | **SPI-NOR 16 МБ** (XM25QH128C) | – | стоковый |
 | Xiaomi Mi Router AX3000T | 4×1G MT7531 (WAN = порт 0) | DDR3 256 МБ | 128 МБ, разметка Xiaomi | – | OpenWrt (U-Boot layout) |
+| SNR-CPE-AX2 | 5×1G MT7531 (WAN = порт 0); GMAC1 связан с портом 5 коммутатора (WAN заводской прошивки SNR) | DDR3 256 МБ | 128 МБ, без bdinfo | – | OpenWrt; заводская прошивка SNR загружается с дампа всего NAND |
 | Huasifei WH3000 Pro NAND | 2.5G LAN RTL8221B + 1G WAN встроенный PHY, без коммутатора | DDR4 1 ГБ | 256 МБ, без bdinfo | 3.0 | стоковый (NMBM) |
 | Huasifei WH3000R NAND | 1G WAN встроенный PHY + 3×1G LAN MT7531 | DDR3 512 МБ | 256 МБ, без bdinfo | 3.0 | стоковый (NMBM) |
 | Keenetic KN-1012 | 1G WAN встроенный PHY + 4×1G LAN MT7531 (SFP не эмулируется) | DDR4 512 МБ | 256 МБ | 3.0 | стоковый (NMBM) |
@@ -451,8 +453,8 @@ OpenWrt в `kernel` (0x600000, «System 2») и `rootfs0.bin` в `ubi`;
 | SPI-NAND | `spinand.c` | W25N01GV (2048+64) / W25N02KV (2048+128) / W25N04KV (512 МБ, 2048+128, две плоскости), on-die ECC, ONFI parameter page, страница уникального ID; хранилище — папка с дампами разделов (см. ниже) или один raw-образ с OOB |
 | eMMC | `mtk_msdc.c` + eMMC из QEMU | контроллер MSDC: команды, авто CMD23/CMD12, PIO через FIFO (TF-A, U-Boot), DMA по дескрипторам GPD/BD (Linux); карта с boot0/boot1 и пользовательской областью; BootROM загружает образы `EMMC_BOOT` из boot0 |
 | SPI-NOR | `spinor.c` | 3-байтовая адресация (до 16 МБ), задаваемый JEDEC ID, чтение 1-1-1/1-1-2/1-1-4/1-2-2/1-4-4, запись страниц, стирание 4K/32K/64K/всего чипа, регистры статуса с QE; BootROM загружает с него образы `SF_BOOT`; хранилище — такая же папка; с `nor-nand=on` — вместе с SPI-NAND |
-| Ethernet | `mtk_eth.c` | frame engine: QDMA TX (Linux), PDMA RX, PDMA v2 (U-Boot); TSO и offload контрольных сумм; 2× LynxI SGMII PCS; любая комбинация коммутатора и PHY на двух GMAC |
-| Коммутатор | `mtk_eth.c` | MT7531: страничный доступ по MDIO, косвенный доступ к PHY, special tag MTK (DSA), FDB с обучением, port matrix, IRQ линка → EINT 38. Airoha AN8855: 32-битная шина регистров через страницу 4 MDIO, внутренние PHY на MDIO 1..5, регистры транслируются в модель MT7531 (CPU-порт 5). Встроенный коммутатор MT7988: модель MT7531 по MMIO 0x15020000, GbE PHY SoC (ID MT7988, калибровка из eFuse) |
+| Ethernet | `mtk_eth.c` | frame engine: QDMA TX (Linux), PDMA RX, PDMA v2 (U-Boot); TSO и offload контрольных сумм; 2× LynxI SGMII PCS; любая комбинация коммутатора и PHY на двух GMAC; маршрутизация прерываний mainline Linux и SDK-драйвера MediaTek (заводские прошивки: группы `FE_INT_GRP`, PDMA RX на линиях pdma, GIC 189..192) |
+| Коммутатор | `mtk_eth.c` | MT7531: страничный доступ по MDIO, косвенный доступ к PHY, special tag MTK (DSA), FDB с обучением, port matrix, таблица VLAN (SDK-драйвер коммутатора MediaTek), порт 5 к PHY или к GMAC1, IRQ линка → EINT 38. Airoha AN8855: 32-битная шина регистров через страницу 4 MDIO, внутренние PHY на MDIO 1..5, регистры транслируются в модель MT7531 (CPU-порт 5). Встроенный коммутатор MT7988: модель MT7531 по MMIO 0x15020000, GbE PHY SoC (ID MT7988, калибровка из eFuse) |
 | PHY | `mtk_eth.c` | 5× GPHY MT7531; RTL8221B-VB-CG (C45, термодатчик); Motorcomm YT8821 (расширенные регистры, пространства UTP/SerDes, статус 2.5G); MaxLinear GPY211C (C45, версия прошивки, mailbox, термодатчик); Airoha EN8811H (окно buckpbus на странице 4 MDIO, загрузка прошивки MCU, статус 2.5G, регистры LED); встроенный GbE PHY MT7981 (с калибровкой); PHY на порту 5 MT7531; необязательные GPIO аппаратного сброса |
 | GPIO / EINT | `mtk_pinctrl.c` | кнопки (reset/WPS, `reset-hold-ms` для нажатия на время), лог светодиодов, уровни выводов для других устройств |
 | Светодиоды | `filogic_leds.c`, `ws2812b.c`, `hc595.c` | светодиоды передней панели из пресета: GPIO, регистры LED у PHY (RTL8221B, GPY211, EN8811H, GbE / 2.5G PHY MediaTek, в том числе портов коммутатора), WS2812B на SPI, сдвиговые регистры 74HC595 на SPI (защёлкиваются по CS), каналы PWM; распознавание мигания; `led-state` |
@@ -461,7 +463,7 @@ OpenWrt в `kernel` (0x600000, «System 2») и `rootfs0.bin` в `ubi`;
 | PCIe (MT7987, MT7988) | `mtk_pcie.c` | хост MediaTek Gen3: линк, TLP конфигурации через CFGNUM, INTx, приём MSI; корневой порт из QEMU |
 | Карта Wi-Fi 7 (MT7987) | `mt7992_wifi.c` | MT7992 для mt7996e: окна BAR0, кольца WFDMA, загрузка патча и прошивок, ответы на UNI-команды, события TX free; радио «молчит» |
 | Крипто (EIP-97) | только ID | драйвер safexcel видит «нет packet engine» и отключается; работает программная криптография |
-| WED | только биты сброса | с `wed_enable=1` mt7915e видит, что WO MCU нет, и работает без offload |
+| WED | `mtk_wmac.c`, `mtk_wo.c`, биты сброса | для вендорского Wi-Fi-драйвера MediaTek (заводские прошивки: mt_wifi + mtk_warp): включение приёма Wi-Fi и прерывания через WED, а процессор offload WO — заглушка сообщений (почтовый ящик CCIF и кольца; на каждый запрос есть ответ, heartbeat, «загружен»), чтобы драйвер не ждал по 3 с на сообщение. Пути данных offload нет; mt7915e в OpenWrt использует WED только с `wed_enable=1` (с заглушкой WO не проверялось) |
 
 Новый netdev `pcap` (`net/pcap.c`, libpcap / Npcap загружается при запуске)
 подключает порт к сетевой карте хоста как «сетевой мост» — им пользуется

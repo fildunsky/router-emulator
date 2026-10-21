@@ -1,0 +1,266 @@
+From 94c76e89182e51aa9c9a51a0cea261202cc1b4d2 Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Wed, 21 Oct 2026 09:31:28 -0400
+Subject: [PATCH] hw/arm/filogic/mtk_eth: MediaTek SDK interrupt routing, GMAC1
+ on MT7531 port 5
+
+MediaTek's SDK Ethernet driver (vendor firmware, kernel 5.4: SNR-CPE-AX2,
+stock Cudy WR3000P) programs FE_INT_GRP 0x210ffff2 instead of mainline's
+0x21021000: its RX is on the pdma0 line (GIC 189), TX on fe1, the FE misc
+handler on fe2.  Route the FE misc, PDMA and QDMA groups by FE_INT_GRP
+when it is not the mainline value and add the pdma lines (GIC 189..192);
+mainline routing is unchanged.  Before, PDMA RX raised fe2, the misc
+handler found no status and the line stayed up (IRQ storm, watchdog).
+
+gmac1=mt7531-p5: GMAC1 linked over SGMII to MT7531 port 5 (MediaTek
+reference design; the SNR firmware's WAN VLAN is ports 0 + 5).
+---
+ hw/arm/filogic/filogic.h        |  1 +
+ hw/arm/filogic/filogic_router.c | 16 +++++++-
+ hw/arm/filogic/mtk_eth.c        | 65 +++++++++++++++++++++++++++++++--
+ 3 files changed, 76 insertions(+), 6 deletions(-)
+
+diff --git a/hw/arm/filogic/filogic.h b/hw/arm/filogic/filogic.h
+index 60f3e27..b09651d 100644
+--- a/hw/arm/filogic/filogic.h
++++ b/hw/arm/filogic/filogic.h
+@@ -54,6 +54,7 @@
+ #define MT7981_IRQ_SPI1         141
+ #define MT7981_IRQ_SPI2         142
+ #define MT7981_IRQ_ETH0         196     /* FE irqs 196..199 */
++#define MT7981_IRQ_PDMA0        189     /* PDMA irqs 189..192 */
+ #define MT7981_IRQ_EINT         225
+ 
+ /* SPI-NAND */
+diff --git a/hw/arm/filogic/filogic_router.c b/hw/arm/filogic/filogic_router.c
+index b61e229..19eba99 100644
+--- a/hw/arm/filogic/filogic_router.c
++++ b/hw/arm/filogic/filogic_router.c
+@@ -50,7 +50,8 @@
+ 
+ /* what is attached to a GMAC */
+ enum { GMAC_NONE, GMAC_RTL8221B, GMAC_GPHY, GMAC_MT7531, GMAC_YT8821,
+-       GMAC_GPY211, GMAC_I2P5GE, GMAC_AN8855, GMAC_MT7988SW, GMAC_EN8811H };
++       GMAC_GPY211, GMAC_I2P5GE, GMAC_AN8855, GMAC_MT7988SW, GMAC_EN8811H,
++       GMAC_MT7531P5 };
+ 
+ static const char *const gmac_names[] = {
+     [GMAC_NONE] = "none", [GMAC_RTL8221B] = "rtl8221b",
+@@ -58,6 +59,7 @@ static const char *const gmac_names[] = {
+     [GMAC_YT8821] = "yt8821", [GMAC_GPY211] = "gpy211",
+     [GMAC_I2P5GE] = "i2p5ge", [GMAC_AN8855] = "an8855",
+     [GMAC_MT7988SW] = "mt7988-switch", [GMAC_EN8811H] = "en8811h",
++    [GMAC_MT7531P5] = "mt7531-p5",
+ };
+ 
+ /* a switch (MT7531 or Airoha AN8855) on GMAC0 */
+@@ -803,6 +805,15 @@ static void create_eth(RouterState *b, DeviceState *pinctrl)
+         error_report("gmac0=gphy: the built-in GbE PHY can only be on gmac1");
+         exit(1);
+     }
++    if (b->gmac[0] == GMAC_MT7531P5 ||
++        (b->gmac[1] == GMAC_MT7531P5 &&
++         (b->gmac[0] != GMAC_MT7531 || b->port5 != GMAC_NONE))) {
++        error_report("mt7531-p5: only gmac1, with gmac0=mt7531 and no port5 "
++                     "PHY");
++        exit(1);
++    }
++    /* GMAC1 linked to MT7531 port 5 (MediaTek SDK reference boards) */
++    qdev_prop_set_bit(dev, "gmac1-switch-p5", b->gmac[1] == GMAC_MT7531P5);
+     if ((b->gmac[0] == GMAC_I2P5GE || b->gmac[1] == GMAC_I2P5GE) &&
+         !b->soc->i2p5ge) {
+         error_report("i2p5ge: the %s has no internal 2.5G PHY", b->soc->name);
+@@ -879,6 +890,7 @@ static void create_eth(RouterState *b, DeviceState *pinctrl)
+     sysbus_mmio_map(sbd, 2, MT7981_SGMII1_BASE);
+     for (int i = 0; i < 4; i++) {
+         sysbus_connect_irq(sbd, i, spi_irq(b, MT7981_IRQ_ETH0 + i));
++        sysbus_connect_irq(sbd, 4 + i, spi_irq(b, MT7981_IRQ_PDMA0 + i));
+     }
+     if (b->gmac[0] == GMAC_MT7988SW) {
+         sysbus_mmio_map(sbd, 3, 0x15020000);
+@@ -1591,7 +1603,7 @@ static void router_class_init(ObjectClass *oc, const void *data)
+                                    router_get_gmac1, router_set_gmac1);
+     object_class_property_set_description(oc, "gmac1",
+         "GMAC1 (mac@1): rtl8221b, yt8821, gpy211 or en8811h (2.5G PHY), gphy (MT7981 "
+-        "built-in GbE PHY), none");
++        "built-in GbE PHY), mt7531-p5 (SGMII link to MT7531 port 5), none");
+     object_class_property_add_enum(oc, "port5", "Mt7981Gmac", &gmac_lookup,
+                                    router_get_port5, router_set_port5);
+     object_class_property_set_description(oc, "port5",
+diff --git a/hw/arm/filogic/mtk_eth.c b/hw/arm/filogic/mtk_eth.c
+index 59ed55d..246b925 100644
+--- a/hw/arm/filogic/mtk_eth.c
++++ b/hw/arm/filogic/mtk_eth.c
+@@ -49,6 +49,7 @@
+  * status / mask pairs at 0x290 + 8 n for FE interrupt line n; the status
+  * is the PDMA status, the mask selects what raises that line
+  */
++#define PDMA_INT_GRP(n) (0x250 + (n) * 4)    /* groups 1, 2 */
+ #define PDMA_GRP_STS(n) (0x290 + (n) * 8)
+ #define PDMA_GRP_MSK(n) (0x294 + (n) * 8)
+ #define PDMA_IS_GRP_STS(off) ((off) >= 0x290 && (off) < 0x2b0 && !((off) & 7))
+@@ -59,6 +60,7 @@
+ #define QDMA_GLO_CFG    0x4604
+ #define QDMA_TX_IRQ_STS 0x4618
+ #define QDMA_TX_IRQ_MSK 0x461c
++#define QDMA_INT_GRP(n) (0x4620 + (n) * 4)   /* groups 1, 2 */
+ #define QDMA_CTX_PTR    0x4700
+ #define QDMA_DTX_PTR    0x4704
+ #define QDMA_CRX_PTR    0x4710
+@@ -68,6 +70,9 @@
+ #define CDMP_EG_CTRL    0x404       /* bit 0: RX VLAN offload */
+ 
+ #define FE_INT_STATUS   0x0008
++#define FE_INT_ENABLE   0x0010
++#define FE_INT_GRP      0x0020
++#define FE_INT_GRP_MAINLINE 0x21021000
+ #define MTK_PHY_IAC     0x10004
+ #define MAC_MCR(x)      (0x10100 + (x) * 0x100)
+ #define MAC_MSR(x)      (0x10108 + (x) * 0x100)
+@@ -183,7 +188,8 @@ struct MtkEthState {
+     MemoryRegion iomem, sram, container;
+     MemoryRegion sgmii_mr[2];
+     MemoryRegion swmmio;        /* MT7988 built-in switch registers */
+-    qemu_irq irq[4];
++    qemu_irq irq[4];            /* fe0..fe3 (GIC 196..199) */
++    qemu_irq pdma_irq[4];       /* pdma0..pdma3 (GIC 189..192) */
+     qemu_irq sw_irq;
+ 
+     GHashTable *fe;             /* other FE registers */
+@@ -222,6 +228,7 @@ struct MtkEthState {
+     EthPhy p5phy;
+     uint32_t p5phy_type;
+     uint32_t p5phy_addr;
++    bool gmac1_sw_p5;           /* GMAC1 linked to MT7531 port 5 instead */
+ 
+     EthPort ports[8];
+     uint32_t frames[8];         /* frames through each port (LED activity) */
+@@ -1383,6 +1390,8 @@ static void sw_egress(MtkEthState *s, int src, int dst,
+         dst != sw_p5_mux(s)) {
+         s->frames[dst]++;
+         qemu_send_packet(qemu_get_queue(s->ports[dst].nic), buf, len);
++    } else if (dst == 5 && s->gmac1_sw_p5) {
++        gdm_rx(s, 1, buf, len);
+     } else if (dst == 5 && s->p5phy_type && s->p5phy.link && s->ports[7].nic) {
+         s->frames[7]++;
+         qemu_send_packet(qemu_get_queue(s->ports[7].nic), buf, len);
+@@ -1662,6 +1671,8 @@ static void gmac_out(MtkEthState *s, int gdm, uint8_t *f, size_t len)
+ 
+     if (gdm == 0 && s->has_switch) {
+         sw_cpu_deliver(s, s->tx_mask, f, len);
++    } else if (gdm == 1 && s->gmac1_sw_p5) {
++        sw_forward(s, 5, f, len);
+     } else if (mux >= 0) {
+         if (s->gphy[mux].link && s->ports[mux].nic) {
+             s->frames[mux]++;
+@@ -1724,7 +1735,7 @@ static void fe_update_irq(MtkEthState *s)
+     uint32_t p2 = s->pdma[1].regs[PDMA_IRQ_STATUS / 4] &
+                   s->pdma[1].regs[PDMA_IRQ_MASK / 4];
+ 
+-    uint32_t g[4];
++    uint32_t g[4], grp;
+ 
+     for (int n = 0; n < 4; n++) {
+         g[n] = (s->pdma[0].regs[PDMA_IRQ_STATUS / 4] &
+@@ -1736,6 +1747,41 @@ static void fe_update_irq(MtkEthState *s)
+         qemu_set_irq(s->irq[0], q || p || p2);
+         return;
+     }
++    grp = ht_get(s->fe, FE_INT_GRP, 0);
++    if (grp && grp != FE_INT_GRP_MAINLINE) {
++        /*
++         * MediaTek's SDK driver (vendor firmware, e.g. SNR-CPE-AX2) routes
++         * the sources itself: FE_INT_GRP nibble 0 = fe line of the FE misc
++         * interrupt, 3 / 4 = of PDMA group 1 / 2, 6 / 7 = of QDMA group
++         * 1 / 2, 0xf = none (mainline: 0x21021000, groups 1 / 2 on fe1 /
++         * fe2); PDMA RX of ring n also drives the pdma n line, where this
++         * driver takes RX (and its FE misc handler sits on fe2)
++         */
++        uint32_t src[8] = { 0 };
++        bool fe[4] = { false };
++
++        src[0] = ht_get(s->fe, FE_INT_STATUS, 0) &
++                 ht_get(s->fe, FE_INT_ENABLE, 0);
++        for (int n = 0; n < 2; n++) {
++            src[3 + n] = (p & s->pdma[0].regs[PDMA_INT_GRP(n) / 4]) |
++                         (p2 & s->pdma[1].regs[PDMA_INT_GRP(n) / 4]);
++            src[6 + n] = q & s->qdma_regs[(QDMA_INT_GRP(n) - 0x4400) / 4];
++        }
++        for (int i = 0; i < 8; i++) {
++            uint32_t line = (grp >> (4 * i)) & 0xf;
++
++            if (src[i] && line < 4) {
++                fe[line] = true;
++            }
++        }
++        for (int n = 0; n < 4; n++) {
++            uint32_t rx = n ? BIT(16 + n) : 0x40014000;
++
++            qemu_set_irq(s->irq[n], fe[n]);
++            qemu_set_irq(s->pdma_irq[n], ((p | p2) & rx) || g[n]);
++        }
++        return;
++    }
+     qemu_set_irq(s->irq[0], g[0]);
+     qemu_set_irq(s->irq[1], q || (p & 0x1000000f) || (p2 & 0x1000000f) || g[1]);
+     qemu_set_irq(s->irq[2], (p & 0x400f4000) || (p2 & 0x400f4000) || g[2]);
+@@ -2021,7 +2067,8 @@ static void pdma_write(MtkEthState *s, Pdma *d, hwaddr off, uint32_t v)
+         v &= ~(BIT(1) | BIT(3));    /* busy bits never set */
+     }
+     d->regs[off / 4] = v;
+-    if (off == PDMA_IRQ_MASK || (off >= 0x290 && off < 0x2b0)) {
++    if (off == PDMA_IRQ_MASK || off == PDMA_INT_GRP(0) || off == PDMA_INT_GRP(1) ||
++        (off >= 0x290 && off < 0x2b0)) {
+         fe_update_irq(s);
+     }
+     if (off < 0x100 && (off & 0xf) == 0x8) {
+@@ -2065,7 +2112,8 @@ static uint64_t fe_read(void *opaque, hwaddr addr, unsigned size)
+     case MAC_MSR(1): {
+         int id = (addr - MAC_MSR(0)) / 0x100;
+         uint32_t mcr = ht_get(s->fe, MAC_MCR(id), 0);
+-        bool link = s->dphy_type[id] ? s->dphy[id].link : id == 0;
++        bool link = s->dphy_type[id] ? s->dphy[id].link
++                    : id == 0 || (id == 1 && s->gmac1_sw_p5);
+         /* link, duplex, 1000M, rx/tx fc */
+         return (link || (mcr & 1)) ? 0x0000003f : 0;
+     }
+@@ -2124,6 +2172,9 @@ static void fe_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
+         break;
+     }
+     ht_set(s->fe, addr, v);
++    if (addr == FE_INT_STATUS || addr == FE_INT_ENABLE || addr == FE_INT_GRP) {
++        fe_update_irq(s);
++    }
+ }
+ 
+ static const MemoryRegionOps fe_ops = {
+@@ -2257,6 +2308,7 @@ static void eth_reset(DeviceState *dev)
+     phy_init(&s->intphy, PHY_MT7981, false);
+     for (int i = 0; i < 4; i++) {
+         qemu_irq_lower(s->irq[i]);
++        qemu_irq_lower(s->pdma_irq[i]);
+     }
+     qemu_irq_lower(s->sw_irq);
+ }
+@@ -2331,6 +2383,10 @@ static void eth_init(Object *obj)
+     for (int i = 0; i < 4; i++) {
+         sysbus_init_irq(sbd, &s->irq[i]);
+     }
++    /* sysbus IRQs 4..7: the pdma lines */
++    for (int i = 0; i < 4; i++) {
++        sysbus_init_irq(sbd, &s->pdma_irq[i]);
++    }
+     qdev_init_gpio_out_named(DEVICE(obj), &s->sw_irq, "switch-irq", 1);
+     qdev_init_gpio_in_named(DEVICE(obj), phy_reset_in, "phy-reset", 3);
+ }
+@@ -2365,6 +2421,7 @@ static const Property eth_props[] = {
+     DEFINE_PROP_UINT32("pdma-base", MtkEthState, pdma_base, PDMA_BASE),
+     DEFINE_PROP_UINT32("qdma-base", MtkEthState, qdma_base, 0x4400),
+     DEFINE_PROP_BOOL("single-irq", MtkEthState, single_irq, false),
++    DEFINE_PROP_BOOL("gmac1-switch-p5", MtkEthState, gmac1_sw_p5, false),
+     DEFINE_PROP_UINT32("port5-phy", MtkEthState, p5phy_type, 0),
+     DEFINE_PROP_UINT32("port5-phy-addr", MtkEthState, p5phy_addr, 5),
+ };
+-- 
+2.47.3
+

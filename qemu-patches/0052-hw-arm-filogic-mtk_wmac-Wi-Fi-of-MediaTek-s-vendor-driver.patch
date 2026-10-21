@@ -1,0 +1,251 @@
+From 46906a78514d7887026b0277ab69026917b4b795 Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Wed, 21 Oct 2026 12:38:32 -0400
+Subject: [PATCH] hw/arm/filogic/mtk_wmac: Wi-Fi of MediaTek's vendor driver
+ (mt_wifi + WED)
+
+MediaTek's vendor Wi-Fi driver (stock Cudy WR3000P firmware: mt_wifi,
+mtk_warp) runs the Wi-Fi through WED: it never sets RX_DMA_EN in the
+WFDMA but RX_DRV_EN in WED_WPDMA_GLO_CFG, and takes the Wi-Fi interrupts
+from WED's line (GIC 205), never enabling the WMAC's own.  The firmware's
+answers were dropped (RX "full") and their interrupts never arrived: the
+ROM patch download failed, mt_wifi_init failed and softapd later crashed
+the kernel (NULL band object in RcAcquiredBandForObj).
+
+- WFDMA RX is enabled by RX_DMA_EN or WED's RX_DRV_EN
+- WED0 interrupt agent (MT7981 / MT7986): the WFDMA interrupts also set
+  WED_INT_STATUS (0x15010200, write 1 to clear), WED_INT_MASK (0x204)
+  gates GIC 205
+- answers to extended commands with the payload length the firmware
+  gives them (the vendor driver checks it); unknown ones stay 512 bytes
+
+The patch and firmware download, the firmware start and the init now
+succeed, ra0 joins br-lan.  mt7915e (WED off) is unchanged.
+---
+ hw/arm/filogic/filogic_router.c |   5 ++
+ hw/arm/filogic/mtk_wmac.c       | 109 ++++++++++++++++++++++++++++++--
+ 2 files changed, 110 insertions(+), 4 deletions(-)
+
+diff --git a/hw/arm/filogic/filogic_router.c b/hw/arm/filogic/filogic_router.c
+index 48de9b0..91e641d 100644
+--- a/hw/arm/filogic/filogic_router.c
++++ b/hw/arm/filogic/filogic_router.c
+@@ -1284,6 +1284,11 @@ flash_done:
+     for (int i = 0; i < 4; i++) {
+         sysbus_connect_irq(SYS_BUS_DEVICE(dev), i, spi_irq(b, 213 + i));
+     }
++    if (b->soc->chip_id == 0x7981 || b->soc->chip_id == 0x7986) {
++        /* WED0's interrupt agent passes the Wi-Fi interrupts on (GIC 205) */
++        sysbus_mmio_map_overlap(SYS_BUS_DEVICE(dev), 1, 0x15010200, 20);
++        sysbus_connect_irq(SYS_BUS_DEVICE(dev), 4, spi_irq(b, 205));
++    }
+ 
+     /* PCIe slot (MT7987): the controller is there even without a card */
+     if (b->soc->pcie_base) {
+diff --git a/hw/arm/filogic/mtk_wmac.c b/hw/arm/filogic/mtk_wmac.c
+index 0d20af1..da5b369 100644
+--- a/hw/arm/filogic/mtk_wmac.c
++++ b/hw/arm/filogic/mtk_wmac.c
+@@ -92,6 +92,8 @@
+ #define MCU_CMD_RESTART_DL_REQ         0xef
+ #define MCU_CMD_NIC_POWER_CTRL         0x04
+ #define MCU_EXT_CMD_THERMAL_CTRL       0x2c
++#define MCU_EXT_CMD_NO_ANSWER          0x82   /* periodic, vendor driver */
++#define MCU_CMD_WA_PARAM               0xc4
+ 
+ /*
+  * event ids of the firmware's answers to the download commands (MediaTek's
+@@ -107,7 +109,10 @@
+ struct MtkWmacState {
+     SysBusDevice parent_obj;
+     MemoryRegion iomem;
++    MemoryRegion wed_int;   /* WED0 WED_INT_STATUS / WED_INT_MASK */
+     qemu_irq irq[4];
++    qemu_irq wed_irq;
++    uint32_t wed_int_sts, wed_int_mask;
+     GHashTable *regs;       /* bus offset -> value */
+     GHashTable *remap;      /* absolute address (L2 window) -> value */
+     uint32_t fw_state;
+@@ -130,18 +135,69 @@ static void wmac_update_irq(MtkWmacState *s)
+ {
+     qemu_set_irq(s->irq[0], !!(rget(s->regs, W_INT_SRC) &
+                                rget(s->regs, W_INT_MASK)));
++    qemu_set_irq(s->wed_irq, !!(s->wed_int_sts & s->wed_int_mask));
+ }
+ 
++/*
++ * WED's interrupt agent passes the WFDMA interrupts on: same bits in
++ * WED_INT_STATUS (write 1 to clear), its own line (GIC 205).  MediaTek's
++ * vendor driver takes the Wi-Fi interrupts there and never enables the
++ * WMAC's own line; mt7915e (WED off) uses the WMAC line.
++ */
+ static void raise_int(MtkWmacState *s, uint32_t bits)
+ {
+     rset(s->regs, W_INT_SRC, rget(s->regs, W_INT_SRC) | bits);
++    s->wed_int_sts |= bits;
++    wmac_update_irq(s);
++}
++
++static uint64_t wed_int_read(void *opaque, hwaddr addr, unsigned size)
++{
++    MtkWmacState *s = opaque;
++
++    return addr == 0 ? s->wed_int_sts : addr == 4 ? s->wed_int_mask : 0;
++}
++
++static void wed_int_write(void *opaque, hwaddr addr, uint64_t val,
++                          unsigned size)
++{
++    MtkWmacState *s = opaque;
++
++    if (addr == 0) {
++        s->wed_int_sts &= ~val;
++    } else if (addr == 4) {
++        s->wed_int_mask = val;
++    }
+     wmac_update_irq(s);
+ }
+ 
++static const MemoryRegionOps wed_int_ops = {
++    .read = wed_int_read,
++    .write = wed_int_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 4, .max_access_size = 4 },
++};
++
+ static const uint32_t rx_int_bit[NRXQ] = {
+     BIT(0), BIT(1), BIT(2), BIT(3), BIT(22), BIT(23)
+ };
+ 
++/*
++ * WFDMA RX enabled: by the host (GLO_CFG RX_DMA_EN, mt7915e) or through
++ * WED - MediaTek's vendor driver (mt_wifi + mtk_warp) never sets RX_DMA_EN
++ * itself but RX_DRV_EN in WED_WPDMA_GLO_CFG, and WED then drives the
++ * WFDMA's RX
++ */
++#define WED_WPDMA_GLO_CFG   0x15010508
++#define  WED_RX_DRV_EN      BIT(2)
++
++static bool rx_enabled(MtkWmacState *s)
++{
++    return (rget(s->regs, W_GLO_CFG) & BIT(2)) ||
++           (address_space_ldl_le(&address_space_memory, WED_WPDMA_GLO_CFG,
++                                 MEMTXATTRS_UNSPECIFIED, NULL) & WED_RX_DRV_EN);
++}
++
+ /* Put one buffer into RX ring q.  Returns false if the ring is full. */
+ static bool rx_push(MtkWmacState *s, int q, const void *buf, uint32_t len)
+ {
+@@ -152,8 +208,7 @@ static bool rx_push(MtkWmacState *s, int q, const void *buf, uint32_t len)
+     uint32_t d[4], blen;
+     uint64_t da;
+ 
+-    if (!base || !ndesc || dma == cpu ||
+-        !(rget(s->regs, W_GLO_CFG) & BIT(2))) {
++    if (!base || !ndesc || dma == cpu || !rx_enabled(s)) {
+         qemu_log_mask(LOG_GUEST_ERROR, "mtk-wmac: RX ring %d full\n", q);
+         return false;
+     }
+@@ -193,6 +248,31 @@ static void mcu_event(MtkWmacState *s, int rxq, uint8_t eid, uint8_t seq,
+     rx_push(s, rxq, ev, len);
+ }
+ 
++/*
++ * Payload length of the firmware's answer to an extended command, as
++ * MediaTek's vendor driver checks it (it drops answers of another length;
++ * mt7915e reads the same structures and does not check).  0 = not listed.
++ */
++static uint32_t ext_rsp_len(uint8_t ext_cid, uint32_t cmd_len)
++{
++    static const struct { uint8_t ext; uint16_t len; } t[] = {
++        { 0x01, 24 }, { 0x07, 8 }, { 0x08, 8 }, { 0x0f, 8 }, { 0x21, 8 },
++        { 0x27, 8 }, { 0x32, 8 }, { 0x36, 20 }, { 0x37, 288 }, { 0x38, 40 },
++        { 0x3e, 8 }, { 0x46, 8 }, { 0x47, 8 }, { 0x4a, 68 }, { 0x4b, 100 },
++        { 0x4e, 8 }, { 0x6c, 8 },
++    };
++
++    if (ext_cid == 0x5a) {      /* two sub-commands: 80 and 160 byte ones */
++        return cmd_len > 100 ? 116 : 36;
++    }
++    for (int i = 0; i < ARRAY_SIZE(t); i++) {
++        if (t[i].ext == ext_cid) {
++            return t[i].len;
++        }
++    }
++    return 0;
++}
++
+ static void mcu_command(MtkWmacState *s, int txq, const uint8_t *m,
+                         uint32_t len)
+ {
+@@ -217,6 +297,16 @@ static void mcu_command(MtkWmacState *s, int txq, const uint8_t *m,
+                 cid, ext_cid, seq, len, txq);
+     }
+ 
++    /*
++     * Commands the firmware does not answer (the vendor driver sends them
++     * every second and logs an answer as an unknown event; mt7915e sends
++     * WA_PARAM without waiting)
++     */
++    if (cid == MCU_CMD_WA_PARAM ||
++        (cid == MCU_CMD_EXT_CID && ext_cid == MCU_EXT_CMD_NO_ANSWER)) {
++        return;
++    }
++
+     switch (cid) {
+     case MCU_CMD_RESTART_DL_REQ:
+     case MCU_CMD_NIC_POWER_CTRL:
+@@ -231,7 +321,9 @@ static void mcu_command(MtkWmacState *s, int txq, const uint8_t *m,
+     case MCU_CMD_FW_START_REQ:
+         s->fw_state = FW_STATE_RDY;
+         break;
+-    case MCU_CMD_EXT_CID:
++    case MCU_CMD_EXT_CID: {
++        uint32_t rlen = ext_rsp_len(ext_cid, len);
++
+         if (ext_cid == MCU_EXT_CMD_THERMAL_CTRL) {
+             stl_le_p(payload + 4, 45);  /* degrees C */
+         }
+@@ -245,9 +337,10 @@ static void mcu_command(MtkWmacState *s, int txq, const uint8_t *m,
+             break;
+         }
+         mcu_event(s, rxq, MCU_CMD_EXT_CID, seq, ext_cid, payload,
+-                  sizeof(payload));
++                  rlen ? rlen : sizeof(payload));
+         return;
+     }
++    }
+     mcu_event(s, rxq, cid == MCU_CMD_RESTART_DL_REQ ? EVT_RESTART_DL
+                       : cid == MCU_CMD_EXT_CID ? cid : EVT_GENERIC,
+               seq, ext_cid, payload, 64);
+@@ -511,9 +604,11 @@ static void wmac_reset(DeviceState *dev)
+     g_hash_table_remove_all(s->regs);
+     g_hash_table_remove_all(s->remap);
+     s->fw_state = FW_STATE_FW_DOWNLOAD;  /* ROM code waits for a download */
++    s->wed_int_sts = s->wed_int_mask = 0;
+     for (int i = 0; i < 4; i++) {
+         qemu_irq_lower(s->irq[i]);
+     }
++    qemu_irq_lower(s->wed_irq);
+ }
+ 
+ static void wmac_init(Object *obj)
+@@ -526,9 +621,15 @@ static void wmac_init(Object *obj)
+     memory_region_init_io(&s->iomem, obj, &wmac_ops, s, "mtk-wmac",
+                           WIN_SIZE);
+     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
++    /* region 1: WED0 interrupt status / mask (0x15010200), mapped by MT7981 / MT7986 */
++    memory_region_init_io(&s->wed_int, obj, &wed_int_ops, s, "mtk-wed-int",
++                          8);
++    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->wed_int);
+     for (int i = 0; i < 4; i++) {
+         sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq[i]);
+     }
++    /* IRQ 4: WED0 */
++    sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->wed_irq);
+ }
+ 
+ static const Property wmac_props[] = {
+-- 
+2.47.3
+

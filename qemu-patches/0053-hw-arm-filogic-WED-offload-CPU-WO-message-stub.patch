@@ -1,0 +1,401 @@
+From c1687c18516e1e1d9409437ed4e30517ac45d367 Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Wed, 21 Oct 2026 14:28:04 -0400
+Subject: [PATCH] hw/arm/filogic: WED offload CPU (WO) message stub
+
+MediaTek's vendor warp driver (stock Cudy WR3000P, SNR-CPE-AX2) sends
+messages to the WO CPU of each WED through a CCIF mailbox (0x151a5000 /
+0x151ad000, GIC 211 / 212) and two message rings and waited 3 s for each
+answer - on the SNR-CPE-AX2 one every 3 s, forever.
+
+mtk_wo: the rings (32-byte descriptors) and the mailbox (receive status,
+ack and enable as channel bits); every request (flag bit 1) is answered
+after 0.2 ms with status 0.  mtk_sysctl: WED_REV_ID 0x20010000 on MT7981
+(the driver then loads the "7981_WOCPU0" firmware the images carry),
+WED_SCR0 reads 0 (WO booted), WO heartbeats count up.  OpenWrt (mt7915e,
+WED off) is unchanged.
+---
+ hw/arm/filogic/filogic.h        |   3 +
+ hw/arm/filogic/filogic_router.c |   8 +
+ hw/arm/filogic/meson.build      |   1 +
+ hw/arm/filogic/mtk_sysctl.c     |  19 ++-
+ hw/arm/filogic/mtk_wo.c         | 283 ++++++++++++++++++++++++++++++++
+ 5 files changed, 312 insertions(+), 2 deletions(-)
+ create mode 100644 hw/arm/filogic/mtk_wo.c
+
+diff --git a/hw/arm/filogic/filogic.h b/hw/arm/filogic/filogic.h
+index b09651d..8414860 100644
+--- a/hw/arm/filogic/filogic.h
++++ b/hw/arm/filogic/filogic.h
+@@ -108,6 +108,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(MtkPinctrlState, MTK_PINCTRL)
+ #define TYPE_MTK_WMAC "mtk-wmac"
+ OBJECT_DECLARE_SIMPLE_TYPE(MtkWmacState, MTK_WMAC)
+ 
++/* WED offload CPU message interface (CCIF mailbox + rings) stub */
++#define TYPE_MTK_WO "mtk-wo"
++
+ /* LED panel (filogic_leds.c): state of the LED sources */
+ int mtk_pinctrl_out(DeviceState *dev, int pin, uint32_t *toggles);
+ int mtk_eth_phy_led(DeviceState *dev, int addr, int idx, bool sw,
+diff --git a/hw/arm/filogic/filogic_router.c b/hw/arm/filogic/filogic_router.c
+index 91e641d..f47b4f0 100644
+--- a/hw/arm/filogic/filogic_router.c
++++ b/hw/arm/filogic/filogic_router.c
+@@ -1288,6 +1288,14 @@ flash_done:
+         /* WED0's interrupt agent passes the Wi-Fi interrupts on (GIC 205) */
+         sysbus_mmio_map_overlap(SYS_BUS_DEVICE(dev), 1, 0x15010200, 20);
+         sysbus_connect_irq(SYS_BUS_DEVICE(dev), 4, spi_irq(b, 205));
++        /* the two WEDs' offload CPUs: CCIF mailboxes, GIC 211 / 212 */
++        for (int i = 0; i < 2; i++) {
++            dev = qdev_new(TYPE_MTK_WO);
++            sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
++            sysbus_mmio_map_overlap(SYS_BUS_DEVICE(dev), 0,
++                                    i ? 0x151ad000 : 0x151a5000, 20);
++            sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, spi_irq(b, 211 + i));
++        }
+     }
+ 
+     /* PCIe slot (MT7987): the controller is there even without a card */
+diff --git a/hw/arm/filogic/meson.build b/hw/arm/filogic/meson.build
+index 5e8f532..3035520 100644
+--- a/hw/arm/filogic/meson.build
++++ b/hw/arm/filogic/meson.build
+@@ -8,6 +8,7 @@ arm_common_ss.add(when: 'CONFIG_MTK_FILOGIC', if_true: files(
+   'mtk_eth.c',
+   'mtk_pinctrl.c',
+   'mtk_wmac.c',
++  'mtk_wo.c',
+   'mtk_msdc.c',
+   'mtk_pcie.c',
+   'mt7992_wifi.c',
+diff --git a/hw/arm/filogic/mtk_sysctl.c b/hw/arm/filogic/mtk_sysctl.c
+index b471926..1bae43b 100644
+--- a/hw/arm/filogic/mtk_sysctl.c
++++ b/hw/arm/filogic/mtk_sysctl.c
+@@ -65,10 +65,12 @@ static uint32_t reg_default(MtkSysctlState *s, hwaddr a)
+ 
+     /*
+      * WED_REV_ID of the two WED blocks: version 2 (MT7981 / MT7986).
+-     * MediaTek's warp driver sizes its WDMA rings by it.
++     * MediaTek's warp driver sizes its WDMA rings by it; with a sub-version
++     * (MT7981) it loads the WO firmware the vendor images carry
++     * ("7981_WOCPU0_RAM_CODE_release.bin" rather than "mt7981_...").
+      */
+     if ((a == 0x15010004 || a == 0x15011004) && s->chip_id != 0x7987) {
+-        return 0x20000000;
++        return s->chip_id == 0x7981 ? 0x20010000 : 0x20000000;
+     }
+ 
+     if (a >= ef && a < ef + sizeof(s->efuse) &&
+@@ -331,6 +333,19 @@ static uint64_t sysctl_read(void *opaque, hwaddr offset, unsigned size)
+     bool known = true;
+ 
+     switch (a & ~3) {
++    /*
++     * WED_SCR0 (dummy CR 0): the warp driver sets it when it starts the WO
++     * CPU, the WO firmware clears it once it runs (mtk_wo answers for it)
++     */
++    case 0x150103c0:
++    case 0x150113c0:
++        v = 0;
++        break;
++    /* WO CPU heartbeats (wocpu_boot): a running firmware counts up */
++    case 0x15194200:
++    case 0x15194204:
++        v = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) / 10;
++        break;
+     /* topckgen frequency meter: report the requested "valid" count */
+     case 0x1001b320:
+         v = (s->freqmeter_valid << 16) | BIT(12);
+diff --git a/hw/arm/filogic/mtk_wo.c b/hw/arm/filogic/mtk_wo.c
+new file mode 100644
+index 0000000..2294310
+--- /dev/null
++++ b/hw/arm/filogic/mtk_wo.c
+@@ -0,0 +1,283 @@
++/*
++ * MT7981 / MT7986 WED offload CPU ("WO") - message interface stub.
++ *
++ * MediaTek's vendor warp driver (mtk_warp, e.g. stock Cudy WR3000P and
++ * SNR-CPE-AX2 firmware) talks to the WO CPU of each WED through a CCIF
++ * mailbox (ap2woccif, 0x151a5000 / 0x151ad000) and two message rings whose
++ * registers live in that block:
++ *
++ *   0x04 / 0x0c  host kick: channel bit / channel number
++ *   0x10         receive channels (1: message, 7: WO exception), 0x14 ack,
++ *                0x18 interrupt enable (channel bits)
++ *   0x20 0x24 0x28 0x3c  host -> WO ring: base, count, host index, WO index
++ *   0x50 0x54 0x58 0x6c  WO -> host ring: base, count, host index, WO index
++ *
++ * Descriptors are 32 bytes: buffer address, control (length [29:16],
++ * bit 30 last segment, bit 31 done / owned by the other side).  Messages
++ * start with a 32-byte header: version, cmd id, length (u16, header
++ * included), uni id (u16), flag (u16: bit 0 response, bit 1 needs a
++ * response, bit 2 WO ring), status (u32).
++ *
++ * No WO firmware runs here: every request (flag bit 1) is answered after
++ * 0.2 ms with status 0 - a zero payload of the request's size for cmd 0,
++ * the header only for the others - so the driver does not wait 3 s per
++ * message (forever on periodic ones).  WED_SCR0 and the WO heartbeats
++ * (mtk_sysctl) make the CPU look booted and alive.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qemu/timer.h"
++#include "hw/irq.h"
++#include "hw/sysbus.h"
++#include "system/dma.h"
++#include "system/address-spaces.h"
++#include "filogic.h"
++
++#define WO_TCHNUM       0x04
++#define WO_RCHNUM       0x10
++#define WO_ACK          0x14
++#define WO_IRQ_EN       0x18
++#define WO_CH_MSG       1
++#define WO_TX_BASE      0x20        /* host -> WO */
++#define WO_TX_CNT       0x24
++#define WO_TX_CIDX      0x28
++#define WO_TX_DIDX      0x3c
++#define WO_RX_BASE      0x50        /* WO -> host */
++#define WO_RX_CNT       0x54
++#define WO_RX_CIDX      0x58
++#define WO_RX_DIDX      0x6c
++
++#define DESC_SIZE       32
++#define DESC_DONE       BIT(31)
++#define DESC_LS0        BIT(30)
++#define MSG_HDR_LEN     32
++#define MSG_MAX         2048
++#define WO_RSP_DELAY_NS 200000      /* answer after 0.2 ms, as the firmware */
++#define WO_PENDING      32
++
++struct MtkWoState {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++    qemu_irq irq;
++    uint32_t regs[0x1000 / 4];
++    QEMUTimer *rsp_timer;
++    /*
++     * answers not sent yet: the driver puts a request on its wait list
++     * after kicking the ring, an answer before that is dropped
++     */
++    uint8_t *pending[WO_PENDING];
++    uint32_t pending_len[WO_PENDING];
++    int npending;
++};
++
++OBJECT_DECLARE_SIMPLE_TYPE(MtkWoState, MTK_WO)
++
++static bool wo_trace;       /* MTK_WO_TRACE: log the messages */
++
++static uint32_t *reg(MtkWoState *s, uint32_t off)
++{
++    return &s->regs[off / 4];
++}
++
++static void wo_update_irq(MtkWoState *s)
++{
++    qemu_set_irq(s->irq, (*reg(s, WO_RCHNUM) & *reg(s, WO_IRQ_EN)) != 0);
++}
++
++/* Put one message into the WO -> host ring */
++static void wo_send(MtkWoState *s, const uint8_t *msg, uint32_t len)
++{
++    uint32_t base = *reg(s, WO_RX_BASE), cnt = *reg(s, WO_RX_CNT);
++    uint32_t idx, d[2];
++
++    if (!base || !cnt) {
++        return;
++    }
++    idx = (*reg(s, WO_RX_DIDX) + 1) % cnt;
++    if (idx == *reg(s, WO_RX_CIDX)) {
++        qemu_log_mask(LOG_GUEST_ERROR, "mtk-wo: WO -> host ring full\n");
++        return;
++    }
++    dma_memory_read(&address_space_memory, base + idx * DESC_SIZE, d,
++                    sizeof(d), MEMTXATTRS_UNSPECIFIED);
++    dma_memory_write(&address_space_memory, le32_to_cpu(d[0]), msg, len,
++                     MEMTXATTRS_UNSPECIFIED);
++    d[1] = cpu_to_le32(DESC_DONE | DESC_LS0 | (len << 16));
++    dma_memory_write(&address_space_memory, base + idx * DESC_SIZE + 4,
++                     &d[1], 4, MEMTXATTRS_UNSPECIFIED);
++    *reg(s, WO_RX_DIDX) = idx;
++    *reg(s, WO_RCHNUM) |= BIT(WO_CH_MSG);
++    wo_update_irq(s);
++}
++
++static void wo_message(MtkWoState *s, uint8_t *m, uint32_t len)
++{
++    uint16_t flag;
++
++    if (len < MSG_HDR_LEN) {
++        return;
++    }
++    flag = lduw_le_p(m + 6);
++    if (wo_trace) {
++        fprintf(stderr, "mtk-wo: cmd %d uni %d len %u flag 0x%x:",
++                m[1], lduw_le_p(m + 4), len, flag);
++        for (int i = 0; i < MIN(len, 48); i++) {
++            fprintf(stderr, " %02x", m[i]);
++        }
++        fprintf(stderr, "\n");
++    }
++    if ((flag & 1) || !(flag & 2)) {
++        return;     /* an answer, or a notification without one */
++    }
++    /*
++     * answer: same header, response flag, status 0; a zero payload of the
++     * request's size for cmd 0, none for the others
++     */
++    if (m[1] != 0) {
++        len = MSG_HDR_LEN;
++    }
++    stw_le_p(m + 2, len);
++    stw_le_p(m + 6, (flag | 1) & ~2);
++    stl_le_p(m + 8, 0);
++    memset(m + MSG_HDR_LEN, 0, len - MSG_HDR_LEN);
++    if (s->npending == WO_PENDING) {
++        qemu_log_mask(LOG_GUEST_ERROR, "mtk-wo: too many answers queued\n");
++        return;
++    }
++    s->pending[s->npending] = g_memdup2(m, len);
++    s->pending_len[s->npending++] = len;
++    timer_mod(s->rsp_timer,
++              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + WO_RSP_DELAY_NS);
++}
++
++static void wo_rsp_timer(void *opaque)
++{
++    MtkWoState *s = opaque;
++
++    for (int i = 0; i < s->npending; i++) {
++        wo_send(s, s->pending[i], s->pending_len[i]);
++        g_free(s->pending[i]);
++    }
++    s->npending = 0;
++}
++
++/* host kicked the host -> WO ring: take every new message */
++static void wo_kick(MtkWoState *s)
++{
++    uint32_t base = *reg(s, WO_TX_BASE), cnt = *reg(s, WO_TX_CNT);
++    g_autofree uint8_t *buf = g_malloc(MSG_MAX);
++
++    if (!base || !cnt) {
++        return;
++    }
++    while (*reg(s, WO_TX_DIDX) != *reg(s, WO_TX_CIDX) % cnt) {
++        uint32_t idx = (*reg(s, WO_TX_DIDX) + 1) % cnt;
++        uint64_t da = base + idx * DESC_SIZE;
++        uint32_t d[2], len;
++
++        dma_memory_read(&address_space_memory, da, d, sizeof(d),
++                        MEMTXATTRS_UNSPECIFIED);
++        len = MIN((le32_to_cpu(d[1]) >> 16) & 0x3fff, MSG_MAX);
++        dma_memory_read(&address_space_memory, le32_to_cpu(d[0]), buf, len,
++                        MEMTXATTRS_UNSPECIFIED);
++        d[1] = cpu_to_le32(le32_to_cpu(d[1]) & ~(uint32_t)DESC_DONE);
++        dma_memory_write(&address_space_memory, da + 4, &d[1], 4,
++                         MEMTXATTRS_UNSPECIFIED);
++        *reg(s, WO_TX_DIDX) = idx;
++        wo_message(s, buf, len);
++    }
++}
++
++static uint64_t wo_read(void *opaque, hwaddr addr, unsigned size)
++{
++    MtkWoState *s = opaque;
++
++    if (wo_trace) {
++        fprintf(stderr, "mtk-wo: R %03x = %08x\n", (unsigned)addr,
++                *reg(s, addr & ~3));
++    }
++    return *reg(s, addr & ~3);
++}
++
++static void wo_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
++{
++    MtkWoState *s = opaque;
++
++    if (wo_trace) {
++        fprintf(stderr, "mtk-wo: W %03x < %08x\n", (unsigned)addr,
++                (uint32_t)val);
++    }
++    switch (addr & ~3) {
++    case WO_ACK:                /* the channels' bits, like the enable */
++        *reg(s, WO_RCHNUM) &= ~val;
++        wo_update_irq(s);
++        return;
++    case WO_IRQ_EN:
++        *reg(s, addr & ~3) = val;
++        wo_update_irq(s);
++        return;
++    case WO_TCHNUM:
++        *reg(s, addr & ~3) = val;
++        wo_kick(s);
++        return;
++    }
++    *reg(s, addr & ~3) = val;
++}
++
++static const MemoryRegionOps wo_ops = {
++    .read = wo_read,
++    .write = wo_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 4, .max_access_size = 4 },
++};
++
++static void wo_reset(DeviceState *dev)
++{
++    MtkWoState *s = MTK_WO(dev);
++
++    memset(s->regs, 0, sizeof(s->regs));
++    timer_del(s->rsp_timer);
++    for (int i = 0; i < s->npending; i++) {
++        g_free(s->pending[i]);
++    }
++    s->npending = 0;
++    qemu_irq_lower(s->irq);
++}
++
++static void wo_init(Object *obj)
++{
++    MtkWoState *s = MTK_WO(obj);
++
++    wo_trace = getenv("MTK_WO_TRACE") != NULL;
++    memory_region_init_io(&s->iomem, obj, &wo_ops, s, "mtk-wo-ccif",
++                          sizeof(s->regs));
++    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
++    sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
++    s->rsp_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, wo_rsp_timer, s);
++}
++
++static void wo_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    device_class_set_legacy_reset(dc, wo_reset);
++}
++
++static const TypeInfo wo_info = {
++    .name = TYPE_MTK_WO,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(MtkWoState),
++    .instance_init = wo_init,
++    .class_init = wo_class_init,
++};
++
++static void wo_register_types(void)
++{
++    type_register_static(&wo_info);
++}
++
++type_init(wo_register_types)
+-- 
+2.47.3
+

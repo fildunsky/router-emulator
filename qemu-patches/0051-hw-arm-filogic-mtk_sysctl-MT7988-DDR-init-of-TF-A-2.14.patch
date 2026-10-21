@@ -1,0 +1,62 @@
+From ab1e6494a882251975888c3fda029c0b874535ea Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Wed, 21 Oct 2026 11:39:13 -0400
+Subject: [PATCH] hw/arm/filogic/mtk_sysctl: MT7988 DDR init of TF-A 2.14
+
+The MT7988 DDR init MediaTek added to TF-A (2026-01, OpenWrt snapshot
+BL2 v2.14.0) measures the DDR PHY clock with the topckgen frequency
+meter (selectors 7 / 8, result count * 40 / 1024 MHz) and runs the test
+agent in waveform measure mode (TEST2 bit 25), where it waits for
+TEST_LOOP_CNT = 2.  Report the DRAM clock BL2 set up (DDR4 1600 MHz,
+DDR3 1066 MHz) and 2 in that mode: the BL2 log had
+"gddrphyfmeter_value = 0" and 256 "fcWAVEFORM_MEASURE_A ... time out"
+errors (each ~0.1 s).
+---
+ hw/arm/filogic/mtk_sysctl.c | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/hw/arm/filogic/mtk_sysctl.c b/hw/arm/filogic/mtk_sysctl.c
+index 089e4e6..b471926 100644
+--- a/hw/arm/filogic/mtk_sysctl.c
++++ b/hw/arm/filogic/mtk_sysctl.c
+@@ -232,6 +232,15 @@ static bool dramc_nao_read(MtkSysctlState *s, hwaddr a, uint32_t *v)
+         return false;
+     }
+     *v = 0;
++    if (blk == 0 && off == 0x170 &&
++        (reg_get(s, (a & ~0xffffULL) + 0x100, 0) & BIT(25))) {
++        /*
++         * TEST2 (AO 0x100) bit 25: waveform measure mode of the test
++         * agent (MT7988 DDR init from TF-A 2.14): it reports 2 when done
++         */
++        *v = 2;
++        return true;
++    }
+     for (int i = 0; i < ARRAY_SIZE(dramc_nao_overrides); i++) {
+         if (dramc_nao_overrides[i].blk == blk &&
+             dramc_nao_overrides[i].off == off) {
+@@ -325,6 +334,21 @@ static uint64_t sysctl_read(void *opaque, hwaddr offset, unsigned size)
+     /* topckgen frequency meter: report the requested "valid" count */
+     case 0x1001b320:
+         v = (s->freqmeter_valid << 16) | BIT(12);
++        /*
++         * MT7988 DDR init (TF-A 2.14): it measures the DDR PHY clocks
++         * (FQMTR_CKSEL [21:16] 7, 8 with the window in 0x1001b324 [29:20])
++         * and takes count * 40 / 1024 as MHz; selector 8 must match the
++         * DRAM clock it set up: DDR4-3200 1600 MHz, DDR3-2133 1066 MHz
++         */
++        if (s->chip_id == 0x7988 && !s->freqmeter_valid &&
++            !(reg_get(s, 0x1001b240, 0) & BIT(0))) {
++            uint32_t sel = (reg_get(s, 0x1001b240, 0) >> 16) & 0x3f;
++            uint32_t mhz = s->dram_type == 3 ? 1066 : 1600;
++
++            if (sel == 7 || sel == 8) {
++                v = (DIV_ROUND_UP(mhz * 1024, 40) << 16) | BIT(12);
++            }
++        }
+         break;
+     /*
+      * MT7986 BL2 frequency meter: result in [15:0], ARMPLL / 2 in MHz
+-- 
+2.47.3
+

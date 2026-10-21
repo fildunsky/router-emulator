@@ -18,6 +18,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Windows.Forms;
 
@@ -218,6 +219,7 @@ namespace RouterEmulator
         TabPage mipsPage, idPage, buttonsPage;
         ComboBox[] swPort = new ComboBox[5];
         NumericUpDown gmac0Rst, gmac1Rst, port5Rst, port5Addr, resetGpio, wpsGpio;
+        TextBox flashId;                // JEDEC ID of the boot flash chip (nand-id / nor-id)
         CheckBox resetHigh, wpsHigh;
         TextBox lanIp, lanFwd, efuseFile, efuseUid, nandUid;
         ComboBox poweroff;
@@ -299,6 +301,7 @@ namespace RouterEmulator
                 new Choice("en8811h", L.T("ed.en8811h", "EN8811H 2.5G PHY (Airoha)")),
                 new Choice("i2p5ge", L.T("ed.i2p5ge", "MT7987 / MT7988 internal 2.5G PHY")),
                 new Choice("gphy", L.T("ed.gphy", "MT7981 built-in 1G PHY")),
+                new Choice("mt7531-p5", L.T("ed.mt7531_p5", "MT7531 port 5 (SGMII link)")),
                 new Choice("none", L.T("ed.not_connected", "Not connected")));
             gmac1Port = PortCombo(eth, L.F("ed.phy_port", "{0} PHY port:", "GMAC1"), ref gy, out gmac1Rst);
             eth.Controls.Add(new Label { Left = 140, Top = gy, Width = 470, Height = 34, ForeColor = Color.DimGray,
@@ -320,9 +323,10 @@ namespace RouterEmulator
                 new Choice("1024", "1 " + gb),
                 new Choice("2048", "2 " + gb));
             // (boot flash list follows)
-            // value: "nand:<MB>" or "nor:<MB>:<JEDEC ID>"
+            // value: "nand:<MB>[:<JEDEC ID>]" or "nor:<MB>:<JEDEC ID>"
             nandSize = Combo(mem, L.T("ed.flash", "Boot flash:"), ref gy,
                 new Choice("nand:128", "SPI-NAND 128 " + mb + " (Winbond W25N01GV)"),
+                new Choice("nand:128:c8017f7f7f", "SPI-NAND 128 " + mb + " (ESMT F50L1G41LB)"),
                 new Choice("nand:256", "SPI-NAND 256 " + mb + " (Winbond W25N02KV)"),
                 new Choice("nand:512", "SPI-NAND 512 " + mb + " (Winbond W25N04KV)"),
                 new Choice("nor:16:ef4018", "SPI-NOR 16 " + mb + " (Winbond W25Q128JV)"),
@@ -333,6 +337,11 @@ namespace RouterEmulator
                 // value "pnand:<MB>:<READ ID>": MT7621 NFI parallel NAND
                 new Choice("pnand:128:c2f18095", L.F("ed.pnand", "Parallel NAND {0} (MT7621, {1})", "128 " + mb, "Macronix MX30LF1G18AC")),
                 new Choice("pnand:128:ecf1009540", L.F("ed.pnand", "Parallel NAND {0} (MT7621, {1})", "128 " + mb, "Samsung K9F1G08U0D")));
+            // the chip's ID, filled in from the choice and editable (vendor
+            // firmware may check it, e.g. Cudy's against bdinfo)
+            mem.Controls.Add(new Label { Left = 450, Top = gy - 27, Width = 25, Text = "ID:" });
+            flashId = new TextBox { Left = 475, Top = gy - 30, Width = 90 };
+            mem.Controls.Add(flashId);
             // a SPI-NAND next to a SPI-NOR boot flash or the other way round
             // (nor-nand=on, e.g. Teltonika RUTC50, OpenWrt One)
             flash2 = Combo(mem, L.T("ed.flash2", "Second flash:"), ref gy,
@@ -511,7 +520,7 @@ namespace RouterEmulator
             gmac1.SelectedIndexChanged += delegate { UpdateEnabled(); };
             port5.SelectedIndexChanged += delegate { UpdateEnabled(); };
             soc.SelectedIndexChanged += delegate { UpdateEnabled(); };
-            nandSize.SelectedIndexChanged += delegate { UpdateEnabled(); };
+            nandSize.SelectedIndexChanged += delegate { flashId.Text = ChipId(Val(nandSize)); UpdateEnabled(); };
             flash2.SelectedIndexChanged += delegate { UpdateDesc(); };
             autoDesc.CheckedChanged += delegate { desc.ReadOnly = autoDesc.Checked; UpdateDesc(); };
             foreach (Control c in new Control[] { soc, gmac0, gmac1, gmac0Port, gmac1Port, port5, port5Port, ddr, ram, nandSize, flash2, usbPort, pcieWifi,
@@ -608,6 +617,19 @@ namespace RouterEmulator
         }
 
         // (null while Fill() is still selecting the other lists)
+        // the JEDEC ID of a boot flash choice ("" for eMMC)
+        static string ChipId(string v)
+        {
+            var f = v.Split(':');
+            if (f[0] == "emmc") return "";
+            return f.Length > 2 ? f[2] : WinbondNandId(f[1]);
+        }
+
+        static string WinbondNandId(string mb)
+        {
+            return mb == "512" ? "efaa23" : mb == "256" ? "efaa22" : "efaa21";
+        }
+
         static string Val(ComboBox c) { var ch = c.SelectedItem as Choice; return ch != null ? ch.Value : ""; }
 
         static int Int(string s, int def) { int v; return int.TryParse(s, out v) ? v : def; }
@@ -638,11 +660,20 @@ namespace RouterEmulator
             SelectValue(ram, p.Get("ram", "512"));
             // the boot flash; MT7621 machines default to SPI-NOR
             string bootFlash = p.Get("flash", p.Soc == "mt7621" ? "nor" : "nand");
+            string spiNandId = p.Get("nand-id").ToLowerInvariant();
+            string spiNand = "nand:" + p.Get("nand", "128");
+            if (spiNandId != "" && nandSize.Items.Cast<Choice>().Any(ch => ch.Value == spiNand + ":" + spiNandId))
+                spiNand += ":" + spiNandId;
             SelectValue(nandSize, bootFlash == "nor"
                 ? "nor:" + p.Get("nor", "16") + ":" + p.Get("nor-id", "ef4018").ToLowerInvariant()
                 : bootFlash == "emmc" ? "emmc:0"
                 : p.Soc == "mt7621" ? "pnand:128:" + p.Get("nand-id", "ecf1009540").ToLowerInvariant()
-                : "nand:" + p.Get("nand", "128"));
+                : spiNand);
+            // an ID of the preset that is not in the list is kept
+            flashId.Text = bootFlash == "nor" ? p.Get("nor-id", "ef4018").ToLowerInvariant()
+                : bootFlash == "emmc" ? ""
+                : p.Soc == "mt7621" ? p.Get("nand-id", "ecf1009540").ToLowerInvariant()
+                : spiNandId != "" ? spiNandId : ChipId(Val(nandSize));
             // the second flash: the type the boot flash is not
             SelectValue(flash2, !IsOn(p.Get("nor-nand")) ? "none"
                 : p.Get("flash", "nand") == "nor" ? "nand:" + p.Get("nand", "128")
@@ -675,10 +706,11 @@ namespace RouterEmulator
             port5Port.Enabled = port5Addr.Enabled = port5Rst.Enabled = p5;
             gmac0Port.Enabled = ExtPhy(Val(gmac0));
             gmac0Rst.Enabled = ExtPhy(Val(gmac0));
-            gmac1Port.Enabled = Val(gmac1) != "none";
+            gmac1Port.Enabled = Val(gmac1) != "none" && Val(gmac1) != "mt7531-p5";
             gmac1Rst.Enabled = ExtPhy(Val(gmac1));
             pcieWifi.Enabled = HasPcie(Val(soc));         // MT7987 / MT7988 machines have the slot
             flash2.Enabled = !Val(nandSize).StartsWith("emmc");
+            flashId.Enabled = !Val(nandSize).StartsWith("emmc");
             // MT7621: the MT7530 on GMAC0 only, one boot flash, PCIe slots
             bool m = Val(soc) == "mt7621";
             if (m) {
@@ -837,25 +869,28 @@ namespace RouterEmulator
                 if (gmac0Rst.Value >= 0) p.Set("gmac0-reset-gpio", gmac0Rst.Value.ToString());
             }
             if (!m) p.Set("gmac1", Val(gmac1));
-            if (!m && Val(gmac1) != "none") {
+            if (!m && Val(gmac1) != "none" && Val(gmac1) != "mt7531-p5") {
                 p.Set("gmac1-port", gmac1Port.Text.Trim());
                 if (ExtPhy(Val(gmac1)) && gmac1Rst.Value >= 0)
                     p.Set("gmac1-reset-gpio", gmac1Rst.Value.ToString());
             }
             var flash = Val(nandSize).Split(':');
+            string id = flashId.Text.Trim().ToLowerInvariant();
             if (flash[0] == "nor") {
                 p.Set("flash", "nor");
                 if (!m) {       // the MT7621 machine has one SPI-NOR model
                     p.Set("nor", flash[1]);
-                    p.Set("nor-id", flash[2]);
+                    p.Set("nor-id", id);
                 }
             } else if (flash[0] == "emmc") {
                 p.Set("flash", "emmc");
             } else if (flash[0] == "pnand") {
                 p.Set("flash", "nand");
-                p.Set("nand-id", flash[2]);
+                p.Set("nand-id", id);
             } else {
                 p.Set("nand", flash[1]);
+                // only another chip than the Winbond one of that size
+                if (id != WinbondNandId(flash[1])) p.Set("nand-id", id);
                 if (Val(soc) == "mt7621") p.Set("flash", "nand");   // not the default there
             }
             var second = Val(flash2).Split(':');
@@ -907,7 +942,7 @@ namespace RouterEmulator
             var names = new List<string>();
             if (IsSwitch(p.Get("gmac0"))) names.AddRange(p.Get("ports").Split(':'));
             if (ExtPhy(p.Get("gmac0"))) names.Add(p.Get("gmac0-port"));
-            if (p.Get("gmac1") != "none") names.Add(p.Get("gmac1-port"));
+            if (p.Get("gmac1") != "none" && p.Get("gmac1") != "mt7531-p5") names.Add(p.Get("gmac1-port"));
             foreach (var n in names) {
                 if (n == "-" || n == "") continue;
                 if (seen.Contains(n)) return L.F("ed.port_twice", "Port name \"{0}\" is used twice.", n);
@@ -921,6 +956,15 @@ namespace RouterEmulator
             var p = Build();
             if (p.Name.Length == 0) { MessageBox.Show(this, L.T("ed.enter_name", "Enter a name."), Text); return; }
             string err = CheckPorts(p);
+            if (err == null && p.Get("gmac1") == "mt7531-p5" &&
+                (p.Get("gmac0") != "mt7531" || (p.Get("port5", "none") != "none")))
+                err = L.T("ed.mt7531_p5_need", "GMAC1 on MT7531 port 5 needs the MT7531 on GMAC0 and no PHY on port 5.");
+            string fid = flashId.Text.Trim();
+            int fidLen = Val(nandSize).StartsWith("pnand") ? -1 : Val(nandSize).StartsWith("nor") ? 6 : 0;
+            if (err == null && flashId.Enabled && (!System.Text.RegularExpressions.Regex.IsMatch(fid, "^[0-9a-fA-F]+$") ||
+                (fidLen == 6 && fid.Length != 6) || (fidLen == 0 && (fid.Length < 4 || fid.Length > 16 || fid.Length % 2 != 0)) ||
+                (fidLen < 0 && fid.Length != 8 && fid.Length != 10)))
+                err = L.T("ed.bad_flash_id", "The flash chip ID must be hex digits: SPI-NAND 4 to 16 (even), SPI-NOR 6, parallel NAND 8 or 10.");
             if (err == null && p.Soc != "mt7981" && p.Get("gmac1") == "gphy")
                 err = L.T("ed.no_gphy", "Only the MT7981 has a built-in 1G PHY: choose another GMAC1 PHY.");
             if (err == null && !HasPcie(p.Soc) && (p.Get("gmac0") == "i2p5ge" || p.Get("gmac1") == "i2p5ge"))

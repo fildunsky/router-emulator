@@ -84,12 +84,13 @@ no BL2 for it to try, reports welcome):
 | `ports` | e.g. `wan:lan1:lan2:lan3:lan4` | netdev ids of MT7531 ports 0..4, and port 5 with `port5=` (`-` = unused) |
 | `port5`, `port5-phy-addr`, `port5-reset-gpio` | `rtl8221b` · `yt8821` · `gpy211` · `none`; MDIO address (5); GPIO | a 2.5G PHY on MT7531 port 5 (SGMII), e.g. Netcore N60 Pro; its netdev is the 6th entry of `ports` |
 | `gmac0-port`, `gmac1-port` | netdev id | port of a PHY attached directly to a GMAC |
-| `gmac1` | `rtl8221b` · `yt8821` · `gpy211` · `en8811h` · `gphy` · `i2p5ge` · `none` | GMAC1 (mac@1); `gphy` = MT7981 built-in 1G PHY; `i2p5ge` = MT7987 / MT7988 internal 2.5G PHY; `gpy211` = MaxLinear GPY211C |
+| `gmac1` | `rtl8221b` · `yt8821` · `gpy211` · `en8811h` · `gphy` · `i2p5ge` · `mt7531-p5` · `none` | GMAC1 (mac@1); `gphy` = MT7981 built-in 1G PHY; `i2p5ge` = MT7987 / MT7988 internal 2.5G PHY; `gpy211` = MaxLinear GPY211C; `mt7531-p5` = SGMII link to MT7531 port 5 (MediaTek reference design, e.g. SNR-CPE-AX2: its vendor firmware takes WAN through it; needs `gmac0=mt7531` and no `port5` PHY) |
 | `gmac0-reset-gpio`, `gmac1-reset-gpio` | GPIO, `-1` (default) | hardware reset line of a 2.5G PHY; not wired by default (a missing line is harmless, a wrong one could hold the PHY in reset) |
 | `gmac0-phy-addr`, `gmac1-phy-addr` | MDIO address | address of that PHY (default 1 on gmac0, 6 on gmac1) |
 | `flash` | `nand` · `nor` · `emmc` | boot flash: SPI-NAND on SPI0 (default), SPI-NOR on SPI2 (MT7986: SPI0) or eMMC (see below) |
 | `nor-nand` | `on` | a SPI-NOR **and** a SPI-NAND (Teltonika RUTC50, OpenWrt One): the flash folder holds the NOR partition files, its subfolder `nand` the NAND ones; `flash=nor` / `flash=nand` picks the boot flash (see [SPI-NOR + SPI-NAND](#spi-nor--spi-nand-teltonika-rutc50-openwrt-one)) |
 | `nand` | `128` · `256` · `512` | W25N01GV / W25N02KV / W25N04KV SPI-NAND |
+| `nand-id` | 2 to 8 bytes in hex | the bytes the SPI-NAND answers to READ ID, repeating after that (default the Winbond ID, e.g. `efaa21`); `c8017f7f7f` = ESMT F50L1G41LB, the chip of e.g. the Cudy WR3000P / WR3000E. The chip still works as the emulated one; vendor firmware may check the ID (MT7621: the parallel NAND's READ ID, see below) |
 | `nand-spi` | `0` (default) · `1` · `2` | SPI controller of the SPI-NAND (BPI-R4 Lite: 2) |
 | `switch-irq-gpio` | GPIO | EINT of the MT7531 interrupt (default 38 / 66 / 41 for MT7981 / MT7986 / MT7987) |
 | `flash=emmc`, `emmc-boot` | MB (4) | eMMC on MSDC0 instead: one image (the first `*.img` of the flash folder, or `-drive if=sd`) = boot0 + boot1 (`emmc-boot` MB each) + user area, size a power of 2 |
@@ -107,7 +108,7 @@ no BL2 for it to try, reports welcome):
 | `led1` … `led32` | `NAME: COLOUR SOURCE [+ COLOUR SOURCE…]` | front panel LEDs (see below); `led-state` (QOM `/machine`) returns their states |
 | `efuse` | file | load the eFuse contents from a dump of a real board (up to 4 KiB, as read from `/sys/bus/nvmem/devices/nvmem0/nvmem`), so calibration and chip data match that board |
 | `efuse-uid` | 32 hex digits | set the per-chip unique block, so several emulated boards are not identical |
-| `nand-uid` | 32 hex digits | SPI-NAND unique ID (default: derived from the flash folder name); stock Cudy firmware checks the NAND unique ID, without it login is disabled |
+| `nand-uid` | 32 hex digits | SPI-NAND unique ID (default: derived from the flash folder name); stock Cudy firmware checks chip ID + unique ID (`/proc/sys/dev/flash_uuid`) against `fuuid` in bdinfo (`C801-` + the unique ID + its complement), without a match login is disabled ("Invalid board info!"): set `nand-id=c8017f7f7f` and `nand-uid=` the 32 hex digits after `C801-` |
 
 Front panel LEDs: `led1=Status: red gpio:11:low + white gpio:10:low` is
 one lamp with two colours, each on its own GPIO (`:low` = GPIO_ACTIVE_LOW).
@@ -150,7 +151,7 @@ routers use; saving from the editor drops `;` comments).
 
 | Preset | Ethernet | RAM | NAND | USB | Bootloader |
 |---|---|---|---|---|---|
-| Cudy WR3000P v1 | 2.5G WAN RTL8221B + 4×1G MT7531 | DDR4 512 MB | 128 MB | 2.0 | OpenWrt (U-Boot layout) |
+| Cudy WR3000P v1 | 2.5G WAN RTL8221B + 4×1G MT7531 | DDR4 512 MB | 128 MB (ESMT F50L1G41LB) | 2.0 | OpenWrt (U-Boot layout) |
 | Cudy WR3000H v1 | 2.5G WAN RTL8221B + 4×1G MT7531 | DDR3 256 MB | 128 MB | – | OpenWrt (U-Boot layout) |
 | Cudy WR3000S v1, WR3000E v1 | 5×1G MT7531 (WAN = port 0) | DDR3 256 MB | 128 MB | – | OpenWrt (U-Boot layout) |
 | Cudy WBR3000UAX v1 | 5×1G MT7531 (WAN = port 0) | DDR3 512 MB | 128 MB | 3.0 | OpenWrt (U-Boot layout) |
@@ -163,6 +164,7 @@ routers use; saving from the editor drops `;` comments).
 | Netis NX32U | 4×1G MT7531 (WAN = port 0) | DDR3 256 MB | 128 MB | 3.0 | OpenWrt |
 | Cudy WR3000 v1 | 4×1G MT7531 (WAN = port 0) | DDR3 256 MB | **SPI-NOR 16 MB** (XM25QH128C) | – | vendor |
 | Xiaomi Mi Router AX3000T | 4×1G MT7531 (WAN = port 0) | DDR3 256 MB | 128 MB, Xiaomi layout | – | OpenWrt (U-Boot layout) |
+| SNR-CPE-AX2 | 5×1G MT7531 (WAN = port 0); GMAC1 linked to switch port 5 (WAN of the SNR firmware) | DDR3 256 MB | 128 MB, no bdinfo | – | OpenWrt; the SNR firmware boots from a dump of the whole NAND |
 | Huasifei WH3000 Pro NAND | 2.5G LAN RTL8221B + 1G WAN built-in PHY, no switch | DDR4 1 GB | 256 MB, no bdinfo | 3.0 | vendor (NMBM) |
 | Huasifei WH3000R NAND | 1G WAN built-in PHY + 3×1G LAN MT7531 | DDR3 512 MB | 256 MB, no bdinfo | 3.0 | vendor (NMBM) |
 | Keenetic KN-1012 | 1G WAN built-in PHY + 4×1G LAN MT7531 (SFP not emulated) | DDR4 512 MB | 256 MB | 3.0 | vendor (NMBM) |
@@ -446,8 +448,8 @@ All device models live in `hw/arm/filogic/` of the QEMU tree
 | SPI-NAND | `spinand.c` | W25N01GV (2048+64) / W25N02KV (2048+128) / W25N04KV (512 MB, 2048+128, two planes), on-die ECC, ONFI parameter page, unique ID page; backing store = folder of partition dumps (see below) or one raw image with OOB |
 | eMMC | `mtk_msdc.c` + QEMU eMMC | MSDC host: commands, auto CMD23/CMD12, PIO FIFO (TF-A, U-Boot), GPD/BD DMA (Linux); card with boot0/boot1 and user area; BootROM boots `EMMC_BOOT` images from boot0 |
 | SPI-NOR | `spinor.c` | 3-byte addressing (up to 16 MB), selectable JEDEC ID, reads 1-1-1/1-1-2/1-1-4/1-2-2/1-4-4, page program, 4K/32K/64K/chip erase, status registers with QE; BootROM boots `SF_BOOT` images from it; same folder backing store; with `nor-nand=on` next to a SPI-NAND |
-| Ethernet | `mtk_eth.c` | frame engine: QDMA TX (Linux), PDMA RX, PDMA v2 (U-Boot); TSO + checksum offload; LynxI SGMII PCS ×2; any combination of switch / PHYs on the two GMACs |
-| Switch | `mtk_eth.c` | MT7531: paged MDIO access, internal PHY indirect access, MTK special tag (DSA), learning FDB, port matrix, link IRQ → EINT 38. Airoha AN8855: 32-bit register bus over MDIO page 4, internal PHYs at MDIO 1..5, its registers translated into the MT7531 model (CPU port 5). MT7988 built-in switch: the MT7531 model memory mapped at 0x15020000, SoC GbE PHYs (MT7988 IDs, eFuse calibration) |
+| Ethernet | `mtk_eth.c` | frame engine: QDMA TX (Linux), PDMA RX, PDMA v2 (U-Boot); TSO + checksum offload; LynxI SGMII PCS ×2; any combination of switch / PHYs on the two GMACs; interrupt routing of mainline Linux and of MediaTek's SDK driver (vendor firmware: `FE_INT_GRP` groups, PDMA RX on the pdma lines, GIC 189..192) |
+| Switch | `mtk_eth.c` | MT7531: paged MDIO access, internal PHY indirect access, MTK special tag (DSA), learning FDB, port matrix, VLAN table (MediaTek's SDK switch driver), port 5 to a PHY or to GMAC1, link IRQ → EINT 38. Airoha AN8855: 32-bit register bus over MDIO page 4, internal PHYs at MDIO 1..5, its registers translated into the MT7531 model (CPU port 5). MT7988 built-in switch: the MT7531 model memory mapped at 0x15020000, SoC GbE PHYs (MT7988 IDs, eFuse calibration) |
 | PHYs | `mtk_eth.c` | MT7531 GPHY ×5; RTL8221B-VB-CG (C45, temperature sensor); Motorcomm YT8821 (extended registers, UTP/SerDes spaces, 2.5G status); MaxLinear GPY211C (C45, firmware version, mailbox, temperature sensor); Airoha EN8811H (buckpbus window on MDIO page 4, MCU firmware download, 2.5G status, LED registers); MT7981 built-in GbE PHY (calibration handshake); a PHY on MT7531 port 5; optional hardware reset GPIOs |
 | GPIO / EINT | `mtk_pinctrl.c` | buttons (reset/WPS, `reset-hold-ms` for timed presses), LED log, pad levels to board devices |
 | LEDs | `filogic_leds.c`, `ws2812b.c`, `hc595.c` | front panel LEDs from the preset: GPIO, PHY LED registers (RTL8221B, GPY211, EN8811H, MediaTek GbE / 2.5G PHYs, also of switch ports), WS2812B on SPI, 74HC595 shift registers on SPI (latched on CS), PWM channels; blinking detection; `led-state` |
@@ -456,7 +458,7 @@ All device models live in `hw/arm/filogic/` of the QEMU tree
 | PCIe (MT7987, MT7988) | `mtk_pcie.c` | MediaTek Gen3 host: link, CFGNUM configuration TLPs, INTx, MSI capture, with QEMU's PCIe root port |
 | Wi-Fi 7 card (MT7987) | `mt7992_wifi.c` | MT7992 for mt7996e: BAR0 remap windows, WFDMA rings, patch/RAM download, UNI command results, TX free events; radio silent |
 | Crypto (EIP-97) | ID only | the safexcel driver detects "no packet engine" and disables itself; software crypto is used |
-| WED | reset bits only | with `wed_enable=1` mt7915e detects the missing WO MCU and runs without offload |
+| WED | `mtk_wmac.c`, `mtk_wo.c`, reset bits | for MediaTek's vendor Wi-Fi driver (stock firmware: mt_wifi + mtk_warp): Wi-Fi RX enable and interrupts through WED, and the WO offload CPU as a message stub (CCIF mailbox and rings; every request answered, heartbeat, booted) so the driver does not wait 3 s per message. No offload datapath; OpenWrt's mt7915e uses WED only with `wed_enable=1` (not tested against the WO stub) |
 
 A new `pcap` netdev (`net/pcap.c`, libpcap / Npcap loaded at run time)
 attaches a port to a host adapter like a bridged adapter — used by the
