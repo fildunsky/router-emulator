@@ -164,7 +164,7 @@ routers use; saving from the editor drops `;` comments).
 | Netis NX32U | 4×1G MT7531 (WAN = port 0) | DDR3 256 MB | 128 MB | 3.0 | OpenWrt |
 | Cudy WR3000 v1 | 4×1G MT7531 (WAN = port 0) | DDR3 256 MB | **SPI-NOR 16 MB** (XM25QH128C) | – | vendor |
 | Xiaomi Mi Router AX3000T | 4×1G MT7531 (WAN = port 0) | DDR3 256 MB | 128 MB, Xiaomi layout | – | OpenWrt (U-Boot layout) |
-| SNR-CPE-AX2 | 5×1G MT7531 (WAN = port 0); GMAC1 linked to switch port 5 (WAN of the SNR firmware) | DDR3 256 MB | 128 MB, no bdinfo | – | OpenWrt; the SNR firmware boots from a dump of the whole NAND |
+| SNR-CPE-AX2 | 5×1G MT7531 (WAN = port 0); GMAC1 linked to switch port 5 (WAN of the SNR firmware) | DDR3 256 MB | 128 MB, no bdinfo | – | OpenWrt; the SNR firmware boots from a dump of your own router's whole NAND (not provided) |
 | Huasifei WH3000 Pro NAND | 2.5G LAN RTL8221B + 1G WAN built-in PHY, no switch | DDR4 1 GB | 256 MB, no bdinfo | 3.0 | vendor (NMBM) |
 | Huasifei WH3000R NAND | 1G WAN built-in PHY + 3×1G LAN MT7531 | DDR3 512 MB | 256 MB, no bdinfo | 3.0 | vendor (NMBM) |
 | Keenetic KN-1012 | 1G WAN built-in PHY + 4×1G LAN MT7531 (SFP not emulated) | DDR4 512 MB | 256 MB | 3.0 | vendor (NMBM) |

@@ -169,7 +169,7 @@ WS2812B, 74HC595, PWM), GPIO
 | Netis NX32U | 4×1G MT7531 (WAN = порт 0) | DDR3 256 МБ | 128 МБ | 3.0 | OpenWrt |
 | Cudy WR3000 v1 | 4×1G MT7531 (WAN = порт 0) | DDR3 256 МБ | **SPI-NOR 16 МБ** (XM25QH128C) | – | стоковый |
 | Xiaomi Mi Router AX3000T | 4×1G MT7531 (WAN = порт 0) | DDR3 256 МБ | 128 МБ, разметка Xiaomi | – | OpenWrt (U-Boot layout) |
-| SNR-CPE-AX2 | 5×1G MT7531 (WAN = порт 0); GMAC1 связан с портом 5 коммутатора (WAN заводской прошивки SNR) | DDR3 256 МБ | 128 МБ, без bdinfo | – | OpenWrt; заводская прошивка SNR загружается с дампа всего NAND |
+| SNR-CPE-AX2 | 5×1G MT7531 (WAN = порт 0); GMAC1 связан с портом 5 коммутатора (WAN заводской прошивки SNR) | DDR3 256 МБ | 128 МБ, без bdinfo | – | OpenWrt; заводская прошивка SNR загружается с дампа всего NAND вашего роутера (не прилагается) |
 | Huasifei WH3000 Pro NAND | 2.5G LAN RTL8221B + 1G WAN встроенный PHY, без коммутатора | DDR4 1 ГБ | 256 МБ, без bdinfo | 3.0 | стоковый (NMBM) |
 | Huasifei WH3000R NAND | 1G WAN встроенный PHY + 3×1G LAN MT7531 | DDR3 512 МБ | 256 МБ, без bdinfo | 3.0 | стоковый (NMBM) |
 | Keenetic KN-1012 | 1G WAN встроенный PHY + 4×1G LAN MT7531 (SFP не эмулируется) | DDR4 512 МБ | 256 МБ | 3.0 | стоковый (NMBM) |
