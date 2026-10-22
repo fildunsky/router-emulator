@@ -1,0 +1,83 @@
+From f02816e5e1e13838be0fdab8292c2cc5f33a206a Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Thu, 22 Oct 2026 09:36:45 -0400
+Subject: [PATCH] hw/intc/mips_gic, hw/mips/mt7621: CP0 timers through the GIC
+ on every VPE
+
+The CP0 timer of VPE 0 was wired straight to its IP7 (for Breed's
+scheduler).  The stock Cudy M1300 v2 firmware (LEDE, Linux 4.4) ticks
+with the GIC's own timer and never handles IP7: "irq 7: nobody cared"
+storms from the first second.
+
+Now every VPE's CP0 timer is a routable GIC local interrupt, mapped to
+pin 5 (IP7) after reset, and the MT7621 reset leaves only that local
+interrupt unmasked (compare masked, as before).  Breed, which never
+touches the local registers, still gets its timer on IP7 (web console
+HTTP 200); Linux masks all local interrupts when it sets up the GIC
+(4.4 and 6.12: no IP7 interrupts).
+---
+ hw/intc/mips_gic.c |  3 ++-
+ hw/mips/mt7621.c   | 22 +++++++++++-----------
+ 2 files changed, 13 insertions(+), 12 deletions(-)
+
+diff --git a/hw/intc/mips_gic.c b/hw/intc/mips_gic.c
+index eaaf709..7681b09 100644
+--- a/hw/intc/mips_gic.c
++++ b/hw/intc/mips_gic.c
+@@ -417,7 +417,8 @@ static void gic_reset(void *opaque)
+     for (i = 0; i < gic->num_vps; i++) {
+         /* Vx_CTL: TIMER_ROUTABLE (bit 1) when the CP0 timers are inputs */
+         gic->vps[i].ctl         = gic->timer_routable & BIT(i) ? 0x2 : 0x0;
+-        gic->vps[i].timer_map   = GIC_MAP_TO_PIN_MSK;
++        /* the CP0 timer on pin 5 = IP7, where it is without a GIC */
++        gic->vps[i].timer_map   = GIC_MAP_TO_PIN_MSK | 5;
+         gic->vps[i].pend        = 0x0;
+         /* PERFCNT, TIMER and WD not implemented */
+         gic->vps[i].mask        = 0x32;
+diff --git a/hw/mips/mt7621.c b/hw/mips/mt7621.c
+index 853e044..da39465 100644
+--- a/hw/mips/mt7621.c
++++ b/hw/mips/mt7621.c
+@@ -795,12 +795,13 @@ static void mt7621_reset(void *opaque)
+         tb_flush(first_cpu);
+     }
+     /*
+-     * GIC: local interrupts (compare, timer, ...) masked after reset, as
+-     * on the hardware; QEMU's GIC enables the compare one (mapped to pin
+-     * 0), which a bootloader not using the GIC timer never clears (Breed)
++     * GIC local interrupts after reset: only the CP0 timer (on IP7) is
++     * enabled, which bootloaders use (Breed); QEMU's GIC enables the
++     * compare one (mapped to pin 0) instead, which Breed never clears.
++     * Linux masks them all when it sets up the GIC.
+      */
+     for (int i = 0; i < b->cps.gic.num_vps; i++) {
+-        b->cps.gic.vps[i].mask = 0;
++        b->cps.gic.vps[i].mask = GIC_VP_MASK_TIMER_MSK;
+     }
+     if (b->flash_nand) {
+         mt7621_brom_nand(b);
+@@ -1065,15 +1066,14 @@ static void mt7621_init(MachineState *machine)
+     object_property_set_uint(OBJECT(&b->cps), "vp-per-core",
+                              machine->smp.cpus > 1 ? 2 : 0, &error_fatal);
+     /*
+-     * The CP0 timer of the first VPE is wired to its IP7 (bootloaders use
+-     * it: Breed's scheduler), those of the others are GIC local interrupts
+-     * (masked until an OS maps them): on the chip Linux gets no IP7 timer
+-     * interrupts on its secondary CPUs, though it unmasks IP2..7 there and
+-     * never sets their Compare
++     * The CP0 timers are GIC local interrupts on every VPE, mapped to pin 5
++     * (IP7) after reset: bootloaders use that (Breed's scheduler), Linux
++     * masks them and ticks with the GIC's own timer (6.12: "MIPS GIC Local
++     * 1 timer" on all CPUs, no IP7 interrupts; also the 4.4 of the stock
++     * Cudy firmware, which got an IP7 storm with VPE 0's timer wired to it)
+      */
+     object_property_set_uint(OBJECT(&b->cps), "gic-timer-routable",
+-                             ((1u << machine->smp.cpus) - 1) & ~1u,
+-                             &error_fatal);
++                             (1u << machine->smp.cpus) - 1, &error_fatal);
+     object_property_set_int(OBJECT(&b->cps), "gcr-rev", 0x600, &error_fatal);
+     /* 64 shared interrupts (Breed checks GIC_SH_CONFIG) */
+     object_property_set_uint(OBJECT(&b->cps), "num-irq", 64, &error_fatal);
+-- 
+2.47.3
+

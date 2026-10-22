@@ -1,0 +1,40 @@
+From ae01eaea2b4b377bfcff321f6d763753d29894f7 Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Thu, 22 Oct 2026 09:36:45 -0400
+Subject: [PATCH] hw/mips/mt7621: xHCI root ports with usb-port=none
+
+A board without a USB connector got an xHCI with no root ports; Linux
+4.4 (stock Cudy M1300 v2) gives up on it ("No ports on the roothubs?").
+The chip's ports stay, with nothing on them.
+---
+ hw/mips/mt7621.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/hw/mips/mt7621.c b/hw/mips/mt7621.c
+index da39465..50cefac 100644
+--- a/hw/mips/mt7621.c
++++ b/hw/mips/mt7621.c
+@@ -921,6 +921,8 @@ static void mt7621_create_eth(MT7621Board *b)
+  * xHCI (with the MediaTek IPPC wrapper in the palmbus register file):
+  * one USB 3.0 and one USB 2.0 root port, the board's connector on one of
+  * them; usb-host=VID:PID[;...] devices of the host on USB 2.0 ports 2, 3...
++ * A board without a connector (usb-port=none) keeps the chip's ports, with
++ * nothing on them: the xHCI driver gives up on a root hub without ports.
+  */
+ static void mt7621_create_usb(MT7621Board *b)
+ {
+@@ -934,9 +936,9 @@ static void mt7621_create_usb(MT7621Board *b)
+     }
+     qdev_prop_set_uint32(dev, "slots", 32);
+     qdev_prop_set_uint32(DEVICE(&XHCI_SYSBUS(dev)->xhci), "p2",
+-                         nhost ? 1 + nhost : b->usb ? 1 : 0);
++                         nhost ? 1 + nhost : 1);
+     qdev_prop_set_uint32(DEVICE(&XHCI_SYSBUS(dev)->xhci), "p3",
+-                         b->usb == 3 ? 1 : 0);
++                         b->usb == 2 ? 0 : 1);
+     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, MT7621_XHCI_BASE);
+     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+-- 
+2.47.3
+

@@ -95,6 +95,7 @@ no BL2 for it to try, reports welcome):
 | `switch-irq-gpio` | GPIO | EINT of the MT7531 interrupt (default 38 / 66 / 41 for MT7981 / MT7986 / MT7987) |
 | `flash=emmc`, `emmc-boot` | MB (4) | eMMC on MSDC0 instead: one image (the first `*.img` of the flash folder, or `-drive if=sd`) = boot0 + boot1 (`emmc-boot` MB each) + user area, size a power of 2 |
 | `nor`, `nor-id` | MB (16), JEDEC ID (`ef4018`) | SPI-NOR size and ID, e.g. `204018` = XMC XM25QH128C, `c84018` = GD25Q128; `nor=64,nor-id=ef4020` = Winbond W25Q512JV (64 MB, 4-byte addressing; e.g. a WR3000 with a bigger chip) |
+| `nor-uid` | 16 hex digits | MT7621 only: SPI-NOR unique ID (command 4b, default none); stock Cudy firmware of NOR boards (M1300 v2) checks chip ID + unique ID (`/proc/sys/dev/flash_uuid`, e.g. `2040182040-` + 16 digits) against bdinfo, without a match no admin password can be set or checked: set `nor-id` to the chip's ID and `nor-uid=` the 16 digits after the `-` |
 | `ddr` | `ddr3` · `ddr4` | soldered DRAM type: a BL2 built for the other type stops the machine, as DRAM init fails on a real board |
 | `usb-port` | `none` · `2` · `3` | USB connector (USB 3.0: devices attach at SuperSpeed) |
 | `usb-host` | `VID:PID[;VID:PID…]` | pass USB devices of this PC through to the router (USB 2.0 root ports 2, 3, …, also on boards without a connector), e.g. a Wi-Fi dongle, an LTE modem, a USB Ethernet adapter; see "USB Wi-Fi dongle" |
@@ -188,6 +189,7 @@ routers use; saving from the editor drops `;` comments).
 | Xiaomi Mi Router 3G (Breed) (**MT7621A**, MIPS) | as above | DDR3 256 MB | **parallel NAND 128 MB** (Xiaomi layout) | 3.0 | Breed 1.2 + OpenWrt |
 | Xiaomi Mi Router 4 (stock U-Boot) (**MT7621A**, MIPS) | 1G WAN (MT7530 PHY 4 muxed to GMAC1) + 2×1G LAN MT7530; Wi-Fi MT7603E + MT7612E on PCIe (radio silent) | DDR3 128 MB | **parallel NAND 128 MB** (Xiaomi layout) | – | stock Xiaomi U-Boot 1.1.3 + OpenWrt |
 | Cudy WR1300S (**MT7621A**, MIPS) | 1G WAN (MT7530 PHY 0 muxed to GMAC1) + 4×1G LAN MT7530; Wi-Fi MT7603E + MT7663E (MT7613BE) on PCIe (radio silent) | DDR3 128 MB | **SPI-NOR 16 MB** | 3.0 | stock Cudy U-Boot 1.1.3 + OpenWrt 25.12.5 (third-party build, the board is not in OpenWrt yet) |
+| Cudy M1300 v2 (**MT7621A**, MIPS) | 1G WAN (MT7530 PHY 4 muxed to GMAC1) + 1G LAN MT7530 port 3; Wi-Fi MT7603E + MT7663E (MT7613BE) on PCIe (radio silent) | DDR3 128 MB | **SPI-NOR 16 MB** | – | stock Cudy U-Boot 1.1.3 + OpenWrt; the stock Cudy firmware (LEDE, kernel 4.4) from a dump of your own router's flash |
 
 Netis boards have no bdinfo partition (FIP at 0x380000, ubi at 0x580000;
 MACs in Factory): presets set `openwrt-no-bdinfo=1`. The MT7986 boards use
@@ -418,6 +420,21 @@ the board data (encrypted) and the MAC: it is generated (MAC
 tools/prepare-nand.sh --soc mt7621 --nor --stock DIR cudy_wr1300s 25.12.5 nor-wr1300s
 ./emulator.sh -P cudy-wr1300s
 ```
+
+**Cudy M1300 v2** is in OpenWrt (`cudy_m1300-v2`, folder `nor-m1300-v2`)
+and is built the same way, from its `u-boot` and `factory`. Its two ports
+are auto-sensing in the stock firmware; OpenWrt makes switch port 3 the LAN
+and PHY 4 (through port 5 to GMAC1) the WAN. The stock Cudy firmware (LEDE,
+kernel 4.4, MediaTek's vendor Wi-Fi drivers) also runs: split a dump of the
+whole 16 MB flash at 0x30000 / 0x40000 / 0x50000 / 0xff0000 into
+`mt7621.mtd0.u-boot.bin` ... `mt7621.mtd4.bdinfo.bin` of a folder and pass
+it with `-n`. Its LAN address is 192.168.10.1 (`-o lan-ip=192.168.10.1`
+with `-l user`), and its console has no shell. The preset has the board's
+NOR chip (`nor-id=204018`, XMC XM25QH128D). The stock firmware compares the
+chip's unique ID with `bdinfo`: without your router's ID no admin password
+can be created or checked ("Invalid password!"). Give it as `nor-uid`, the
+16 digits after the `-` of `cat /proc/sys/dev/flash_uuid` on the router:
+`-o lan-ip=192.168.10.1,nor-uid=0123456789ABCDEF`.
 
 The folder (`tools/mknand.py mt7621-nand`) holds the stock partitions,
 OpenWrt's `kernel1.bin` in `kernel` (0x600000, "System 2") and

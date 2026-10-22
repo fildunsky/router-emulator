@@ -98,6 +98,7 @@ BL2, на котором попробовать, — будем рады отз�
 | `switch-irq-gpio` | GPIO | EINT прерывания MT7531 (по умолчанию 38 / 66 / 41 для MT7981 / MT7986 / MT7987) |
 | `flash=emmc`, `emmc-boot` | МБ (4) | вместо этого eMMC на MSDC0: один образ (первый `*.img` в папке флеша или `-drive if=sd`) = boot0 + boot1 (по `emmc-boot` МБ) + пользовательская область, размер — степень двойки |
 | `nor`, `nor-id` | МБ (16), JEDEC ID (`ef4018`) | размер и ID SPI-NOR, например `204018` = XMC XM25QH128C, `c84018` = GD25Q128; `nor=64,nor-id=ef4020` = Winbond W25Q512JV (64 МБ, 4-байтовая адресация; например, WR3000 с перепаянной микросхемой) |
+| `nor-uid` | 16 hex-цифр | только MT7621: уникальный ID SPI-NOR (команда 4b, по умолчанию нет); стоковая прошивка Cudy на NOR-платах (M1300 v2) сверяет ID и уникальный ID микросхемы (`/proc/sys/dev/flash_uuid`, например `2040182040-` + 16 цифр) с bdinfo, без совпадения пароль администратора нельзя ни задать, ни проверить: задайте в `nor-id` ID микросхемы, а в `nor-uid=` — 16 цифр после `-` |
 | `ddr` | `ddr3` · `ddr4` | тип распаянной памяти: BL2, собранный для другого типа, останавливает машину, как не проходит инициализация DRAM на настоящей плате |
 | `usb-port` | `none` · `2` · `3` | разъём USB (USB 3.0: устройства подключаются на SuperSpeed) |
 | `usb-host` | `VID:PID[;VID:PID…]` | проброс USB-устройств этого ПК в роутер (корневые порты USB 2.0 №2, 3, …, в том числе на платах без разъёма), например Wi-Fi-донгла, LTE-модема, USB-Ethernet; см. «USB Wi-Fi-донгл» |
@@ -193,6 +194,7 @@ WS2812B, 74HC595, PWM), GPIO
 | Xiaomi Mi Router 3G (Breed) (**MT7621A**, MIPS) | так же | DDR3 256 МБ | **параллельный NAND 128 МБ** (разметка Xiaomi) | 3.0 | Breed 1.2 + OpenWrt |
 | Xiaomi Mi Router 4 (стоковый U-Boot) (**MT7621A**, MIPS) | 1G WAN (PHY 4 MT7530 напрямую на GMAC1) + 2×1G LAN MT7530; Wi-Fi MT7603E + MT7612E на PCIe («радиомолчащие») | DDR3 128 МБ | **параллельный NAND 128 МБ** (разметка Xiaomi) | – | стоковый U-Boot 1.1.3 Xiaomi + OpenWrt |
 | Cudy WR1300S (**MT7621A**, MIPS) | 1G WAN (PHY 0 MT7530 напрямую на GMAC1) + 4×1G LAN MT7530; Wi-Fi MT7603E + MT7663E (MT7613BE) на PCIe («радиомолчащие») | DDR3 128 МБ | **SPI-NOR 16 МБ** | 3.0 | стоковый U-Boot 1.1.3 Cudy + OpenWrt 25.12.5 (сторонняя сборка, платы ещё нет в OpenWrt) |
+| Cudy M1300 v2 (**MT7621A**, MIPS) | 1G WAN (PHY 4 MT7530 напрямую на GMAC1) + 1G LAN порт 3 MT7530; Wi-Fi MT7603E + MT7663E (MT7613BE) на PCIe («радиомолчащие») | DDR3 128 МБ | **SPI-NOR 16 МБ** | – | стоковый U-Boot 1.1.3 Cudy + OpenWrt; стоковая прошивка Cudy (LEDE, ядро 4.4) — из дампа флеша вашего роутера |
 
 У плат Netis нет раздела bdinfo (FIP с 0x380000, ubi с 0x580000; MAC — в
 Factory): в пресетах стоит `openwrt-no-bdinfo=1`. У плат на MT7986 та же
@@ -423,6 +425,22 @@ tools/prepare-nand.sh --soc mt7621 --stock DIR xiaomi_mi-router-3g 25.12.5 nand-
 tools/prepare-nand.sh --soc mt7621 --nor --stock DIR cudy_wr1300s 25.12.5 nor-wr1300s
 ./emulator.sh -P cudy-wr1300s
 ```
+
+**Cudy M1300 v2** есть в OpenWrt (`cudy_m1300-v2`, папка `nor-m1300-v2`) и
+собирается так же, из его `u-boot` и `factory`. В стоковой прошивке оба
+порта автоопределяемые; OpenWrt делает LAN порт 3 коммутатора, а WAN — PHY 4
+(через порт 5 на GMAC1). Стоковая прошивка Cudy (LEDE, ядро 4.4,
+вендорские драйверы Wi-Fi MediaTek) тоже работает: разрежьте дамп всего
+флеша 16 МБ по 0x30000 / 0x40000 / 0x50000 / 0xff0000 на
+`mt7621.mtd0.u-boot.bin` ... `mt7621.mtd4.bdinfo.bin` в одной папке и
+передайте её через `-n`. Её адрес LAN — 192.168.10.1
+(`-o lan-ip=192.168.10.1` с `-l user`), shell в консоли нет. В пресете —
+микросхема NOR платы (`nor-id=204018`, XMC XM25QH128D). Стоковая прошивка
+сверяет уникальный ID микросхемы с `bdinfo`: без ID вашего роутера пароль
+администратора нельзя ни задать, ни проверить («Invalid password!»).
+Передайте его в `nor-uid` — 16 цифр после `-` из
+`cat /proc/sys/dev/flash_uuid` на роутере:
+`-o lan-ip=192.168.10.1,nor-uid=0123456789ABCDEF`.
 
 В папке (`tools/mknand.py mt7621-nand`) — стоковые разделы, `kernel1.bin`
 OpenWrt в `kernel` (0x600000, «System 2») и `rootfs0.bin` в `ubi`;

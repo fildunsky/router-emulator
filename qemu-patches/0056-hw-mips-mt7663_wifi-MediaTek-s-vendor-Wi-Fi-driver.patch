@@ -1,0 +1,275 @@
+From 061b42f87bfc16d85e0faaa6a58430e64935eea0 Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Thu, 22 Oct 2026 11:21:03 -0400
+Subject: [PATCH] hw/mips/mt7663_wifi: MediaTek's vendor Wi-Fi driver
+
+The stock Cudy M1300 v2 firmware runs MediaTek's own driver (MT7613
+6.0.4.0) for the MT7663E instead of mt76.
+
+TOP_HVR / FVR / HCR at BAR 0xb1000 (chip check, FVR non-zero);
+CONN_ON_MISC carries the firmware state in bits 3:1 (1 = ROM ready for
+the patch after reset, 3 after firmware start, N9 ready bit 2 for mt76);
+RX done interrupts with bit 22 (the vendor ISR drops them without it);
+the patch semaphore answered as event 0x04; ext commands answered as
+event 0xed with ext_eid only when TXD ext_cid_ack asks for it (ids mt76
+takes for unsolicited events stay 0); event payload the request's size;
+events sent 0.2 ms after the kick, all queued ones together (the driver
+puts a command on its wait list after kicking the ring).  The driver
+downloads its patch and firmware and brings up rai0 without timeouts.
+
+mt76 (OpenWrt) is unchanged: the card comes up on WR1300S, M1300 v2.
+---
+ hw/mips/mt7663_wifi.c | 124 +++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 109 insertions(+), 15 deletions(-)
+
+diff --git a/hw/mips/mt7663_wifi.c b/hw/mips/mt7663_wifi.c
+index cd31c75..8cbd2e6 100644
+--- a/hw/mips/mt7663_wifi.c
++++ b/hw/mips/mt7663_wifi.c
+@@ -11,12 +11,19 @@
+  * semaphore answered as taken / released), firmware start sets "N9
+  * ready", TX frames are completed.  Nothing goes on the air.
+  *
++ * MediaTek's vendor driver (mt_wifi, e.g. stock Cudy M1300 v2) also runs:
++ * it reads the chip ID at TOP_MISC 0xb1000, waits for the firmware state
++ * in CONN_ON_MISC, takes RX interrupts only with bit 22, needs the patch
++ * semaphore as event 0x04 and ext command answers as event 0xed with
++ * ext_eid, of the request's payload size, and a moment after the kick.
++ *
+  * SPDX-License-Identifier: GPL-2.0-or-later
+  */
+ 
+ #include "qemu/osdep.h"
+ #include "qemu/log.h"
+ #include "qemu/module.h"
++#include "qemu/timer.h"
+ #include "qapi/error.h"
+ #include "hw/pci/pci_device.h"
+ #include "hw/pci/pcie.h"
+@@ -29,8 +36,12 @@ OBJECT_DECLARE_SIMPLE_TYPE(Mt7663State, MT7663_WIFI)
+ 
+ #define BAR0_SIZE       0x100000
+ #define R_HW_REV        0x2000
++#define R_FW_REV        0x2004          /* ROM version: non-zero */
+ #define R_HW_CHIPID     0x2008
++#define R_TOP_MISC      0xb0000         /* chip 0x80020000 (vendor driver) */
+ #define R_INT_SOURCE    0x4200
++#define  INT_RX_DONE(q) BIT(q)
++#define  INT_RX_ANY     BIT(22)         /* the vendor driver needs it */
+ #define R_INT_MASK      0x4204
+ #define R_WPDMA_GLO     0x4208
+ #define R_WPDMA_RST     0x420c
+@@ -46,6 +57,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(Mt7663State, MT7663_WIFI)
+ #define WIN_2_SIZE      0x10000
+ #define R_CONN_ON_MISC  0xc1140
+ #define  FW_N9_RDY      BIT(2)
++/* vendor driver: firmware state in [3:1], 1 = ROM ready for the download */
++#define  FW_STATE_DL    (1 << 1)
++#define  FW_STATE_RDY   (3 << 1)        /* normal TRX, with FW_N9_RDY */
+ 
+ #define EFUSE_BASE      0x78011000u     /* chip address */
+ #define EFUSE_CTRL      0x008
+@@ -61,6 +75,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(Mt7663State, MT7663_WIFI)
+ #define EEPROM_SIZE     1536
+ 
+ /* MCU TXD (64 bytes: 32 of TXD, then len, pq_id, cid, ..., seq at 39) */
++#define TXD_LEN         32              /* u16: length after the 32 bytes */
+ #define TXD_CID         36
+ #define TXD_SEQ         39
+ #define TXD_SIZE        64
+@@ -71,6 +86,19 @@ OBJECT_DECLARE_SIMPLE_TYPE(Mt7663State, MT7663_WIFI)
+ #define CMD_PATCH_SEM   0x10
+ #define CMD_FW_SCATTER  0xee
+ #define EVENT_GENERIC   0x01
++#define EVENT_PATCH_SEM 0x04            /* the vendor driver needs it */
++#define CMD_EXT         0xed            /* answer: event 0xed, ext_eid */
++#define TXD_EXT_CID     41
++#define TXD_EXT_ACK     43              /* ext command wants an answer */
++/*
++ * events go out after 0.2 ms: the vendor driver puts a command on its
++ * wait list after kicking the ring, an answer before that is lost
++ */
++#define EVENT_DELAY_NS  200000
++#define NEVENTS         256
++/* event payload: the request's size, at least 8 (vendor driver checks it) */
++#define EVENT_LEN_MIN   8
++#define EVENT_LEN_MAX   1024
+ #define PATCH_NOT_DL_SEM_SUCCESS 2
+ #define PATCH_REL_SEM_SUCCESS    3
+ 
+@@ -85,6 +113,13 @@ struct Mt7663State {
+     GHashTable *chip;                   /* chip address -> value */
+     uint8_t eeprom[EEPROM_SIZE];
+     MACAddr mac;
++    QEMUTimer *event_timer;
++    struct {
++        uint8_t eid, seq, status;
++        uint16_t len;
++        uint32_t data;
++    } events[NEVENTS];                  /* not sent yet */
++    int nevents;
+ };
+ 
+ static void update_irq(Mt7663State *s)
+@@ -154,57 +189,107 @@ static uint32_t *ring(Mt7663State *s, hwaddr base, int q)
+ }
+ 
+ /* event answering MCU command seq: RX descriptor type 7 (RX_EVENT) */
+-static void mcu_event(Mt7663State *s, uint8_t seq, uint8_t status,
+-                      uint32_t data)
++static void event_send(Mt7663State *s, uint8_t eid, uint8_t seq,
++                       uint8_t status, uint16_t len, uint32_t data)
+ {
+     uint32_t *rq = ring(s, R_RX_RING, MCU_RXQ);
+     uint32_t size = rq[1], didx = rq[3], desc[4];
+-    uint8_t ev[RXD_SIZE + 16] = { 0 };
++    uint8_t ev[RXD_SIZE + EVENT_LEN_MAX] = { 0 };
++    uint32_t n = RXD_SIZE + len;
+     dma_addr_t d;
+ 
+     if (!rq[0] || !size || didx == rq[2] % size) {
+         return;
+     }
+-    stw_le_p(ev + 0, sizeof(ev));
++    stw_le_p(ev + 0, n);
+     stw_le_p(ev + 2, 7 << 13);          /* PKT_TYPE_RX_EVENT */
+-    stw_le_p(ev + 16, sizeof(ev) - 16);
+-    ev[20] = EVENT_GENERIC;
++    stw_le_p(ev + 16, n - 16);
++    ev[20] = eid;
+     ev[21] = seq;
+-    ev[24] = status;                    /* e.g. the patch semaphore */
++    ev[24] = status;                    /* patch semaphore, or ext_eid */
+     stl_le_p(ev + RXD_SIZE, data);      /* first word of the payload */
+     d = rq[0] + didx * 16;
+     pci_dma_read(PCI_DEVICE(s), d, desc, sizeof(desc));
+-    pci_dma_write(PCI_DEVICE(s), le32_to_cpu(desc[0]), ev, sizeof(ev));
+-    desc[1] = cpu_to_le32(DMA_DONE | LAST_SEC0 | (sizeof(ev) << 16));
++    pci_dma_write(PCI_DEVICE(s), le32_to_cpu(desc[0]), ev, n);
++    desc[1] = cpu_to_le32(DMA_DONE | LAST_SEC0 | (n << 16));
+     desc[3] = 0;
+     pci_dma_write(PCI_DEVICE(s), d, desc, sizeof(desc));
+     rq[3] = (didx + 1) % size;
+-    raise_irq(s, BIT(MCU_RXQ));
++    raise_irq(s, INT_RX_DONE(MCU_RXQ) | INT_RX_ANY);
++}
++
++static void event_timer_cb(void *opaque)
++{
++    Mt7663State *s = opaque;
++
++    for (int i = 0; i < s->nevents; i++) {
++        event_send(s, s->events[i].eid, s->events[i].seq,
++                   s->events[i].status, s->events[i].len, s->events[i].data);
++    }
++    s->nevents = 0;
++}
++
++static void mcu_event(Mt7663State *s, uint8_t eid, uint8_t seq,
++                      uint8_t status, uint16_t len, uint32_t data)
++{
++    if (s->nevents == NEVENTS) {
++        qemu_log_mask(LOG_GUEST_ERROR, "mt7663e: too many MCU events\n");
++        return;
++    }
++    s->events[s->nevents].eid = eid;
++    s->events[s->nevents].seq = seq;
++    s->events[s->nevents].status = status;
++    s->events[s->nevents].len = len;
++    s->events[s->nevents++].data = data;
++    if (!timer_pending(s->event_timer)) {
++        timer_mod(s->event_timer,
++                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + EVENT_DELAY_NS);
++    }
+ }
+ 
+ static void mcu_command(Mt7663State *s, dma_addr_t buf)
+ {
+     uint8_t txd[TXD_SIZE + 4];
+-    uint8_t status = 0;
++    uint8_t eid = EVENT_GENERIC, status = 0;
+     uint32_t data = 0;
++    int len;
+ 
+     pci_dma_read(PCI_DEVICE(s), buf, txd, sizeof(txd));
++    len = lduw_le_p(txd + TXD_LEN) + 32 - TXD_SIZE;
++    len = MIN(MAX(len, EVENT_LEN_MIN), EVENT_LEN_MAX);
+     switch (txd[TXD_CID]) {
+     case CMD_FW_SCATTER:
+         return;                         /* firmware data: no answer */
+     case CMD_FW_START:
+-        s->r[R_CONN_ON_MISC / 4] |= FW_N9_RDY;
++        s->r[R_CONN_ON_MISC / 4] = FW_STATE_RDY;
+         break;
+     case CMD_PATCH_SEM:
+         /* request: op 1 = get, 0 = release */
+         status = ldl_le_p(txd + TXD_SIZE) ? PATCH_NOT_DL_SEM_SUCCESS
+                                           : PATCH_REL_SEM_SUCCESS;
++        eid = EVENT_PATCH_SEM;
+         break;
+     }
+-    if (txd[TXD_CID] == 0xed && txd[TXD_CID + 5] == 0x2c) {
+-        data = 45;                      /* THERMAL_CTRL: 45 degrees C */
++    if (txd[TXD_CID] == CMD_EXT) {
++        uint8_t ext = txd[TXD_EXT_CID];
++
++        if (!txd[TXD_EXT_ACK]) {
++            return;                     /* no answer wanted */
++        }
++        if (ext == 0x2c) {
++            data = 45;                  /* THERMAL_CTRL: 45 degrees C */
++        }
++        /*
++         * the vendor driver matches ext_eid (in the status byte); ids
++         * mt76 takes for unsolicited events (PS sync, firmware log,
++         * thermal protection, assert dump) stay 0
++         */
++        eid = CMD_EXT;
++        if (ext != 0x05 && ext != 0x13 && ext != 0x22 && ext != 0x23) {
++            status = ext;
++        }
+     }
+-    mcu_event(s, txd[TXD_SEQ], status, data);
++    mcu_event(s, eid, txd[TXD_SEQ], status, len, data);
+ }
+ 
+ static void tx_kick(Mt7663State *s, int q)
+@@ -242,11 +327,16 @@ static uint64_t bar0_read(void *opaque, hwaddr off, unsigned size)
+         }
+         return chip_get(s, a);
+     }
++    if (off >= R_TOP_MISC + 0x1000 && off < R_TOP_MISC + 0x1010) {
++        off += R_HW_REV - (R_TOP_MISC + 0x1000);  /* TOP_HVR, FVR, HCR */
++    }
+     switch (off) {
+     case R_HW_CHIPID:
+         return 0x7663;
+     case R_HW_REV:
+         return 0x11;
++    case R_FW_REV:
++        return 0x8a10;
+     case R_WPDMA_GLO:
+         return s->r[off / 4] & ~(BIT(1) | BIT(3));      /* never busy */
+     case R_WTBL_UPDATE:
+@@ -320,7 +410,10 @@ static void mt7663_reset(DeviceState *dev)
+ 
+     memset(s->r, 0, sizeof(s->r));
+     g_hash_table_remove_all(s->chip);
++    timer_del(s->event_timer);
++    s->nevents = 0;
+     s->r[R_LPCTL / 4] = LPCR_FW_OWN;    /* the firmware owns the chip */
++    s->r[R_CONN_ON_MISC / 4] = FW_STATE_DL;
+     update_irq(s);
+ }
+ 
+@@ -334,6 +427,7 @@ static void mt7663_realize(PCIDevice *pd, Error **errp)
+         return;
+     }
+     s->chip = g_hash_table_new(g_direct_hash, g_direct_equal);
++    s->event_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, event_timer_cb, s);
+     memory_region_init_io(&s->bar0, OBJECT(s), &bar0_ops, s, "mt7663e",
+                           BAR0_SIZE);
+     pci_register_bar(pd, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bar0);
+-- 
+2.47.3
+

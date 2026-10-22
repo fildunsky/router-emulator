@@ -1,0 +1,216 @@
+From 22136fc521a5a9a9ad41bcf38fad9133c8924257 Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Thu, 22 Oct 2026 11:21:12 -0400
+Subject: [PATCH] hw/arm/filogic/spinor, hw/mips/mt7621: SPI-NOR ID and unique
+ ID (nor-id, nor-uid)
+
+Stock Cudy firmware (M1300 v2) builds /proc/sys/dev/flash_uuid from the
+NOR's RDID bytes and its unique ID (4b, 4 dummy bytes, 8 bytes) and
+checks it against bdinfo: with the emulated Winbond W25Q128 and no unique
+ID the admin password can be neither created nor checked.
+
+spinor: "id" (hex, 3 to 6 RDID bytes, repeated after them, e.g. 204018 =
+XMC XM25QH128C/D) and "uid" (hex, up to 16 bytes, command 4b).
+mt7621-router: nor-id and nor-uid; nor-uid as flash_uuid shows it (the
+stock kernel prints the bytes last first).  With the router's own values
+the stock admin password can be set and logged in with.
+---
+ hw/arm/filogic/spinor.c | 53 +++++++++++++++++++++++++++++++++++---
+ hw/mips/mt7621.c        | 56 +++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 106 insertions(+), 3 deletions(-)
+
+diff --git a/hw/arm/filogic/spinor.c b/hw/arm/filogic/spinor.c
+index e3b5e11..1f627a3 100644
+--- a/hw/arm/filogic/spinor.c
++++ b/hw/arm/filogic/spinor.c
+@@ -8,7 +8,11 @@
+  *   (1 byte mode/dummy), eb 1-4-4 (3 bytes mode/dummy), 02/32 page program,
+  *   20/52/d8 erase, c7/60 chip erase, 9f RDID, 05/35/15 RDSR1-3,
+  *   01/31/11 WRSR1-3, 06/04 WREN/WRDI, 5a SFDP (reads as erased: drivers
+- *   fall back to their ID tables), 66/99 reset, ab release power-down.
++ *   fall back to their ID tables), 66/99 reset, ab release power-down,
++ *   4b read unique ID (4 dummy bytes, then the "uid" property's bytes;
++ *   stock Cudy firmware checks it against bdinfo).  The "id" property
++ *   (hex, 3 to 6 bytes, e.g. 204018 = XMC XM25QH128C/D) replaces id0..2:
++ *   RDID returns its bytes, then repeats them.
+  * Chips over 16 MiB (e.g. W25Q512JV, 64 MiB, ef 40 20): b7/e9 enter/exit
+  * 4-byte address mode (SR3 ADS), the 4-byte opcodes 13/0c/3c/6c/bc/ec read,
+  * 12/34 program, 21/5c/dc erase, and Winbond's extended address register
+@@ -53,7 +57,12 @@ struct SpiNorState {
+     int nsegs;
+     uint8_t *storage;
+     uint32_t size_mb;
+-    uint8_t id[3];
++    uint8_t id[6];
++    int id_len;
++    char *id_str;                   /* "id": RDID bytes, hex */
++    char *uid_str;                  /* "uid": unique ID (4b), hex */
++    uint8_t uid[16];
++    int uid_len;
+ 
+     uint8_t sr[3];
+     bool addr4;                     /* 4-byte address mode (b7) */
+@@ -331,7 +340,7 @@ static uint32_t spinor_transfer(SSIPeripheral *dev, uint32_t val)
+ 
+     switch (s->cmd) {
+     case 0x9f:                          /* RDID */
+-        return s->id[(pos - 1) % 3];
++        return s->id[(pos - 1) % s->id_len];
+     case 0x05: case 0x35: case 0x15:    /* RDSR1/2/3 */
+         return s->sr[s->cmd == 0x05 ? 0 : s->cmd == 0x35 ? 1 : 2];
+     case 0x01:                          /* WRSR: SR1 [, SR2] */
+@@ -352,6 +361,8 @@ static uint32_t spinor_transfer(SSIPeripheral *dev, uint32_t val)
+         /* Winbond: 0x17 for 16 MiB (id2 0x18) ... 0x19 for 64 MiB (0x20) */
+         return pos >= 4 ? (s->id[2] >= 0x20 ? s->id[2] - 7 : s->id[2] - 1)
+                         : 0xff;
++    case 0x4b:                          /* read unique ID: 4 dummy bytes */
++        return pos >= 5 && pos - 5 < s->uid_len ? s->uid[pos - 5] : 0xff;
+     case 0xc5:                          /* write extended address register */
+         if (pos == 1 && s->sr[0] & SR1_WEL) {
+             s->ear = val;
+@@ -437,11 +448,45 @@ static int spinor_set_cs(SSIPeripheral *dev, bool select)
+     return 0;
+ }
+ 
++/* hex string -> at most max bytes; their number, or -1 */
++static int parse_hex(const char *str, uint8_t *out, int max)
++{
++    size_t n = strlen(str);
++
++    if (!n || n % 2 || n / 2 > max ||
++        strspn(str, "0123456789abcdefABCDEF") != n) {
++        return -1;
++    }
++    for (int i = 0; i < n / 2; i++) {
++        char h[3] = { str[2 * i], str[2 * i + 1], 0 };
++
++        out[i] = strtoul(h, NULL, 16);
++    }
++    return n / 2;
++}
++
+ static void spinor_realize(SSIPeripheral *dev, Error **errp)
+ {
+     SpiNorState *s = MTK_SPINOR(dev);
+     uint64_t size = nor_size(s);
+ 
++    s->id_len = 3;
++    if (s->id_str) {
++        s->id_len = parse_hex(s->id_str, s->id, sizeof(s->id));
++        if (s->id_len < 3) {
++            error_setg(errp, "spinor: id must be 3 to 6 bytes in hex, "
++                       "e.g. 204018");
++            return;
++        }
++    }
++    if (s->uid_str) {
++        s->uid_len = parse_hex(s->uid_str, s->uid, sizeof(s->uid));
++        if (s->uid_len < 0) {
++            error_setg(errp, "spinor: uid must be 1 to 16 bytes in hex");
++            return;
++        }
++    }
++
+     s->storage = g_malloc(size);
+     memset(s->storage, 0xff, size);
+     if (s->dir && s->blk) {
+@@ -493,6 +538,8 @@ static const Property spinor_props[] = {
+     DEFINE_PROP_UINT8("id0", SpiNorState, id[0], 0xef),
+     DEFINE_PROP_UINT8("id1", SpiNorState, id[1], 0x40),
+     DEFINE_PROP_UINT8("id2", SpiNorState, id[2], 0x18),
++    DEFINE_PROP_STRING("id", SpiNorState, id_str),
++    DEFINE_PROP_STRING("uid", SpiNorState, uid_str),
+ };
+ 
+ static void spinor_class_init(ObjectClass *klass, const void *data)
+diff --git a/hw/mips/mt7621.c b/hw/mips/mt7621.c
+index 50cefac..378e26e 100644
+--- a/hw/mips/mt7621.c
++++ b/hw/mips/mt7621.c
+@@ -303,6 +303,8 @@ typedef struct MT7621Board {
+     char *flash_dir;
+     bool flash_nand;            /* flash=nand: boot from parallel NAND */
+     char *nand_id;              /* its READ ID bytes (hex) */
++    char *nor_id;               /* SPI-NOR RDID bytes (hex) */
++    char *nor_uid;              /* SPI-NOR unique ID (hex) */
+     char *ports;                /* MT7530 port 0..4 netdev ids, ':' separated */
+     char *pcie_card[3];         /* device type in PCIe slot 0..2 */
+     uint32_t usb;               /* 0 = none, 2 = USB 2.0, 3 = USB 3.0 port */
+@@ -853,6 +855,23 @@ static void mt7621_create_flash(MT7621Board *b)
+ 
+     dev = qdev_new(TYPE_MTK_SPINOR);
+     qdev_prop_set_uint32(dev, "size-mb", 16);
++    if (b->nor_id) {
++        qdev_prop_set_string(dev, "id", b->nor_id);
++    }
++    if (b->nor_uid) {
++        /*
++         * as Cudy's flash_uuid shows it: the stock kernel prints the bytes
++         * of the unique ID last first, the chip sends them in reverse
++         */
++        size_t n = strlen(b->nor_uid);
++        g_autofree char *uid = g_malloc0(n + 1);
++
++        for (size_t i = 0; i + 1 < n; i += 2) {
++            uid[n - i - 2] = b->nor_uid[i];
++            uid[n - i - 1] = b->nor_uid[i + 1];
++        }
++        qdev_prop_set_string(dev, "uid", n % 2 ? b->nor_uid : uid);
++    }
+     if (b->flash_dir) {
+         qdev_prop_set_string(dev, "dir", b->flash_dir);
+     } else if (dinfo) {
+@@ -1214,6 +1233,32 @@ static void mt7621_set_nand_id(Object *obj, const char *v, Error **errp)
+     ms->b.nand_id = g_strdup(v);
+ }
+ 
++static char *mt7621_get_nor_id(Object *obj, Error **errp)
++{
++    return g_strdup(MT7621_MACHINE(obj)->b.nor_id);
++}
++
++static void mt7621_set_nor_id(Object *obj, const char *v, Error **errp)
++{
++    MT7621MachineState *ms = MT7621_MACHINE(obj);
++
++    g_free(ms->b.nor_id);
++    ms->b.nor_id = g_strdup(v);
++}
++
++static char *mt7621_get_nor_uid(Object *obj, Error **errp)
++{
++    return g_strdup(MT7621_MACHINE(obj)->b.nor_uid);
++}
++
++static void mt7621_set_nor_uid(Object *obj, const char *v, Error **errp)
++{
++    MT7621MachineState *ms = MT7621_MACHINE(obj);
++
++    g_free(ms->b.nor_uid);
++    ms->b.nor_uid = g_strdup(v);
++}
++
+ static char *mt7621_get_ddr(Object *obj, Error **errp)
+ {
+     return g_strdup(MT7621_MACHINE(obj)->b.ddr == 2 ? "ddr2" : "ddr3");
+@@ -1429,6 +1474,17 @@ static void mt7621_machine_class_init(ObjectClass *oc, const void *data)
+     object_class_property_set_description(oc, "nand-id",
+         "READ ID bytes of the parallel NAND, hex (default ecf1009540, "
+         "Samsung K9F1G08U0D)");
++    object_class_property_add_str(oc, "nor-id", mt7621_get_nor_id,
++                                  mt7621_set_nor_id);
++    object_class_property_set_description(oc, "nor-id",
++        "RDID bytes of the SPI-NOR, hex, 3 to 6 (default ef4018, Winbond "
++        "W25Q128JV; 204018: XMC XM25QH128C/D)");
++    object_class_property_add_str(oc, "nor-uid", mt7621_get_nor_uid,
++                                  mt7621_set_nor_uid);
++    object_class_property_set_description(oc, "nor-uid",
++        "unique ID of the SPI-NOR (command 4b), hex, as Cudy firmware shows "
++        "it: the 16 digits after the '-' of /proc/sys/dev/flash_uuid (the "
++        "bytes in reverse of the chip's order)");
+     for (int i = 0; i < 3; i++) {
+         g_autofree char *name = g_strdup_printf("pcie%d", i);
+         object_class_property_add(oc, name, "str", mt7621_get_pcie_v,
+-- 
+2.47.3
+

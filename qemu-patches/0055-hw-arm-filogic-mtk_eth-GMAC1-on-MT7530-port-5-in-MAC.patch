@@ -1,0 +1,76 @@
+From ef8597dc8f5a1a6e32d4ecbb554c8100e9c94d2b Mon Sep 17 00:00:00 2001
+From: Dmitry Mostovoy <stavultras@gmail.com>
+Date: Thu, 22 Oct 2026 09:36:45 -0400
+Subject: [PATCH] hw/arm/filogic/mtk_eth: GMAC1 on MT7530 port 5 in MAC mode
+
+MediaTek's SDK switch driver (stock Cudy M1300 v2, Linux 4.4) leaves
+MT7530 port 5 a MAC (MHWTRAP P5_MAC_SEL set, P5_DIS clear): RGMII to
+GMAC1, the WAN as VLAN 2 tagged on eth1.  Frames between GMAC1 and port
+5 were dropped, so the stock firmware had no WAN.  That MHWTRAP now links
+GMAC1 to port 5 like gmac1=mt7531-p5; PHY muxing and P5_DIS (mainline
+DSA) are unchanged.
+---
+ hw/arm/filogic/mtk_eth.c | 26 +++++++++++++++++++++++---
+ 1 file changed, 23 insertions(+), 3 deletions(-)
+
+diff --git a/hw/arm/filogic/mtk_eth.c b/hw/arm/filogic/mtk_eth.c
+index 246b925..f167cfb 100644
+--- a/hw/arm/filogic/mtk_eth.c
++++ b/hw/arm/filogic/mtk_eth.c
+@@ -275,6 +275,26 @@ static int sw_p5_mux(MtkEthState *s)
+     return v & BIT(20) ? 0 : 4;
+ }
+ 
++/*
++ * GMAC1 on switch port 5: the MT7531 boards that say so, or an MT7530 whose
++ * MTRAP keeps port 5 a MAC (P5_MAC_SEL, not P5_DIS: RGMII to GMAC1, as
++ * MediaTek's SDK driver sets it, e.g. stock Cudy M1300 v2)
++ */
++static bool gmac1_on_p5(MtkEthState *s)
++{
++    uint32_t v;
++
++    if (s->gmac1_sw_p5) {
++        return true;
++    }
++    if (s->switch_model != 3 ||
++        !g_hash_table_contains(s->sw, GUINT_TO_POINTER(0x7804))) {
++        return false;
++    }
++    v = ht_get(s->sw, 0x7804, 0);
++    return (v & BIT(13)) && !(v & BIT(6));
++}
++
+ static bool port_link(MtkEthState *s, int idx)
+ {
+     NICState *nic = s->ports[idx].nic;
+@@ -1390,7 +1410,7 @@ static void sw_egress(MtkEthState *s, int src, int dst,
+         dst != sw_p5_mux(s)) {
+         s->frames[dst]++;
+         qemu_send_packet(qemu_get_queue(s->ports[dst].nic), buf, len);
+-    } else if (dst == 5 && s->gmac1_sw_p5) {
++    } else if (dst == 5 && gmac1_on_p5(s)) {
+         gdm_rx(s, 1, buf, len);
+     } else if (dst == 5 && s->p5phy_type && s->p5phy.link && s->ports[7].nic) {
+         s->frames[7]++;
+@@ -1671,7 +1691,7 @@ static void gmac_out(MtkEthState *s, int gdm, uint8_t *f, size_t len)
+ 
+     if (gdm == 0 && s->has_switch) {
+         sw_cpu_deliver(s, s->tx_mask, f, len);
+-    } else if (gdm == 1 && s->gmac1_sw_p5) {
++    } else if (gdm == 1 && gmac1_on_p5(s)) {
+         sw_forward(s, 5, f, len);
+     } else if (mux >= 0) {
+         if (s->gphy[mux].link && s->ports[mux].nic) {
+@@ -2113,7 +2133,7 @@ static uint64_t fe_read(void *opaque, hwaddr addr, unsigned size)
+         int id = (addr - MAC_MSR(0)) / 0x100;
+         uint32_t mcr = ht_get(s->fe, MAC_MCR(id), 0);
+         bool link = s->dphy_type[id] ? s->dphy[id].link
+-                    : id == 0 || (id == 1 && s->gmac1_sw_p5);
++                    : id == 0 || (id == 1 && gmac1_on_p5(s));
+         /* link, duplex, 1000M, rx/tx fc */
+         return (link || (mcr & 1)) ? 0x0000003f : 0;
+     }
+-- 
+2.47.3
+
