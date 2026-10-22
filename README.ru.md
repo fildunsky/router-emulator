@@ -163,6 +163,7 @@ WS2812B, 74HC595, PWM), GPIO
 | Cudy WR3000U v1 | 5×1G MT7531 (WAN = порт 0) | DDR3 512 МБ | 256 МБ | 3.0 | стоковый (NMBM) |
 | Cudy TR3000 v1 | 2.5G WAN RTL8221B на GMAC0 + 1G LAN встроенный PHY | DDR3 512 МБ | 128 МБ | 3.0 | OpenWrt (U-Boot layout) |
 | Cudy TR3000 256MB v1 | то же, без коммутатора | DDR3 512 МБ | 256 МБ | 3.0 | стоковый (NMBM) |
+| Bazis AX3000WM / WD-R3000N-G2A | 2.5G WAN MaxLinear GPY211C на GMAC0 + 1G LAN на встроенном PHY, без коммутатора | DDR3 256 МБ | 128 МБ, без bdinfo | 3.0 | OpenWrt |
 | Cudy M3000 v1 / v2 (RTL8221B) | 2.5G WAN RTL8221B + 1G LAN встроенный PHY | DDR3 256 МБ | 128 МБ | – | OpenWrt (своя сборка, U-Boot layout) |
 | Cudy M3000 v2 (YT8821) | 2.5G WAN Motorcomm YT8821 + 1G LAN встроенный PHY | DDR3 256 МБ | 128 МБ | – | OpenWrt (своя сборка, U-Boot layout) |
 | Netis NX30 V2, NX31 | 1G WAN встроенный PHY + 3×1G LAN MT7531 | DDR3 256 МБ | 128 МБ | – | OpenWrt |

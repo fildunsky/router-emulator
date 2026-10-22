@@ -158,6 +158,7 @@ routers use; saving from the editor drops `;` comments).
 | Cudy WR3000U v1 | 5×1G MT7531 (WAN = port 0) | DDR3 512 MB | 256 MB | 3.0 | vendor (NMBM) |
 | Cudy TR3000 v1 | 2.5G WAN RTL8221B on GMAC0 + 1G LAN built-in PHY | DDR3 512 MB | 128 MB | 3.0 | OpenWrt (U-Boot layout) |
 | Cudy TR3000 256MB v1 | same, no switch | DDR3 512 MB | 256 MB | 3.0 | vendor (NMBM) |
+| Bazis AX3000WM / WD-R3000N-G2A | 2.5G WAN MaxLinear GPY211C on GMAC0 + 1G LAN built-in PHY, no switch | DDR3 256 MB | 128 MB, no bdinfo | 3.0 | OpenWrt |
 | Cudy M3000 v1 / v2 (RTL8221B) | 2.5G WAN RTL8221B + 1G LAN built-in PHY | DDR3 256 MB | 128 MB | – | OpenWrt (own build, U-Boot layout) |
 | Cudy M3000 v2 (YT8821) | 2.5G WAN Motorcomm YT8821 + 1G LAN built-in PHY | DDR3 256 MB | 128 MB | – | OpenWrt (own build, U-Boot layout) |
 | Netis NX30 V2, NX31 | 1G WAN built-in PHY + 3×1G LAN MT7531 | DDR3 256 MB | 128 MB | – | OpenWrt |
