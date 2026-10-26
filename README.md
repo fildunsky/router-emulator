@@ -488,11 +488,12 @@ there are two presets:
   `nor-mi-router-4a-gigabit-v2-64m-uboot`, W25Q512JV 64 MB): OpenWrt's U-Boot
   2026.07 built for the board, sources and `build.sh` in
   [`tools/uboot-mi-router-4a-gigabit-v2`](tools/uboot-mi-router-4a-gigabit-v2)
-  (not built by CI: take the one on your router). One binary for 16, 32
-  and 64 MB: Xiaomi's layout with `firmware` cut to the chip, chips over
-  16 MB through the bank register (the chip stays in 3-byte mode, which
-  the boot ROM reads after a reboot), boot menu with TFTP recovery, the
-  MAC from `factory`.
+  (the built binary, padded to the 0x30000 `u-boot` partition, is
+  `u-boot.bin` there; not built by CI).
+  One binary for 16, 32 and 64 MB: Xiaomi's layout with `firmware` cut
+  to the chip, chips over 16 MB through the bank register (the chip stays
+  in 3-byte mode, which the boot ROM reads after a reboot), boot menu with
+  TFTP recovery, the MAC from `factory`, the yellow status LED on.
 
 ```bash
 # DIR: the bootloader (*mtd0*.bin or *u-boot*.bin), *factory*.bin
@@ -637,7 +638,8 @@ tools/                    prepare-nand.sh, mknand.py, host-bridge.sh,
 tools/uboot-rutc50/       U-Boot of the Teltonika RUTC50 preset (sources,
                           build.sh, the built FIP)
 tools/uboot-mi-router-4a-gigabit-v2/  U-Boot of the 4A Gigabit v2 with a
-                          32 / 64 MB flash (sources, build.sh)
+                          32 / 64 MB flash (sources, build.sh,
+                          the built binary)
 tools/ib-flash-size.py    OpenWrt image for a bigger SPI-NOR (ImageBuilder)
 windows/                  launcher, preset editor, terminal (C#),
                           README.txt for the package

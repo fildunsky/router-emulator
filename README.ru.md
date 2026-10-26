@@ -493,11 +493,13 @@ U-Boot, ни Breed 1.1 не знают чип 64 МБ (W25Q512JV), поэтом�
   `nor-mi-router-4a-gigabit-v2-64m-uboot`, W25Q512JV 64 МБ): U-Boot 2026.07
   OpenWrt, собранный под плату, исходники и `build.sh` в
   [`tools/uboot-mi-router-4a-gigabit-v2`](tools/uboot-mi-router-4a-gigabit-v2)
-  (CI его не собирает: берите тот, что на вашем роутере). Один бинарник
-  для 16, 32 и 64 МБ: разметка Xiaomi, `firmware` обрезается по чипу,
-  чипы больше 16 МБ — через регистр банка (чип остаётся в 3-байтном
-  режиме, в котором его читает boot ROM после перезагрузки), меню
-  загрузки с восстановлением по TFTP, MAC из `factory`.
+  (собранный бинарник, дополненный до раздела `u-boot` 0x30000, —
+  `u-boot.bin` там же; CI его не собирает).
+  Один бинарник для 16, 32 и 64 МБ: разметка Xiaomi, `firmware`
+  обрезается по чипу, чипы больше 16 МБ — через регистр банка (чип
+  остаётся в 3-байтном режиме, в котором его читает boot ROM после
+  перезагрузки), меню загрузки с восстановлением по TFTP, MAC из
+  `factory`, жёлтый светодиод статуса горит.
 
 ```bash
 # DIR: загрузчик (*mtd0*.bin или *u-boot*.bin), *factory*.bin
@@ -644,7 +646,8 @@ tools/                    prepare-nand.sh, mknand.py, host-bridge.sh,
 tools/uboot-rutc50/       U-Boot пресета Teltonika RUTC50 (исходники,
                           build.sh, собранный FIP)
 tools/uboot-mi-router-4a-gigabit-v2/  U-Boot 4A Gigabit v2 с флешкой
-                          32 / 64 МБ (исходники, build.sh)
+                          32 / 64 МБ (исходники, build.sh,
+                          собранный бинарник)
 tools/ib-flash-size.py    образ OpenWrt под SPI-NOR побольше (ImageBuilder)
 windows/                  лаунчер, редактор пресетов, терминал (C#),
                           README.txt для пакета
